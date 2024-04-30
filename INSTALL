@@ -1,0 +1,11 @@
+svn co svn+ssh://mates@l:/home/mates/svn/pyrt
+
+You will need to get a working atlas binary to your $PATH
+
+There used to be a dependency on atpy and kapteyn, but they turned out
+problematic and recent versions were stripped of both. Anyway, there may be
+some forgotten code, so if I it complains try one of these:
+
+pip install atpy
+pip install kapteyn (may not work, then kapteyn from source)
+
