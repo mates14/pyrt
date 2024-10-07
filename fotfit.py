@@ -164,8 +164,8 @@ class fotfit(termfit.termfit):
             model += ga*np.exp(-radius2*25/gw)
     #        print("Fu! "+str(ga*np.exp(-radius2/gw)))
 
-        if hyp:
-            model += ha * self.hyperbola(hm - x, hn)
+#        if hyp:
+#            model += ha * self.hyperbola(hm - x, hn)
 
         if expo:
             if radius2 is None: radius2=coord_x*coord_x+coord_y*coord_y

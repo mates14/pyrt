@@ -19,6 +19,7 @@ class termfit:
     fixterms = []
     fixvalues = []
     sigma = np.nan
+    variance = np.nan
     ndf = np.nan
     wssr = np.nan
     wssrndf = np.nan
@@ -115,6 +116,7 @@ class termfit:
             i += 1
         output += "NDF     = %d\n"%(self.ndf)
         output += "SIGMA   = %.3f\n"%(self.sigma)
+        output += "VARIANCE= %.3f\n"%(self.variance)
         output += "WSSR/NDF= %.3f"%(self.wssrndf)
 
         return output
@@ -137,9 +139,11 @@ class termfit:
         self.fitvalues = []
         for x in res.x:
             self.fitvalues += [ x ]
-        self.ndf = 2*len(data[0]) - len(self.fitvalues)
+        # with two dimensional fit this does 2x the proper value (2x more data fitted)
+        self.ndf = len(data[0]) - len(self.fitvalues)
         self.wssr = np.sum(self.residuals(self.fitvalues, data))
         self.sigma = np.median(self.residuals0(self.fitvalues, data)) / 0.67
+        self.variance = np.median(self.residuals(self.fitvalues, data)) / 0.67
         self.wssrndf = self.wssr / self.ndf
 
         try:
@@ -176,6 +180,7 @@ class termfit:
             names=['term', 'val', 'err'])
         amodel.meta['name'] = self.modelname
         amodel.meta['sigma'] = self.sigma
+        amodel.meta['variance'] = self.variance
         amodel.meta['wssrndf'] = self.wssrndf
         amodel.write(file, format="ascii.ecsv", overwrite=True)
 
@@ -199,4 +204,5 @@ class termfit:
                 self.fiterrors += [param['err']]
 
         self.sigma = rmodel.meta['sigma']
+        self.variance = rmodel.meta['variance']
         self.wssrndf = rmodel.meta['wssrndf']

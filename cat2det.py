@@ -1,67 +1,52 @@
 #!/usr/bin/env python3
+""" convert a sextractor catalog + fits image file into a .det (ecsv) input for dophot
+Takes the image metadata, cleans it up, and into the data body of the ecsv loads the detections.
+So that dophot works with one file, can have minimal code and assume existence of certain essential keywords.
+"""
 
 import os
 import sys
+import argparse
+from contextlib import suppress
+
+import numpy as np
+import scipy.optimize as opt
+
 import astropy
 import astropy.wcs
 import astropy.table
 from astropy.coordinates import SkyCoord
 from astropy.time import Time
-import numpy as np
-import argparse
-import scipy.optimize as opt
-#from kapteyn import kmpfit
+from astropy.coordinates import SkyCoord, EarthLocation
+import astropy.units as u
 
-def delin(arg):
+def delin(number):
     """cauchy delinearization to give outliers less weight and have more robust fitting"""
     try:
-        ret=np.sqrt(np.log1p(arg**2))
+        # arctan version
+        # ret = np.sqrt(np.arctan(number**2))
+        # cauchy version
+        ret = np.sqrt(np.log1p(number**2))
     except RuntimeWarning:
-#        print(str(arg))
-        ret=np.sqrt(np.log1p(arg**2))
+        ret = np.sqrt(np.log1p(number**2))
     return ret
-
-# h(x,r)=r*sqrt(1+x*x/r/r)
-# gnuplot> plot "20050717204005-238df.fits.xat" u 4:(log10($5)), h(x-B1,R)*dQ+(x-L1)/Q
-# gnuplot> plot "20050717204005-238df.fits.xat" u 4:5, 10**(h(x-B1,R)*dQ+(x-L1)/Q)
 
 def errormodel(params, data):
     """residuals used when fitting the magnitude limit"""
-    x, y = data
-    L1, Q = params
-#    if fix25:
-    return delin( y - (x-L1)/Q  )
-#    else:
-#        return delin(y-np.power(10.0,((x-L1)/Q)))
-
-def delin(arg):
-    """delinearization to give outliers less weight and have more robust fitting"""
-    # linear (no delinearization)
-    # return np.sqrt((r**2))
-
-    # cauchy
-    try:
-        ret=np.sqrt(np.log1p(arg**2))
-    except RuntimeWarning:
-        print(str(arg))
-        ret=np.sqrt(np.log1p(arg**2))
-    return ret
-
-    # arctan
-    # return np.sqrt(np.arctan(r**2))
+    return delin(data[1]-(data[0]-params[0])/params[1])
 
 def load_chip_id(header):
     """standard chip ID to be always the same"""
     try:
         chip = header['CCD_SER']
-    except:
+    except KeyError:
         #return -1,"unknown"
         return "unknown"
 
     if chip == "":
         try:
             chip = header['CCD_TYPE']
-        except:
+        except KeyError:
             chip = "unknown"
 
     if chip == "":
@@ -69,363 +54,355 @@ def load_chip_id(header):
 
     return chip
 
+def read_options(args=sys.argv[1:]):
+    """... take over the world, what else can a readOptions method do?"""
+    parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
+    parser.add_argument("-v", "--verbose", action='store_true', help="Print debugging info.")
+    parser.add_argument("-o", "--output", action='store_true', help="Output file.")
+    parser.add_argument("-n", "--nonlin", help="CCD is not linear, apply linear correction on mag.", action='store_true')
+    parser.add_argument("-f", "--filter", help="Override filter info from fits", type=str)
+    parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
+    opts = parser.parse_args(args)
+    return opts
 
-def readOptions(args=sys.argv[1:]):
-  parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
-  parser.add_argument("-v", "--verbose", action='store_true', help="Print debugging info.")
-  parser.add_argument("-o", "--output", action='store_true', help="Output file.")
-  parser.add_argument("-n", "--nonlin", help="CCD is not linear, apply linear correction on mag.", action='store_true')
-  parser.add_argument("-f", "--filter", help="Override filter info from fits", type=str)
-  parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
-  opts = parser.parse_args(args)
-  return opts
+def fix_time(hdr, verbose=False):
+    """fixes time-related problems in a FITS header"""
 
-options = readOptions(sys.argv[1:])
+    # these three need to be put in sync together with a few lower priority keywords
+    jd_ctime = np.nan # CTIME made from JD
+    do_ctime = np.nan # CTIME made from DATE-OBS
+    ux_ctime = np.nan # Unix
+    mjd_ctime = np.nan # MJD
 
+    # This keyword is mandatory in an astronomical FITS image header
+    with suppress(KeyError): do_ctime = Time(hdr['DATE-OBS']).to_value('unix')
+    if verbose and np.isnan(do_ctime): print("No DATE-OBS? That's BAD!")
 
-for arg in options.files:
+    with suppress(KeyError): jd_ctime = (hdr['JD_START'] - 2440587.5) * 86400
+    with suppress(KeyError): jd_ctime = (hdr['JD'] - 2440587.5) * 86400
+    with suppress(KeyError): mjd_ctime = (hdr['MJD'] - 40587.0) * 86400
+    with suppress(KeyError): mjd_ctime = (hdr['MJD-OBS'] - 40587.0) * 86400
+    usec = 0
+    with suppress(KeyError): usec = hdr['USEC']
+    with suppress(KeyError): ux_ctime = np.float64(hdr['CTIME'] + usec/1000000.)
 
-    i_have_cat = False
-    i_have_fits = False
-    # either the argument may be a fits file or it may be an output of sextractor
-    try:
-        det = astropy.io.ascii.read(arg, format='sextractor')
-        if options.verbose: print("Argument %s is a sextractor catalog"%(arg))
-        i_have_cat = True
-        arg_is_cat = True
-    except:
-        arg_is_cat = False
-    
-    # either the argument may be a fits file or it may be an output of sextractor
-    try:
-        fitsfile = astropy.io.fits.open(arg)
-        if options.verbose: print("Argument %s is a fits file"%(arg))
-        filef = arg
-        i_have_fits = True
-        arg_is_fits = True
-    except:
-        arg_is_fits = False
+    # and now... there are up to four possible sources of time, so lets check if they are in sync
+    # and sync them if they are not
 
-    if not (arg_is_cat or arg_is_fits): 
-        if options.verbose: print("Argument %s is not a fits nor a sextractor catalog, pass"%(arg))
-        continue
-    
-    if arg_is_fits:
-        catf = arg + ".xat"
-        try:
-            det = astropy.io.ascii.read(catf, format='sextractor')
-            i_have_cat = True
-        except:
-            catf = os.path.splitext(arg)[0] + ".cat"
-            try:
-                det = astropy.io.ascii.read(catf, format='sextractor')
-                i_have_cat = True
-            except:
-                try:
-                    catf = arg + ".xat"
-                    print("Running sscat-noradec %s"%(arg))
-                    os.system("sscat-noradec %s"%(arg))
-                    det = astropy.io.ascii.read(catf, format='sextractor')
-                    i_have_cat = True
-                except:
-                    print("%s: is an image but I found no sextractor output, pass"%(arg))
-                    continue
-        if options.verbose: print("Will use %s as a sextractor catalog"%(catf))
-           
-    if arg_is_cat:
-        filef = os.path.splitext(arg)[0]
-        try:
-            fitsfile = astropy.io.fits.open(filef) 
-            i_have_fits = True
-        except:
-            filef = filef + ".fits"
-            try:
-                fitsfile = astropy.io.fits.open(filef) 
-                i_have_fits = True
-            except:
-                print("%s: is a sextractor output but I found no related fitsfile, pass"%(arg))
-                continue
-        if options.verbose: print("Will use %s as a fits file"%(filef))
-    
-    output = os.path.splitext(filef)[0] + ".det"
-    if options.verbose: print("Will use %s as an output file"%(output))
+    # in the older frames from RTS2, the CTIME is rounded to full minute or so, so it is not authoritative
+    # most precise there is CTIME+USEC/1e6
 
-#    if not (i_have_fits and i_have_cat):
-#        print("%s: cannot open either catalog or a fitsfile"%(arg))
-#        continue
+    ux_jd = ux_ctime - jd_ctime
+    ux_mjd = ux_ctime - mjd_ctime
+    ux_do = ux_ctime - do_ctime
+    jd_mjd = jd_ctime - mjd_ctime
+    jd_do = jd_ctime - do_ctime
+    mjd_do = mjd_ctime - do_ctime
 
-    det.meta['FITSFILE'] = filef
+    if not np.isnan(ux_jd ) and  ux_jd > 0.001 and verbose: print(f"ux/jd  time info differ by {ux_jd}s!")
+    if not np.isnan(ux_mjd) and ux_mjd > 0.001 and verbose: print(f"ux/mjd time info differ by {ux_mjd}s!")
+    if not np.isnan(ux_do ) and  ux_do > 0.001 and verbose: print(f"ux/do  time info differ by {ux_do}s!")
+    if not np.isnan(jd_mjd) and jd_mjd > 0.001 and verbose: print(f"jd/mjd time info differ by {jd_mjd}s!")
+    if not np.isnan(jd_do ) and  jd_do > 0.001 and verbose: print(f"jd/do  time info differ by {jd_do}s!")
+    if not np.isnan(mjd_do) and mjd_do > 0.001 and verbose: print(f"mjd/do time info differ by {mjd_do}s!")
 
-    # remove zeros in the error column
-    det['MAGERR_AUTO'] = np.sqrt(det['MAGERR_AUTO']*det['MAGERR_AUTO']+0.0005*0.0005)
+    ctime = np.nan
+    if not np.isnan(ux_ctime) and np.isnan(ctime):
+        if verbose: print(f"JD set based on CTIME+USEC={ux_ctime:.6f}")
+        ctime = ux_ctime
+    if not np.isnan(do_ctime) and np.isnan(ctime):
+        if verbose: print(f"JD set based on DATE-OBS={do_ctime:.6f}")
+        ctime = do_ctime
+    if not np.isnan(mjd_ctime) and np.isnan(ctime):
+        if verbose: print(f"JD set based on MJD-OBS={do_ctime:.6f}")
+        ctime = mjd_ctime
+    if not np.isnan(jd_ctime) and np.isnan(ctime):
+        if verbose: print(f"JD set based on the original JD={do_ctime:.6f}")
+        ctime = jd_ctime
 
-    # === compute a detection limit from errorbars ===
-    # get all the objects from the input file
-    # fit it with:
-    # error = 10**((x-L1)/2.5)
-    # error = 10**((x-L1)/Q)
-    # odhad L1 muze byt zeropoint zmenseny o ~5
-    # fit [16:] 10**(-(L1-x)/2.5) "d50-n2.fits.xat" u ($4+22.881):5:5 via L1
-    # a pak s-sigma limit bude:
-    # l(s)=L1+Q*log10(1.091/s)
-
-    #fix25=False
-    fix25=True
-    p0 = [1, 2.5]
-    res = opt.least_squares(errormodel, p0, args=[(det['MAG_AUTO'],np.log10(det['MAGERR_AUTO']))] )
-#    fitobj = kmpfit.Fitter(residuals=errormodel, data=(det['MAG_AUTO'],np.log10(det['MAGERR_AUTO'])), xtol=1e-13)
-#    try:
-#        fitobj.fit(params0=p0)
-#    except RuntimeError:
-#        print(arg,": Magnitude limit fit failed!")
-#        continue
-#    det.meta['LIMFLX3'] = fitobj.params[0]+fitobj.params[1]*np.log10(1.091/3)
-#    det.meta['LIMFLX10'] = fitobj.params[0]+fitobj.params[1]*np.log10(1.091/30)
-    det.meta['LIMFLX3'] = res.x[0]+res.x[1]*np.log10(1.091/3)
-    det.meta['LIMFLX10'] = res.x[0]+res.x[1]*np.log10(1.091/30)
-
-    # stability testing of these limits tested at a series of short exposures of AD Leo was 1-sigma=0.013 mag. 
-    # level of accuracy of limits set this way depends on the undelying detection alorithm, its gain/rn settings and aperture
-    if options.verbose:
-        print(res)
-    """
-    if options.verbose:
-        print("3-sigma limit = %.3f mag\n30-sigma limit = %.3f mag"%(det.meta['LIMFLX3'],det.meta['LIMFLX10']))
-        print("\nFit limflux kmpfit output:")
-        print("====================")
-        print("Best-fit parameters:    ", fitobj.params)
-        print("Asymptotic error:      ", fitobj.xerror)
-        print("Error assuming red.chi^2=1: ", fitobj.stderr)
-        print("Chi^2 min:         ", fitobj.chi2_min)
-        print("Reduced Chi^2:       ", fitobj.rchi2_min)
-        print("Iterations:         ", fitobj.niter)
-        print("Number of free pars.:    ", fitobj.nfree)
-        print("Degrees of freedom:     ", fitobj.dof, "\n")
-    """
-
-    c = fitsfile[0].header
-    fitsfile.close()
-    
-    for i,j in c.items():
-        if i == 'NAXIS' or i == 'NAXIS1' or i== 'NAXIS2' or i == 'BITPIX': continue
-        if len(i)>8: continue
-        if "." in i: continue
-        det.meta[i] = j
-
-    det.meta['CHIP_ID'] = load_chip_id(c)
-
-    try:
-        latitude = np.float64(c['LATITUDE'])
-    except:
-        try:
-            latitude = np.float64(c['TEL_LAT'])
-        except:
-            latitude = 49.9090806 # BART Latitude
-    det.meta['LATITUDE'] = latitude
-
-    try:
-        longitude = np.float64(c['LONGITUD'])
-    except:
-        try:
-            longitude = np.float64(c['TEL_LONG'])
-        except:
-            longitude = 14.7819092 # BART Longitude
-    det.meta['LONGITUD'] = longitude
-
-    try:
-        altitude = np.float64(c['ALTITUDE'])
-    except:
-        try:
-            altitude = np.float64(c['TEL_ALT'])
-        except:
-            altitude = 530 # BART Altitude
-    det.meta['ALTITUDE'] = altitude
-
-
-    # get time of observations
-    ctime = None
-    try:
-        time = Time(det.meta['DATE-OBS'])
-        ctime = time.to_value('unix')
-        if options.verbose:
-            print("CTIME from DATE-OBS", ctime)
-        det.meta['JD'] = 2440587.5 + ctime/86400.
-    except:
-        print("No DATE-OBS? That's BAD BAD BAD!")
-
-    try:
-        julian_date = np.float64(c['JD_START'])
-    except KeyError:
-        try:
-            julian_date = np.float64(c['JD'])
-        except:
-            julian_date = 0
-
-    det.meta['JD_START'] = julian_date
-
-    try:
-        julian_date_end = np.float64(c['JD_END'])
-    except KeyError:
-        try:
-            julian_date_end = julian_date+np.float64(c['EXPTIME'])/86400
-        except:
-            try:
-                julian_date_end = julian_date+np.float64(c['EXPOSURE'])/86400
-            except:
-                julian_date_end = 0
-
-    det.meta['JD_END'] = julian_date_end
-
-    try:
-        usec = c['USEC']
-    except:
-        usec = 0
-
-    try:
-        ctime = np.float64(c['CT_START']) 
-    except KeyError:
-        try:
-            ctime = np.float64(c['CTIME']) 
-        except KeyError:
-            ctime = 0
-
-    tsec = np.float64(ctime+usec/1000000.)
-
-    try:
-        tsecend = np.float64(c['CT_END'])
-    except KeyError:
-        try:
-            tsecend = tsec+np.float64(c['EXPTIME'])
-        except KeyError:
-            tsecend = 0
-
-    tsecend = np.float64(ctime+usec/1000000.)
-
-    # this is a wrong but far the most reliable solution (wrong:leap secs?)
-    if tsec > 0:
-        det.meta['JD'] = 2440587.5 + tsec/86400.
-    if tsecend > 0:
-        det.meta['JD_END'] = 2440587.5 + tsecend/86400.
+    # old comment: this is a wrong but by far the most reliable solution (wrong:leap secs?)
+    # fact: actually JD and CTIME are the same thing defined precisely this way
+    # Actually, the only time dophot uses is CTIME, so I wiped from here all other time keyword messing
+    if not np.isnan(ctime):
+        hdr['JD'] = 2440587.5 + ctime/86400.
 
     # if I do not set this, the following WCS load will complain
-    det.meta['MJD-OBS'] = det.meta['JD'] - 2400000.5
-#    print("JD="+str(det.meta['JD']),"JD_END="+str(det.meta['JD_END']));
+    hdr['MJD-OBS'] = hdr['JD'] - 2400000.5
 
-   # det.meta['RADECSYSa']=det.meta['RADECSYS']
-   # print(type(det.meta))
-   # del det.meta['RADECSYS']
+    time = astropy.time.Time(hdr['JD'], format='jd')
 
-    if options.verbose:
-        print("MJD-OBS=%.6f"%(det.meta['MJD-OBS']))
+    # for stellar physics with high time resolution, BJD is very useful
+    ondrejov = EarthLocation(lat=hdr['LATITUDE']*u.deg, lon=hdr['LONGITUD']*u.deg, height=hdr['ALTITUDE']*u.m)
+    with suppress(KeyError): 
+        target = SkyCoord(hdr['ORIRA'], hdr['ORIDEC'], unit=u.deg)
+        hdr['BJD'] = hdr['JD'] + time.light_travel_time(target, kind='barycentric', location=ondrejov,
+            ephemeris='builtin').to_value('jd',subfmt='float')
 
-    imgwcs = astropy.wcs.WCS(det.meta)
-    
-    if options.filter != None:
-        fits_fltr = options.filter
+def get_limits(det, verbose=False):
+    """ compute a detection limit from errorbars
+        get all the objects from the input file
+        fit it with:
+        error = 10**((x-L1)/2.5)
+        error = 10**((x-L1)/Q)
+        guess of L1 may be the zeropoint-5, but a practical use shows a unity is good enough
+        fit [16:] 10**(-(L1-x)/2.5) "d50-n2.fits.xat" u ($4+22.881):($5*log(2.5)*3):5 via L1
+        and then s-sigma limit is:
+        l(s)=L1+Q*log10(1.091/s)
+        stability testing of these limits tested at a series of short exposures of AD Leo was 1-sigma=0.013 mag.
+        level of accuracy of limits set this way depends on the underlying detection alorithm, its gain/rn settings and aperture
+    """
+    res = opt.least_squares(errormodel, [1, 2.5], args=[(det['MAG_AUTO'],np.log10(det['MAGERR_AUTO'] * np.log(2.5) * 3))] )
+    det.meta['LIMFLX3'] = res.x[0]
+    det.meta['LIMFLX10'] = res.x[0]+res.x[1]*np.log10(1.091/10)
+
+    try:
+        cov = np.linalg.inv(res.jac.T.dot(res.jac))
+        fiterrors = np.sqrt(np.diagonal(cov))
+        if not np.isnan(fiterrors[0]):
+            det.meta['DLIMFLX3'] = fiterrors[0]
+        else:
+            det.meta['DLIMFLX3'] = 0
+    except:
+        fiterrors = res.x*np.nan
+
+    if verbose and res.success:
+        print(f"Limits fitted, LIMFLX3 = {det.meta['LIMFLX3']:.3f} +/- {det.meta['DLIMFLX3']:.3f}")
+    if verbose and not res.success:
+        print("Fitting limits failed")
+
+def try_img(arg, verbose=False):
+    """Try to open arg as a fits file, exit cleanly if it does not happen"""
+    try:
+        with suppress(astropy.wcs.FITSFixedWarning):
+            fitsfile = astropy.io.fits.open(arg)
+        if verbose: print(f"Argument {arg} is a fits file")
+        return arg, fitsfile
+    except (FileNotFoundError,OSError):
+        if verbose: print(f"Argument {arg} is not a fits file")
+        return None, None
+
+def try_sex(arg, verbose=False):
+    """Try to open arg as a sextractor file, exit cleanly if it does not happen"""
+    try:
+        det = astropy.io.ascii.read(arg, format='sextractor')
+        if verbose: print(f"Argument {arg} is a sextractor catalog")
+        return arg, det
+    except (FileNotFoundError,OSError,UnicodeDecodeError,astropy.io.ascii.core.InconsistentTableError):
+        if verbose: print(f"Argument {arg} is not a sextractor catalog")
+        return None, None
+
+def try_ecsv(arg, verbose=False):
+    """Try to open arg as a sextractor file, exit cleanly if it does not happen"""
+    try:
+        det = astropy.io.ascii.read(arg, format='ecsv')
+        det.meta=None # certainly contains interesting info, but breaks the code
+        if verbose: print(f"Argument {arg} is an ascii/ecsv catalog")
+        return arg, det
+    except (FileNotFoundError,OSError,UnicodeDecodeError):
+        if verbose: print(f"Argument {arg} is not an ascii/ecsv catalog")
+        return None, None
+
+def open_files(arg, verbose=False):
+    """sort out the argument and open appropriate files"""
+    # either the argument may be a fits file or it may be an output of sextractor
+    detf, det = try_sex(arg, verbose)
+    if det is None: detf, det = try_ecsv(arg,verbose)
+
+    imgf, img = try_img(arg, verbose)
+
+    if det is None and img is None:
+        print(f"Error: Argument {arg} is not a fits nor a sextractor catalog")
+        raise FileNotFoundError
+
+    if img is None: imgf, img = try_img(os.path.splitext(arg)[0], verbose)
+    if img is None: imgf, img = try_img(os.path.splitext(arg)[0] + ".fits", verbose)
+    if det is None: detf, det = try_sex(arg + ".xat", verbose)
+    if det is None: detf, det = try_sex(os.path.splitext(arg)[0] + ".cat", verbose)
+
+    if det is None: # os.system does not raise an exception if it fails
+        #cmd = f"sscat-noradec {arg}"
+        cmd = f"phcat.py {arg}"
+        if verbose: print(f"Running {cmd}")
+        os.system(cmd)
+        detf, det = try_ecsv(os.path.splitext(arg)[0] + ".cat",verbose)
+        if det is None: detf, det = try_sex(arg + ".xat", verbose)
+
+    if det is None:
+        cmd = f"mkcat {arg}"
+        if verbose: print(f"Running {cmd}")
+        os.system(cmd)
+        detf, det = try_sex(os.path.splitext(arg)[0] + ".cat", verbose)
+
+    if det is None or img is None:
+        print(f"Error: Cannot couple fits image and sextractor list for argument {arg}")
+        raise FileNotFoundError
+
+    if os.path.getmtime(imgf) > os.path.getmtime(detf):
+        if verbose: print(f"Warning: {imgf} is {os.path.getmtime(imgf)-os.path.getmtime(detf):.0f}s newer than {detf}!")
+
+    return det,imgf,img
+
+def fix_latlon(hdr, verbose=False):
+    """ Fix the lat/lon/alt information in the file, fallback to Ondrejov if it is not there
+    Ondrejov fallback is generally harmless, but the keywords are required, so it is there"""
+
+    latitude = 49.9090806 # BART Latitude
+    with suppress(KeyError): latitude = np.float64(hdr['TEL_LAT'])
+    with suppress(KeyError): latitude = np.float64(hdr['LATITUDE'])
+    hdr['LATITUDE'] = latitude
+
+    longitude = 14.7819092 # BART Longitude
+    with suppress(KeyError): longitude = np.float64(hdr['TEL_LONG'])
+    with suppress(KeyError): longitude = np.float64(hdr['LONGITUD'])
+    hdr['LONGITUD'] = longitude
+
+    altitude = 530 # BART Altitude
+    with suppress(KeyError): altitude = np.float64(hdr['TEL_ALT'])
+    with suppress(KeyError): altitude = np.float64(hdr['ALTITUDE'])
+    hdr['ALTITUDE'] = altitude
+
+    if verbose: print(f"Observatory at {hdr['LONGITUD']:.3f},{hdr['LATITUDE']:.3f} at {hdr['ALTITUDE']:.0f}m ")
+
+def fix_filter(hdr, verbose=False, opt_filter=None):
+    """Fix the filter keyword (multiple variants of the same filter etc.)"""
+
+    old_fltr = "(not_present)"
+    if opt_filter is not None:
+        fits_fltr = opt_filter
     else:
-            try:
-                fits_fltr = c['FILTER']
-            except:
-                fits_fltr = 'N'
+        try:
+            old_fltr = hdr['FILTER']
+            fits_fltr = old_fltr
+        except KeyError:
+            fits_fltr = 'N'
 
-            if fits_fltr == "OIII": fits_fltr = "oiii"
-            if fits_fltr == "Halpha": fits_fltr = "halpha"
-            if fits_fltr == "u": fits_fltr = "Sloan_u"
-            if fits_fltr == "g": fits_fltr = "Sloan_g"
-            if fits_fltr == "r": fits_fltr = "Sloan_r"
-            if fits_fltr == "i": fits_fltr = "Sloan_i"
-            if fits_fltr == "z": fits_fltr = "Sloan_z"
-            if fits_fltr == "UNK": fits_fltr = "N"
-            if fits_fltr == "C": fits_fltr = "N"
-            if fits_fltr == "clear": fits_fltr = "N"
+        if fits_fltr == "OIII": fits_fltr = "oiii"
+        if fits_fltr == "Halpha": fits_fltr = "halpha"
+        if fits_fltr == "u": fits_fltr = "Sloan_u"
+        if fits_fltr == "g": fits_fltr = "Sloan_g"
+        if fits_fltr == "r": fits_fltr = "Sloan_r"
+        if fits_fltr == "i": fits_fltr = "Sloan_i"
+        if fits_fltr == "z": fits_fltr = "Sloan_z"
+        if fits_fltr == "UNK": fits_fltr = "N"
+        if fits_fltr == "C": fits_fltr = "N"
+        if fits_fltr == "clear": fits_fltr = "N"
 
-    det.meta['FILTER'] = fits_fltr
+    hdr['FILTER'] = fits_fltr
+    if verbose: print(f"Filter changed from {old_fltr} to {fits_fltr}")
 
-    # RTS2 names the object coordinates LOGICALLY!:
-    try:
-        det.meta['OBJRA'] = np.float64(c['ORIRA'])
-    except:
-        det.meta['OBJRA'] = -100
+def remove_junk(hdr):
+    """FITS files tend to be flooded with junk that accumulates over time
+    and it is difficult to deal with"""
+    for delme in ['comments','COMMENTS','history','HISTORY']:
+        try:
+            del hdr[delme]
+        except KeyError:
+            pass
 
-    try:
-        det.meta['OBJDEC'] = np.float64(c['ORIDEC'])
-    except:
-        det.meta['OBJDEC'] = -100
+def main():
+    """C-like main() routine"""
+    options = read_options(sys.argv[1:])
 
-    tmp = imgwcs.all_world2pix(det.meta['OBJRA'], det.meta['OBJDEC'], 0)
+    for arg in options.files:
 
-    if not np.isnan(tmp[0]):
-        det.meta['OBJX'] = np.float64(tmp[0])
-    if not np.isnan(tmp[1]):
-        det.meta['OBJY'] = np.float64(tmp[1])
-#    print("===",det.meta['OBJRA'],det.meta['OBJDEC'],"===")
-#    print("===",tmp[0],tmp[1],"===")
+        try:
+            det,filef,fitsfile = open_files(arg, verbose=options.verbose)
+        except FileNotFoundError:
+            continue
 
-    try:
-        det.meta['AIRMASS'] = c['AIRMASS']
-    except:
-        det.meta['AIRMASS'] = -1
+        det.meta['FITSFILE'] = filef
 
-    try:
-        exptime = c['EXPTIME']
-    except:
-        exptime = -1
+        # remove zeros in the error column
+        det['MAGERR_AUTO'] = np.sqrt(det['MAGERR_AUTO']*det['MAGERR_AUTO']+0.0005*0.0005)
 
-    try:
-        exptime__ = c['EXPOSURE']
-        exptime = exptime__
-    except:
-        nic = 0
+        c = fitsfile[0].header
+        fitsfile.close()
 
-    det.meta['EXPTIME'] = exptime
+        # copy most of the sensible keywords from img to det
+        for i,j in c.items():
+            if i in ('NAXIS', 'NAXIS1', 'NAXIS2', 'BITPIX'): continue
+            if len(i)>8: continue
+            if "." in i: continue
+            det.meta[i] = j
 
-    try:
-        obsid_n = c['OBSID']
-    except:
-        obsid_n = 0
+        # FIXME: this has been improved somewhere else
+        det.meta['CHIP_ID'] = load_chip_id(c)
 
-    try:
-        obsid_d = c['SCRIPREP']
-    except:
+        fix_latlon(det.meta, verbose=options.verbose)
+        fix_time(det.meta, verbose=options.verbose)
+        get_limits(det, verbose=options.verbose)
+
+        imgwcs = astropy.wcs.WCS(det.meta)
+
+        fix_filter(det.meta, verbose=options.verbose, opt_filter=options.filter)
+
+        det.meta['AIRMASS'] = 1.0
+        with suppress(KeyError): det.meta['AIRMASS'] = c['AIRMASS']
+
+        exptime = 0
+        with suppress(KeyError): exptime = c['EXPTIME']
+        with suppress(KeyError): exptime = c['EXPOSURE']
+        det.meta['EXPTIME'] = exptime
+
         obsid_d = 0
+        obsid_n = 0
+        with suppress(KeyError): obsid_n = c['OBSID']
+        with suppress(KeyError): obsid_d = c['SCRIPREP']
+        det.meta['OBSID'] = f"{obsid_n:0d}.{obsid_d:02d}"
 
-    det.meta['OBSID'] = "%0d.%02d"%(obsid_n, obsid_d)
+        # RTS2 true target coordinates: ORIRA/ORIDEC
+        # it sounds stupid, but comes from complicated telescope pointing logic
+        det.meta['OBJRA'] = -100
+        with suppress(KeyError): det.meta['OBJRA'] = np.float64(c['ORIRA'])
+        det.meta['OBJDEC'] = -100
+        with suppress(KeyError): det.meta['OBJDEC'] = np.float64(c['ORIDEC'])
 
-    det.meta['CTRX'] = c['NAXIS1']/2
-    det.meta['CTRY'] = c['NAXIS2']/2
-    # NAXIS1/2 will not stay in the header
-    det.meta['IMGAXIS1'] = c['NAXIS1']
-    det.meta['IMGAXIS2'] = c['NAXIS2']
-    rd = imgwcs.all_pix2world([[det.meta['CTRX'], det.meta['CTRY']], [0, 0], [det.meta['CTRX'], det.meta['CTRY']+1]], 0)
-    #print(rd)
+        try:
+            tmp = imgwcs.all_world2pix(det.meta['OBJRA'], det.meta['OBJDEC'], 0)
+        except RuntimeError:
+            print("Error: Bad astrometry, cannot continue")
+            continue
+
+        if options.verbose: print(f"Target is {det.meta['OBJECT']} at ra:{det.meta['OBJRA']} dec:{det.meta['OBJDEC']} -> x:{tmp[0]} y:{tmp[1]}")
+
+        det.meta['CTRX'] = c['NAXIS1']/2
+        det.meta['CTRY'] = c['NAXIS2']/2
+        # NAXIS1/2 are bound to the image - they will not stay in the header
+        det.meta['IMGAXIS1'] = c['NAXIS1']
+        det.meta['IMGAXIS2'] = c['NAXIS2']
+        rd = imgwcs.all_pix2world([[det.meta['CTRX'], det.meta['CTRY']], [0, 0], [det.meta['CTRX'], det.meta['CTRY']+1]], 0)
+
+        det.meta['CTRRA'] = rd[0][0]
+        det.meta['CTRDEC'] = rd[0][1]
+
+        center = SkyCoord(rd[0][0]*astropy.units.deg, rd[0][1]*astropy.units.deg, frame='fk5')
+        corner = SkyCoord(rd[1][0]*astropy.units.deg, rd[1][1]*astropy.units.deg, frame='fk5')
+        pixel = SkyCoord(rd[2][0]*astropy.units.deg, rd[2][1]*astropy.units.deg, frame='fk5').separation(center)
+        field = center.separation(corner)
+        if options.verbose:
+            print(f"Field size: {field.deg:.2f}°, Pixel size: {pixel.arcsec:.2f}\"")
+
+        det.meta['FIELD'] = field.deg
+        det.meta['PIXEL'] = pixel.arcsec
+
+        try:
+            fwhm = c['FWHM']
+    #        if fwhm < 0.5:
+    #            fwhm = 2
+            if options.verbose:
+                print(f"Detected FWHM {fwhm:.1f} pixels ({fwhm*pixel.arcsec:.1f}\")")
+        except KeyError:
+            fwhm = 2
+            if options.verbose:
+                print(f"Set FWHM {fwhm:.1f} pixels ({fwhm*pixel.arcsec:.1f}\")")
+        det.meta['FWHM'] = fwhm
+
+        remove_junk(det.meta)
     
-    det.meta['CTRRA'] = rd[0][0]
-    det.meta['CTRDEC'] = rd[0][1]
+        output = os.path.splitext(filef)[0] + ".det"
+        if options.verbose: print(f"Writing output file {output}")
+        det.write(output, format="ascii.ecsv", overwrite=True)
 
-    center = SkyCoord(rd[0][0]*astropy.units.deg, rd[0][1]*astropy.units.deg, frame='fk5')
-    corner = SkyCoord(rd[1][0]*astropy.units.deg, rd[1][1]*astropy.units.deg, frame='fk5')
-    pixel = SkyCoord(rd[2][0]*astropy.units.deg, \
-        rd[2][1]*astropy.units.deg, frame='fk5').separation(center)
-    field = center.separation(corner)
-    if options.verbose:
-        print("Field size: %.2f°"%(field.deg))
-        print("Pixel size: %.2f\""%(pixel.arcsec))
-
-    det.meta['FIELD'] = field.deg
-    det.meta['PIXEL'] = pixel.arcsec
-
-    try:
-        fwhm = c['FWHM']
-        if fwhm < 0.5: 
-                fwhm = 2
-    except:
-        fwhm = 2
-
-    if options.verbose:
-        print("Detected FWHM %.1f pixels (%.1f\")"%(fwhm, fwhm*pixel.arcsec))
-
-    det.meta['FWHM'] = fwhm
-
-#    det.write(output, format="fits", overwrite=True)
-    det.write(output, format="ascii.ecsv", overwrite=True)
-
+# this way, the variables local to main() are not globally available, avoiding some programming errors
+if __name__ == "__main__":
+    main()

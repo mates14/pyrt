@@ -230,12 +230,14 @@ int write_var(int var, STAR *star);
 /* Global variables */
 int VERBOSE=0;
 
+char *rootspec = "/home/mates/atlas/00_m_16";	// Root directory
 
 int main(int argc, char **argv)
 {
    int i, j, k, m, nstar, nalloc, rect, infmt, outfmt, hdr;
    char *exten, *bindir, *degin, fname[1024];
-   char *rootspec, *rootdir[44], *varlist, *vptr, var[1024];
+   // char *rootspec, 
+   char *rootdir[44], *varlist, *vptr, var[1024];
    int ndir, nvar, varidx[44];
    double mlim, rlim, dr=atan(1.0)/45, pi=4*atan(1.0);
    double ra0, dec0, dra, ddec, decmin, decmax, ra, dec, sina, sind, cosa;
@@ -260,8 +262,6 @@ int main(int argc, char **argv)
 
 /* Defaults */
    //rootspec = "/atlas/cal/RC2/m17";	// Root directory
-   //rootspec = "/home/mates/atlas/m17";	// Root directory
-   rootspec = "/home/mates/cat/atlas/00_m_16";	// Root directory
    mlim = 18.0;		// Limiting magnitude for m<mlim
    rlim = 0.0;		// Limiting radius for rp1>rlim
    VERBOSE = 0;		// Verbosity level
@@ -1221,7 +1221,7 @@ void syntax(char *prog)
    printf("  returns stars close to ra, dec from ATLAS Refcat2 sqdeg files\n");
    printf("\nOptions include:\n");
 
-   printf("   -dir P       [default P=/atlas/cal/RC2/m17]\n");
+   printf("   -dir P       [default P=%s]\n", rootspec);
    printf("     Read the data files from directory P\n");
    printf("   -exten X     [default X=rc2]\n");
    printf("     Data files have file names P/rrr+dd.X\n");
