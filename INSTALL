@@ -1,11 +1,14 @@
-svn co svn+ssh://mates@l:/home/mates/svn/pyrt
+git pull git@github.com:mates14/pyrt main
 
-You will need to get a working atlas binary to your $PATH
+You need to download atlas catalogue from the Intenet (or ask me if it fails)
+Then compile the provided (modified original) atlas.c, and place the resulting atlas binary to your $PATH
+cc -lm atlas.c -o atlas
+install -m 666 atlas /usr/local/bin
 
-There used to be a dependency on atpy and kapteyn, but they turned out
-problematic and recent versions were stripped of both. Anyway, there may be
-some forgotten code, so if I it complains try one of these:
+At present, the catalog path is hard coded in the source, so you will need to find the path and modify it. 
+I will fix it, I promise. 
 
-pip install atpy
-pip install kapteyn (may not work, then kapteyn from source)
+You will need a working iraf and sextractor to run phcat.py, if you are happy with just sextractor, 
+phcat.py can be easily modified to do just that. 
 
+It should work then. If you run into problems, do not hesitate to contact me.
