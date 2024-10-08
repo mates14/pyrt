@@ -12,6 +12,7 @@ import astropy.io.fits
 def read_options(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
     parser.add_argument("-a", "--aperture", help="Override an automated aperture choice", type=float)
+    parser.add_argument("-I", "--noiraf", help="Do not use IRAF", action='store_true')
     parser.add_argument("-b", "--background", help="Save the background check image", action='store_true')
     parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
     opts = parser.parse_args(args)
@@ -153,19 +154,23 @@ def main():
         base = os.path.splitext(file)[0]
         det = call_sextractor(file, 1.5)
         det = call_sextractor(file, np.median(det[ det['MAGERR_AUTO'] < 1.091/10 ]['FWHM_IMAGE']), bg=options.background)
-        mag = call_iraf(file, det)
-        # merge det+mag
-        det.rename_columns(('MAG_AUTO','MAGERR_AUTO'), ('MAG_SEX','MAGERR_SEX'))
-        det.remove_columns(('X_IMAGE','Y_IMAGE','ERRX2_IMAGE','ERRY2_IMAGE'))
-        mag.rename_columns(('ID','XCENTER','YCENTER','XERR','YERR','MAG','MERR'),\
-                ('NUMBER','X_IMAGE','Y_IMAGE','ERRX2_IMAGE','ERRY2_IMAGE','MAG_AUTO','MAGERR_AUTO'))
-        mag.remove_columns(('XAIRMASS','IFILTER','XINIT','YINIT','IMAGE','COORDS','LID',\
-                'XSHIFT','YSHIFT','CERROR','SERROR','ITIME','OTIME','PERROR',\
-                'CIER','MSKY','STDEV','SSKEW','NSKY','NSREJ','SIER','SUM'
-                ))
-        tbl = astropy.table.join(det, mag, keys='NUMBER')
-        # table.write...
-        tbl = tbl[np.all([tbl['PIER'] == 0,tbl['FLUX'] > 0,tbl['MAGERR_AUTO']<1.091/2],axis=0)]
+
+        if options.noiraf:
+            tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
+        else:
+            mag = call_iraf(file, det)
+            # merge det+mag
+            det.rename_columns(('MAG_AUTO','MAGERR_AUTO'), ('MAG_SEX','MAGERR_SEX'))
+            det.remove_columns(('X_IMAGE','Y_IMAGE','ERRX2_IMAGE','ERRY2_IMAGE'))
+            mag.rename_columns(('ID','XCENTER','YCENTER','XERR','YERR','MAG','MERR'),\
+                    ('NUMBER','X_IMAGE','Y_IMAGE','ERRX2_IMAGE','ERRY2_IMAGE','MAG_AUTO','MAGERR_AUTO'))
+            mag.remove_columns(('XAIRMASS','IFILTER','XINIT','YINIT','IMAGE','COORDS','LID',\
+                    'XSHIFT','YSHIFT','CERROR','SERROR','ITIME','OTIME','PERROR',\
+                    'CIER','MSKY','STDEV','SSKEW','NSKY','NSREJ','SIER','SUM'
+                    ))
+            tbl = astropy.table.join(det, mag, keys='NUMBER')
+            # table.write...
+            tbl = tbl[np.all([tbl['PIER'] == 0,tbl['FLUX'] > 0,tbl['MAGERR_AUTO']<1.091/2],axis=0)]
         tbl.write(base+".cat", format="ascii.ecsv", overwrite=True)
         print(f'OBJECTS={len(tbl)}')
         #print(tbl)
