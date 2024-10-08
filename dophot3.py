@@ -677,6 +677,155 @@ def setup_logging(verbose):
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format='%(asctime)s - %(levelname)s - %(message)s')
 
+def write_results(data, ffit, options, alldet, target):
+    zero, zerr = ffit.zero_val()
+
+    for img, det in enumerate(alldet):
+        start = time.time()
+        if options.astrometry:
+            try:
+                astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "LIMMAG", 0, value=zero[img]+det.meta['LIMFLX3'])
+                astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "MAGZERO", 0, value=zero[img])
+                astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "RESPONSE", 0, value=ffit.oneline())
+            except Exception as e:
+                logging.warning(f"Writing LIMMAG/MAGZERO/RESPONSE to an astrometrized image failed: {e}")
+        logging.info(f"Writing to astrometrized image took {time.time()-start:.3f}s")
+
+        start = time.time()
+        fn = os.path.splitext(det.meta['detf'])[0] + ".ecsv"
+        det['MAG_CALIB'] = ffit.model(np.array(ffit.fitvalues), (det['MAG_AUTO'], det.meta['AIRMASS'],
+            det['X_IMAGE']/1024-det.meta['CTRX']/1024, det['Y_IMAGE']/1024-det.meta['CTRY']/1024,0,0,0,0, img,0,0))
+        det['MAGERR_CALIB'] = np.sqrt(np.power(det['MAGERR_AUTO'],2)+np.power(zerr[img],2))
+
+        det.meta['MAGZERO'] = zero[img]
+        det.meta['DMAGZERO'] = zerr[img]
+        det.meta['MAGLIMIT'] = det.meta['LIMFLX3']+zero[img]
+        det.meta['WSSRNDF'] = ffit.wssrndf
+        det.meta['RESPONSE'] = ffit.oneline()
+
+        if (zerr[img] < 0.2) or (options.reject is None):
+            det.write(fn, format="ascii.ecsv", overwrite=True)
+        else:
+            if options.verbose:
+                logging.warning("rejected (too large uncertainty in zeropoint)")
+            with open("rejected", "a+") as out_file:
+                out_file.write(f"{det.meta['FITSFILE']} {ffit.wssrndf:.6f} {zerr[img]:.3f}\n")
+            sys.exit(0)
+        logging.info(f"Saving ECSV output took {time.time()-start:.3f}s")
+        
+        if options.flat or options.weight: 
+            start = time.time()
+            ffData = mesh_create_flat_field_data(det, ffit)
+            logging.info(f"Generating the flat field took {time.time()-start:.3f}s")
+        if options.weight: save_weight_image(det, ffData, options)
+        if options.flat: save_flat_image(det, ffData)
+
+        write_output_line(det, options, zero[img], zerr[img], ffit, target[img])
+
+def mesh_create_flat_field_data(det, ffit):
+    """
+    Create the flat field data array.
+    
+    :param det: Detection table containing metadata
+    :param ffit: Fitting object containing the flat field model
+    :return: numpy array of flat field data
+    """
+    logging.info("Generating the flat-field array")
+    shape = (det.meta['IMGAXIS2'], det.meta['IMGAXIS1'])
+    y, x = np.meshgrid(np.arange(shape[0]), np.arange(shape[1]), indexing='ij')
+    
+    return ffit.mesh_flat(x, y, 
+                     ctrx=det.meta['CTRX'], 
+                     ctry=det.meta['CTRY'], 
+                     img=det.meta['IMGNO'])
+
+def old_create_flat_field_data(det, ffit):
+    """
+    Create the flat field data array.
+    
+    :param det: Detection table containing metadata
+    :param ffit: Fitting object containing the flat field model
+    :return: numpy array of flat field data
+    """
+    logging.info("Generating the flat-field array")
+    return np.fromfunction(ffit.old_flat, [det.meta['IMGAXIS2'], det.meta['IMGAXIS1']],
+        ctrx=det.meta['CTRX'], ctry=det.meta['CTRY'], img=det.meta['IMGNO'])
+
+def save_weight_image(det, ffData, options):
+    """
+    Generate and save the weight image.
+    
+    :param det: Detection table containing metadata
+    :param ffData: Flat field data array
+    :param options: Command line options
+    """
+    start = time.time()
+    gain = options.gain if options.gain is not None else 2.3
+    wwData = np.power(10, -0.4 * (22 - ffData))
+    wwData = np.power(wwData * gain, 2) / (wwData * gain + 3.1315 * np.power(det.meta['BGSIGMA'] * gain * det.meta['FWHM'] / 2, 2))
+    wwHDU = astropy.io.fits.PrimaryHDU(data=wwData)
+    weightfile = os.path.splitext(det.meta['filename'])[0] + "w.fits"
+
+    if os.path.isfile(weightfile):
+        logging.warning(f"Operation will overwrite an existing image: {weightfile}")
+        os.unlink(weightfile)
+
+    with astropy.io.fits.open(weightfile, mode='append') as wwFile:
+        wwFile.append(wwHDU)
+    
+    logging.info(f"Weight image saved to {weightfile}")
+    logging.info(f"Writing the weight file took {time.time()-start:.3f}s")
+
+def save_flat_image(det, ffData):
+    """
+    Generate and save the flat image.
+    
+    :param det: Detection table containing metadata
+    :param ffData: Flat field data array
+    """
+    start = time.time()
+    flatData = np.power(10, 0.4 * (ffData - 8.9))
+    ffHDU = astropy.io.fits.PrimaryHDU(data=flatData)
+    flatfile = os.path.splitext(det.meta['filename'])[0] + "f.fits"
+
+    if os.path.isfile(flatfile):
+        logging.warning(f"Operation will overwrite an existing image: {flatfile}")
+        os.unlink(flatfile)
+
+    with astropy.io.fits.open(flatfile, mode='append') as ffFile:
+        ffFile.append(ffHDU)
+    
+    logging.info(f"Flat image saved to {flatfile}")
+    logging.info(f"Writing the flatfield file took {time.time()-start:.3f}s")
+
+def write_output_line(det, options, zero, zerr, ffit, target):
+    tarid = det.meta.get('TARGET', 0)
+    obsid = det.meta.get('OBSID', 0)
+
+    chartime = det.meta['JD'] + det.meta['EXPTIME'] / 2
+    if options.date == 'char':
+        chartime = det.meta.get('CHARTIME', chartime)
+    elif options.date == 'bjd':
+        chartime = det.meta.get('BJD', chartime)
+
+    if target is not None:
+        tarx = target['X_IMAGE']/1024 - det.meta['CTRX']/1024
+        tary = target['Y_IMAGE']/1024 - det.meta['CTRY']/1024
+        data_target = np.array([[target['MAG_AUTO']], [det.meta['AIRMASS']], [tarx], [tary], [0], [0], [0], [0], [det.meta['IMGNO']], [0], [0]])
+        mo = ffit.model(np.array(ffit.fitvalues), data_target)
+
+        out_line = f"{det.meta['FITSFILE']} {det.meta['JD']:.6f} {chartime:.6f} {det.meta['FILTER']} {det.meta['EXPTIME']:3.0f} {det.meta['AIRMASS']:6.3f} {det.meta['IDNUM']:4d} {zero:7.3f} {zerr:6.3f} {det.meta['LIMFLX3']+zero:7.3f} {ffit.wssrndf:6.3f} {mo[0]:7.3f} {target['MAGERR_AUTO']:6.3f} {tarid} {obsid} ok"
+    else:
+        out_line = f"{det.meta['FITSFILE']} {det.meta['JD']:.6f} {chartime:.6f} {det.meta['FILTER']} {det.meta['EXPTIME']:3.0f} {det.meta['AIRMASS']:6.3f} {det.meta['IDNUM']:4d} {zero:7.3f} {zerr:6.3f} {det.meta['LIMFLX3']+zero:7.3f} {ffit.wssrndf:6.3f}  99.999  99.999 {tarid} {obsid} not_found"
+
+    print(out_line)
+
+    try:
+        with open("dophot.dat", "a") as out_file:
+            out_file.write(out_line + "\n")
+    except Exception as e:
+        print(f"Error writing to dophot.dat: {e}")
+
 # ******** main() **********
 
 def main():
@@ -860,7 +1009,6 @@ def main():
 
     data.finalize()
 
-
     if imgno == 0:
         print("No images found to work with, quit")
         sys.exit(0)
@@ -909,120 +1057,11 @@ def main():
     # ASTROMETRY END
 
     if options.stars:
+        start = time.time()
         write_stars_file(data, ffit, imgwcs)
+        logging.info(f"Saving the stars file took {time.time()-start:.3f}s")
 
-    zero, zerr = ffit.zero_val()
-
-    for img in range(0, imgno):
-        if options.astrometry:
-            try:
-                astropy.io.fits.setval( os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "LIMMAG", 0, value=zero[img]+metadata[img]['LIMFLX3'])
-                astropy.io.fits.setval( os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "MAGZERO", 0, value=zero[img])
-                astropy.io.fits.setval( os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "RESPONSE", 0, value=ffit.oneline())
-            except: print("Writing LIMMAG/MAGZERO/RESPONSE to an astrometrized image failed")
-
-        det = alldet[img]
-
-        fn = os.path.splitext(det.meta['detf'])[0] + ".ecsv"
-        det['MAG_CALIB'] = ffit.model(np.array(ffit.fitvalues), (det['MAG_AUTO'], metadata[img]['AIRMASS'], \
-            det['X_IMAGE']/1024-metadata[img]['CTRX']/1024, det['Y_IMAGE']/1024-metadata[img]['CTRY']/1024,0,0,0,0, img,0,0)  )
-        det['MAGERR_CALIB'] = np.sqrt(np.power(det['MAGERR_AUTO'],2)+np.power(zerr[img],2))
-
-        det.meta['MAGZERO'] = zero[img]
-        det.meta['DMAGZERO'] = zerr[img]
-        det.meta['MAGLIMIT'] = metadata[img]['LIMFLX3']+zero[img]
-        det.meta['WSSRNDF'] = ffit.wssrndf
-        det.meta['RESPONSE'] = ffit.oneline()
-
-        if (zerr[img] < 0.2) or (options.reject is None):
-            det.write(fn, format="ascii.ecsv", overwrite=True)
-        else:
-            logging.info("rejected (too large uncertainity in zeropoint)")
-            out_file = open("rejected", "a+")
-            out_file.write(f"{metadata[0]['FITSFILE']} {ffit.wssrndf:.6f} {zerr[img]:.3f}\n")
-            out_file.close()
-            sys.exit(0)
-
-        if options.flat or options.weight:
-            print("generating the flat-field array")
-            ffData = np.fromfunction(ffit.flat, [metadata[img]['IMGAXIS2'], metadata[img]['IMGAXIS1']] ,
-                ctrx=metadata[img]['CTRX'], ctry=metadata[img]['CTRY'], img=img)
-            # this would convert image to Jy if gain == 1
-            if options.weight:
-                if options.gain is None:
-                    gain = 2.3
-                else:
-                    gain = options.gain
-
-                # weight = signal^2 / (signal+noise)  (expected signal, measured noise)
-                # expected signal for mag=m -> np.power(10,-0.4*(m - ffData)) (ffData is zeropoint)
-                wwData = np.power(10,-0.4*(22-ffData)) # weighting to mag 22
-                #wwData = np.power(wwData*gain,2) / (wwData*gain+78.5375*np.power(metadata[img]['BGSIGMA']*gain,2))
-                wwData = np.power(wwData*gain,2) / (wwData*gain + 3.1315 * np.power(metadata[img]['BGSIGMA']*gain*metadata[img]['FWHM']/2,2))
-                wwHDU = astropy.io.fits.PrimaryHDU(data=wwData)
-                weightfile = os.path.splitext(det.meta['filename'])[0] + "w.fits"
-
-                if os.path.isfile(weightfile):
-                    print("Operation will overwrite an existing image: ", weightfile)
-                    os.unlink(weightfile)
-
-                wwFile = astropy.io.fits.open(weightfile, mode='append')
-
-                wwFile.append(wwHDU)
-                wwFile.close()
-
-            if options.flat:
-                ffData = np.power(10,0.4*(ffData-8.9))
-                ffHDU = astropy.io.fits.PrimaryHDU(data=ffData)
-
-                flatfile = os.path.splitext(det.meta['filename'])[0] + "f.fits"
-
-                if os.path.isfile(flatfile):
-                    print("Operation will overwrite an existing image: ", flatfile)
-                    os.unlink(flatfile)
-
-                ffFile = astropy.io.fits.open(flatfile, mode='append')
-
-                ffFile.append(ffHDU)
-                ffFile.close()
-
-        tarid=0; tarid=0
-        with suppress(KeyError): tarid=metadata[img]['TARGET']
-        with suppress(KeyError): obsid=metadata[img]['OBSID']
-
-        chartime = metadata[img]['JD'] + metadata[img]['EXPTIME'] / 2
-        if options.date == 'char':
-            with suppress(KeyError): chartime = metadata[img]['CHARTIME']
-        if options.date == 'bjd':
-            with suppress(KeyError): chartime = metadata[img]['BJD']
-
-        if target[img] is not None:
-            tarx=target[img]['X_IMAGE']/1024-metadata[img]['CTRX']/1024
-            tary=target[img]['Y_IMAGE']/1024-metadata[img]['CTRY']/1024
-#            tarr=tarx*tarx+tary*tary
-
-            data_target = np.array([ [target[img]['MAG_AUTO']],[metadata[img]['AIRMASS']],[tarx],[tary],[0],[0],[0],[0],[img],[0],[0] ])
-            mo = ffit.model( np.array(ffit.fitvalues), data_target)
-
-            out_line="%s %14.6f %14.6f %s %3.0f %6.3f %4d %7.3f %6.3f %7.3f %6.3f %7.3f %6.3f %s %s ok"\
-                %(metadata[img]['FITSFILE'], metadata[img]['JD'], chartime, flt, metadata[img]['EXPTIME'], metadata[img]['AIRMASS'], metadata[img]['IDNUM'], \
-                zero[img], zerr[img], (metadata[img]['LIMFLX3']+zero[img]), ffit.wssrndf, \
-                mo[0], target[img]['MAGERR_AUTO'], tarid, obsid)
-
-        else:
-            out_line="%s %14.6f %14.6f %s %3.0f %6.3f %4d %7.3f %6.3f %7.3f %6.3f  99.999  99.999 %s %s not_found"\
-                %(metadata[img]['FITSFILE'], metadata[img]['JD'], chartime, flt, metadata[img]['EXPTIME'], metadata[img]['AIRMASS'], metadata[img]['IDNUM'], \
-                zero[img], zerr[img], (metadata[img]['LIMFLX3']+zero[img]), ffit.wssrndf, tarid, obsid)
-
-        print(out_line)
-
-        # dophot.dat for the result line
-        try:
-            out_file = open("dophot.dat", "a")
-            out_file.write(out_line+"\n")
-            out_file.close()
-        except:
-            pass
+    write_results(data, ffit, options, alldet, target)
 
 # this way, the variables local to main() are not globally available, avoiding some programming errors
 if __name__ == "__main__":
