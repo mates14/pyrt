@@ -5,7 +5,33 @@ import numpy as np
 #import astropy.io.fits
 import zpnfit
 
-def refit_astrometry(det, ra, dec, image_x, image_y, image_dxy, options):
+def refine_fit(zpntest, data):
+    """
+    Refine the astrometric fit while maintaining both photometric and astrometric masks.
+    """
+    # Remove all masks to compute residuals for all points
+    data.use_mask('default')
+    adata_all = data.get_arrays('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+    residuals = zpntest.residuals(zpntest.fitvalues, adata_all)
+
+    # Create the astrometric mask
+    astro_mask = residuals < 3.0 * zpntest.wssrndf
+
+    # Combine the photometric and astrometric masks
+    data.use_mask('photometry')
+    photo_mask = data.get_current_mask()
+    combined_mask = photo_mask & astro_mask
+
+    # Apply the combined mask
+    data.add_mask('combined', combined_mask)
+    data.use_mask('combined')
+
+    # Refine the fit with the combined mask
+    adata_ok = data.get_arrays('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+    zpntest.delin = True
+    zpntest.fit(adata_ok)
+
+def refit_astrometry(det, data, options):
     """
     Refit the astrometric solution for a given image
 
@@ -27,6 +53,7 @@ def refit_astrometry(det, ra, dec, image_x, image_y, image_dxy, options):
     numpy.ndarray
         Boolean array indicating which stars were used in the final fit
     """
+
     try:
         camera = det.meta['CCD_NAME']
     except KeyError:
@@ -48,30 +75,34 @@ def refit_astrometry(det, ra, dec, image_x, image_y, image_dxy, options):
     keys_invalid = setup_initial_wcs(zpntest, det.meta)
 
     if keys_invalid:
-        print("I do not understand the WCS to be fitted, skipping...")
-        return None, np.ones_like(ra, dtype=bool)
+        logging.warning("I do not understand the WCS to be fitted, skipping...")
+        return None
 
     # Set up camera-specific parameters
     setup_camera_params(zpntest, camera, options.refit_zpn)
 
-    # Perform the fit
-    adata_ok = (image_x, image_y, ra, dec, image_dxy)
-    zpntest.fit(adata_ok)
+    data.use_mask('photometry')
+
+    # Perform the initial fit
+    adata = data.get_arrays('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+    zpntest.fit(adata)
 
     # Refine the fit
-    ok = refine_fit(zpntest, image_x, image_y, ra, dec, image_dxy)
-    ok = refine_fit(zpntest, image_x, image_y, ra, dec, image_dxy)
+    refine_fit(zpntest, data)
+    refine_fit(zpntest, data)
 
     if options.sip is not None:
         zpntest.fixall()
         zpntest.add_sip_terms(options.sip)
-        ok = refine_fit(zpntest, image_x, image_y, ra, dec, image_dxy)
+        data.use_mask('photometry')
+        refine_fit(zpntest, data)
+        refine_fit(zpntest, data)
 
     # Save the model and print results
     zpntest.savemodel("astmodel.ecsv")
     print(zpntest)
 
-    return zpntest, ok
+    return zpntest
 
 def setup_initial_wcs(zpntest, meta):
     """Set up initial WCS parameters."""
@@ -134,11 +165,3 @@ def setup_camera_params(zpntest, camera, refit_zpn):
             zpntest.fixterm(["CRPIX1", "CRPIX2"], [2054.5,2059.0])
     # ... (similar blocks for other camera types)
 
-def refine_fit(zpntest, image_x, image_y, ra, dec, image_dxy):
-    """Refine the astrometric fit."""
-    ok = zpntest.residuals(zpntest.fitvalues, (image_x, image_y, ra, dec, image_dxy)) < 3.0*zpntest.wssrndf
-    adata_ok = (image_x[ok], image_y[ok], ra[ok], dec[ok], image_dxy[ok])
-    zpntest.delin = True
-    zpntest.fit(adata_ok)
-
-    return ok

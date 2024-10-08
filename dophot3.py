@@ -3,6 +3,7 @@
 import os
 import sys
 import time
+import logging
 import argparse
 from contextlib import suppress
 
@@ -12,7 +13,9 @@ import astropy
 import astropy.io.fits
 import astropy.wcs
 import astropy.table
-from astropy.coordinates import SkyCoord
+import astropy.units as u
+from astropy.time import Time
+from astropy.coordinates import SkyCoord, AltAz, EarthLocation
 
 # This is to silence a particular annoying warning (MJD not present in a fits file)
 import warnings
@@ -33,49 +36,6 @@ from config import parse_arguments
 if sys.version_info[0]*1000+sys.version_info[1]<3008:
     print(f"Error: python3.8 or higher is required (this is python {sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]})")
     sys.exit(-1)
-
-def readOptions(args=sys.argv[1:]):
-    parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
-    parser.add_argument("-a", "--astrometry", help="Refit astrometric solution using photometry-selected stars", action='store_true')
-    parser.add_argument("-A", "--aterms", help="Terms to fit for astrometry.", type=str)
-    parser.add_argument("--usewcs", help="Use this astrometric solution (file with header)", type=str)
-    parser.add_argument("-b", "--basemag", help="ID of the base filter to be used while fitting (def=\"Sloan_r\"/\"Johnson_V\")", type=str)
-    parser.add_argument("-c", "--catalog", action='store', help="Use this catalog as a reference.")
-    parser.add_argument("-d", "--date", action='store', help="what to put into the third column (char,mid,bjd), default=mid")
-    parser.add_argument("-e", "--enlarge", help="Enlarge catalog search region", type=float)
-    parser.add_argument("-f", "--filter", help="Override filter info from fits", type=str)
-    parser.add_argument("-F", "--flat", help="Produce flats.", action='store_true')
-    parser.add_argument("-g", "--guessbase", action='store_true', help="Try and set base filter from fits header (implies -j if Bessel filter is found).")
-    parser.add_argument("-X", "--tryflt", action='store_true', help="Try different filters (broken).")
-    parser.add_argument("-G", "--gain", action='store', help="Provide camera gain.", type=float)
-    parser.add_argument("-i", "--idlimit", help="Set a custom idlimit.", type=float)
-    parser.add_argument("-j", "--johnson", action='store_true', help="Use Stetson Johnson/Cousins filters and not SDSS")
-    parser.add_argument("-k", "--makak", help="Makak tweaks.", action='store_true')
-    parser.add_argument("-R", "--redlim", help="Do not get stars redder than this g-r.", type=float, default=5)
-    parser.add_argument("-B", "--bluelim", help="Do not get stars bler than this g-r.", type=float, default=-5)
-    parser.add_argument("-l", "--maglim", help="Do not get stars fainter than this limit.", type=float, default=17)
-    parser.add_argument("-L", "--brightlim", help="Do not get any less than this mag from the catalog to compare.", type=float)
-    parser.add_argument("-m", "--median", help="Give me just the median of zeropoints, no fitting.", action='store_true')
-    parser.add_argument("-M", "--model", help="Read model from a file.", type=str)
-    parser.add_argument("-n", "--nonlin", help="CCD is not linear, apply linear correction on mag.", action='store_true')
-    parser.add_argument("-p", "--plot", help="Produce plots.", action='store_true')
-    parser.add_argument("-r", "--reject", help="No outputs for Reduced Chi^2 > value.", type=float)
-    parser.add_argument("-s", "--stars", action='store_true', help="Output fitted numbers to a file.")
-    parser.add_argument("-S", "--sip", help="Order of SIP refinement for the astrometric solution (0=disable)", type=int)
-    parser.add_argument("-t", "--fit-terms", help="Comma separated list of terms to fit", type=str)
-    parser.add_argument("-T", "--trypar", type=str, help="Terms to examine to see if necessary (and include in the fit if they are).")
-    parser.add_argument("-u", "--autoupdate", action='store_true', help="Update .det if .fits is newer", default=False)
-    parser.add_argument("-U", "--terms", help="Terms to fit.", type=str)
-    parser.add_argument("-v", "--verbose", action='store_true', help="Print debugging info.")
-    parser.add_argument("-w", "--weight", action='store_true', help="Produce weight image.")
-    parser.add_argument("-W", "--save-model", help="Write model into a file.", type=str)
-    parser.add_argument("-x", "--fix-terms", help="Comma separated list of terms to keep fixed", type=str)
-    parser.add_argument("-y", "--fit-xy", action='store_true', help="Fit xy tilt for each image separately (i.e. terms PX/PY)")
-    parser.add_argument("-z", "--refit-zpn", action='store_true', help="Refit the ZPN radial terms.")
-    parser.add_argument("-Z", "--szp", action='store_true', help="use SZP while fitting astrometry.")
-    parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
-    opts = parser.parse_args(args)
-    return opts
 
 def airmass(z):
     """ Compute astronomical airmass according to Rozenberg(1966) """
@@ -126,7 +86,7 @@ def check_filter(nearest_ind, det):
 #        if options.verbose:
 #            print("Raw zeropoints: %s"%(np.array(x)-np.array(y)))
 #            print("Median of this array is: Zo = %.3f"%(Zo))
-        print("Filter: %s Zo: %f Zoe: %f"%(flt, Zo, Zoe))
+        logging.info("Filter: %s Zo: %f Zoe: %f"%(flt, Zo, Zoe))
 
         if besterr>Zoe:
             bestzero=Zo
@@ -265,8 +225,539 @@ def get_base_filter(det, options):
         fit_in_johnson = bool(options.basemag in johnson_filters)
         basemag = options.basemag
 
-    if options.verbose: print(f"basemag={basemag} fit_in_johnson={fit_in_johnson}")
+    logging.info(f"basemag={basemag} fit_in_johnson={fit_in_johnson}")
     return basemag, fit_in_johnson
+
+class PhotometryData:
+    def __init__(self):
+        self._data = {}
+        self._meta = {}
+        self._masks = {}
+        self._current_mask = None
+
+    def init_column(self, name):
+        """Initialize a new column."""
+        if name not in self._data:
+            self._data[name] = []
+
+    def append(self, **kwargs):
+        """Append data to multiple columns at once."""
+        for name, value in kwargs.items():
+            self.init_column(name)
+            self._data[name].append(value)
+
+    def extend(self, **kwargs):
+        """Extend multiple columns with iterable data at once."""
+        for name, value in kwargs.items():
+            self.init_column(name)
+            self._data[name].extend(value)
+
+    def set_meta(self, key, value):
+        """Set metadata."""
+        self._meta[key] = value
+
+    def get_meta(self, key, default=None):
+        """Get metadata."""
+        return self._meta.get(key, default)
+
+    def finalize(self):
+        """Convert list-based data to numpy arrays."""
+        for name in self._data:
+            self._data[name] = np.array(self._data[name])
+
+        # Initialize a default mask that includes all data
+        self.add_mask('default', np.ones(len(next(iter(self._data.values()))), dtype=bool))
+        self.use_mask('default')
+
+    def add_mask(self, name, mask):
+        """Add a new mask or update an existing one."""
+        self._masks[name] = mask
+
+    def use_mask(self, name):
+        """Set the current active mask."""
+        if name not in self._masks:
+            raise ValueError(f"Mask '{name}' does not exist.")
+        self._current_mask = name
+
+    def get_current_mask(self):
+        """Get the current active mask."""
+        if self._current_mask is None:
+            raise ValueError("No mask is currently active.")
+        return self._masks[self._current_mask]
+
+    def get_arrays(self, *names):
+        """Get multiple columns as separate numpy arrays, applying the current mask."""
+        return tuple(self._data[name][self._masks[self._current_mask]] for name in names)
+
+    def apply_mask(self, mask, name=None):
+        """Apply a boolean mask to the current mask or create a new named mask."""
+        if name is None:
+            # Apply to current mask
+            self._masks[self._current_mask] &= mask
+        else:
+            # Create a new mask
+            self.add_mask(name, self._masks[self._current_mask] & mask)
+            self.use_mask(name)
+
+    def reset_mask(self, name=None):
+        """Reset the specified mask or current mask to include all data."""
+        if name is None:
+            name = self._current_mask
+        self._masks[name] = np.ones(len(next(iter(self._data.values()))), dtype=bool)
+
+    def __len__(self):
+        """Return the number of rows in the data (considering the current mask)."""
+        if self._data:
+            return np.sum(self._masks[self._current_mask])
+        return 0
+
+    def __repr__(self):
+        """Return a string representation of the data."""
+        return f"PhotometryData with columns: {list(self._data.keys())}, current mask: {self._current_mask}"
+
+    def write(self, filename, format="ascii.ecsv", **kwargs):
+        """Write the data to a file using astropy.table.Table.write method."""
+        table = astropy.table.Table({k: v[self._masks[self._current_mask]] for k, v in self._data.items()})
+        table.meta.update(self._meta)
+        table.write(filename, format=format, **kwargs)
+
+def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
+    """
+    Efficiently create pairs of data to be fitted.
+
+    :param det: Detection table
+    :param cat: Catalog table
+    :param nearest_ind: Indices of nearest catalog stars for each detection
+    :param imgwcs: WCS object for the image
+    :param options: Command line options
+    :param data: PhotometryData object to store results
+    """
+    try:
+        # Create a mask for valid matches
+        valid_matches = np.array([len(inds) > 0 for inds in nearest_ind])
+
+        # Get all required data from det and cat
+        det_data = np.array([det['X_IMAGE'], det['Y_IMAGE'], det['MAG_AUTO'], det['MAGERR_AUTO'], det['ERRX2_IMAGE'], det['ERRY2_IMAGE']]).T[valid_matches]
+        cat_inds = np.array([inds[0] if len(inds) > 0 else -1 for inds in nearest_ind])[valid_matches]
+
+        # Extract relevant catalog data
+        cat_data = cat[cat_inds]
+
+        # Compute celestial coordinates
+        ra, dec = imgwcs.all_pix2world(det_data[:, 0], det_data[:, 1], 1)
+
+        # Compute airmass
+        loc = EarthLocation(lat=det.meta['LATITUDE']*u.deg,
+                            lon=det.meta['LONGITUD']*u.deg,
+                            height=det.meta['ALTITUDE']*u.m)
+        time = Time(det.meta['JD'], format='jd')
+        coords = SkyCoord(ra*u.deg, dec*u.deg)
+        altaz = coords.transform_to(AltAz(obstime=time, location=loc))
+        airmass = altaz.secz.value
+
+        # Compute normalized coordinates
+        coord_x = (det_data[:, 0] - det.meta['CTRX']) / 1024
+        coord_y = (det_data[:, 1] - det.meta['CTRY']) / 1024
+
+        # Apply magnitude and color limits
+        if det.meta['REJC']:
+            mag0, mag1, mag2, mag3, mag4 = [cat_data[f] for f in ['Johnson_B', 'Johnson_V', 'Johnson_R', 'Johnson_I', 'J']]
+        else:
+            mag0, mag1, mag2, mag3, mag4 = [cat_data[f] for f in ['Sloan_g', 'Sloan_r', 'Sloan_i', 'Sloan_z', 'J']]
+
+        magcat = cat_data[det.meta['REFILTER']]
+
+        # Create masks for magnitude and color limits
+        mag_mask = (magcat >= options.brightlim) & (magcat <= options.maglim) if options.brightlim else (magcat <= options.maglim)
+        color_mask = ((mag0 - mag2)/2 <= options.redlim) & ((mag0 - mag2)/2 >= options.bluelim) if options.redlim and options.bluelim else True
+
+        final_mask = mag_mask & color_mask
+
+        # Calculate errors
+        temp_dy = det_data[:, 3][final_mask]
+        temp_dy_no_zero = np.sqrt(np.power(temp_dy,2)+0.0004)
+
+        _dx = det_data[:, 4][final_mask]
+        _dy = det_data[:, 5][final_mask]
+        _image_dxy = np.sqrt(np.power(_dx,2) + np.power(_dy,2) + 0.0025)  # Do not trust errors better than 1/20 pixel
+
+        # Update PhotometryData object
+        data.extend(
+            x=magcat[final_mask],
+            aabs=airmass[final_mask],
+            image_x = det_data[:, 0][final_mask],
+            image_y = det_data[:, 1][final_mask],
+            color1=(mag0 - mag1)[final_mask],
+            color2=(mag1 - mag2)[final_mask],
+            color3=(mag2 - mag3)[final_mask],
+            color4=(mag3 - mag4)[final_mask],
+            y=det_data[:, 2][final_mask],
+            dy=temp_dy_no_zero,
+            ra=cat_data['radeg'][final_mask],
+            dec=cat_data['decdeg'][final_mask],
+            adif=airmass[final_mask] - det.meta['AIRMASS'],
+            coord_x=coord_x[final_mask],
+            coord_y=coord_y[final_mask],
+            image_dxy = _image_dxy,
+            img=np.full(np.sum(final_mask), det.meta['IMGNO'])
+        )
+    except KeyError as e:
+        print(f"Error: Missing key in detection or catalog data: {e}")
+    except ValueError as e:
+        print(f"Error: Invalid value encountered: {e}")
+    except Exception as e:
+        print(f"Unexpected error in make_pairs_to_fit: {e}")
+
+def dead_make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
+    """
+    Efficiently create pairs of data to be fitted.
+
+    :param det: Detection table
+    :param cat: Catalog table
+    :param nearest_ind: Indices of nearest catalog stars for each detection
+    :param imgwcs: WCS object for the image
+    :param options: Command line options
+    :param data: PhotometryData object to store results
+    """
+    # Create a mask for valid matches
+    valid_matches = np.array([len(inds) > 0 for inds in nearest_ind])
+
+    # Get all required data from det and cat
+    det_data = np.array([det['X_IMAGE'], det['Y_IMAGE'], det['MAG_AUTO'], det['MAGERR_AUTO'], det['ERRX2_IMAGE'], det['ERRY2_IMAGE']]).T[valid_matches]
+    cat_inds = np.array([inds[0] if len(inds) > 0 else -1 for inds in nearest_ind])[valid_matches]
+
+    # Extract relevant catalog data
+    cat_data = cat[cat_inds]
+
+    # Compute celestial coordinates
+    ra, dec = imgwcs.all_pix2world(det_data[:, 0], det_data[:, 1], 1)
+
+    # Compute airmass
+    loc = EarthLocation(lat=det.meta['LATITUDE']*u.deg,
+                        lon=det.meta['LONGITUD']*u.deg,
+                        height=det.meta['ALTITUDE']*u.m)
+    time = Time(det.meta['JD'], format='jd')
+    coords = SkyCoord(ra*u.deg, dec*u.deg)
+    altaz = coords.transform_to(AltAz(obstime=time, location=loc))
+    airmass = altaz.secz.value
+
+    # Compute other required values
+    coord_x = (det_data[:, 0] - det.meta['CTRX']) / 1024
+    coord_y = (det_data[:, 1] - det.meta['CTRY']) / 1024
+
+    # Apply magnitude and color limits
+    if det.meta['REJC']:
+    #if options.rejc:
+        mag0, mag1, mag2, mag3, mag4 = [cat_data[f] for f in ['Johnson_B', 'Johnson_V', 'Johnson_R', 'Johnson_I', 'J']]
+    else:
+        mag0, mag1, mag2, mag3, mag4 = [cat_data[f] for f in ['Sloan_g', 'Sloan_r', 'Sloan_i', 'Sloan_z', 'J']]
+
+    magcat = cat_data[det.meta['REFILTER']]
+
+    mag_mask = (magcat >= options.brightlim) & (magcat <= options.maglim) if options.brightlim else (magcat <= options.maglim)
+    color_mask = ((mag0 - mag2)/2 <= options.redlim) & ((mag0 - mag2)/2 >= options.bluelim) if options.redlim and options.bluelim else True
+
+    final_mask = mag_mask & color_mask
+
+    temp_dy = det_data[:, 3][final_mask]
+    temp_dy_no_zero = np.sqrt(np.power(temp_dy,2)+0.0004)
+
+    _dx = det_data[:, 4][final_mask]
+    _dy = det_data[:, 5][final_mask]
+    _image_dxy = np.sqrt(np.power(_dx,2) + np.power(_dy,2) + 0.0025) # Do not trust errors better than 1/20 pixel
+
+    # Update PhotometryData object
+    data.extend(
+        x=magcat[final_mask],
+        aabs=airmass[final_mask],
+        image_x = det_data[:, 0][final_mask],
+        image_y = det_data[:, 1][final_mask],
+        color1=(mag0 - mag1)[final_mask],
+        color2=(mag1 - mag2)[final_mask],
+        color3=(mag2 - mag3)[final_mask],
+        color4=(mag3 - mag4)[final_mask],
+        y=det_data[:, 2][final_mask],
+        dy=temp_dy_no_zero,
+        ra=cat_data['radeg'][final_mask],
+        dec=cat_data['decdeg'][final_mask],
+        adif=airmass[final_mask] - det.meta['AIRMASS'],
+        coord_x=coord_x[final_mask],
+        coord_y=coord_y[final_mask],
+        image_dxy = _image_dxy,
+        img=np.full(np.sum(final_mask), det.meta['IMGNO'])
+    )
+
+def write_stars_file(data, ffit, imgwcs, filename="stars"):
+    """
+    Write star data to a file for visualization purposes.
+
+    Parameters:
+    data : PhotometryData
+        The PhotometryData object containing all star data
+    ffit : object
+        The fitting object containing the model and fit results
+    filename : str, optional
+        The name of the output file (default is "stars")
+    """
+    # Ensure we're using the most recent mask (likely the combined photometry and astrometry mask)
+    #current_mask = data.get_current_mask()
+    current_mask = data.get_current_mask()
+    data.use_mask('default')
+
+    # Get all required arrays
+    x, y, adif, coord_x, coord_y, color1, color2, color3, color4, img, dy, ra, dec, image_x, image_y = data.get_arrays(
+        'x', 'y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'dy', 'ra', 'dec', 'image_x', 'image_y'
+    )
+
+    # Calculate model magnitudes
+    model_input = (y, adif, coord_x, coord_y, color1, color2, color3, color4, img, x, dy)
+    model_mags = ffit.model(np.array(ffit.fitvalues), model_input)
+
+    # Calculate astrometric residuals (if available)
+    try:
+        astx, asty = imgwcs.all_world2pix( ra, dec, 1)
+        ast_residuals = np.sqrt((astx - coord_x)**2 + (asty - coord_y)**2)
+    except KeyError:
+        ast_residuals = np.zeros_like(x)  # If astrometric data is not available
+
+    # Create a table with all the data
+    stars_table = astropy.table.Table([
+        x, adif, image_x, image_y, color1, color2, color3, color4,
+        model_mags, dy, ra, dec, astx, asty, ast_residuals, current_mask, current_mask, current_mask
+    ], names=[
+        'cat_mags', 'airmass', 'image_x', 'image_y', 'color1', 'color2', 'color3', 'color4',
+        'model_mags', 'mag_err', 'ra', 'dec', 'ast_x', 'ast_y', 'ast_residual', 'mask', 'mask2', 'mask3'
+    ])
+
+    # Add column descriptions
+    stars_table['cat_mags'].description = 'Catalog magnitude'
+    stars_table['airmass'].description = 'Airmass difference from mean'
+    stars_table['image_x'].description = 'X coordinate in image'
+    stars_table['image_y'].description = 'Y coordinate in image'
+    stars_table['color1'].description = 'Color index 1'
+    stars_table['color2'].description = 'Color index 2'
+    stars_table['color3'].description = 'Color index 3'
+    stars_table['color4'].description = 'Color index 4'
+    stars_table['model_mags'].description = 'Observed magnitude'
+    stars_table['mag_err'].description = 'Magnitude error'
+    stars_table['ra'].description = 'Right Ascension'
+    stars_table['dec'].description = 'Declination'
+    stars_table['ast_x'].description = 'Model position X'
+    stars_table['ast_y'].description = 'Model position Y'
+    stars_table['ast_residual'].description = 'Astrometric residual'
+    stars_table['mask'].description = 'Boolean mask (True for included points)'
+    stars_table['mask2'].description = 'Boolean mask (True for included points)'
+    stars_table['mask3'].description = 'Boolean mask (True for included points)'
+
+    # Write the table to a file
+    stars_table.write(filename, format='ascii.ecsv', overwrite=True)
+
+def perform_photometric_fitting(data, options, zeropoints):
+    """
+    Perform photometric fitting on the data.
+
+    Args:
+    data (PhotometryData): Object containing all photometry data.
+    options (argparse.Namespace): Command line options.
+    zeropoints (list): Initial zeropoints for each image.
+
+    Returns:
+    fotfit.fotfit: The fitted photometry model.
+    """
+    ffit = fotfit.fotfit(fit_xy=options.fit_xy)
+
+    # Set up the model
+    setup_photometric_model(ffit, options)
+
+    # Set initial zeropoints
+    ffit.zero = zeropoints
+
+    # Perform initial fit
+    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy')
+    ffit.fit(fdata)
+
+    # Apply photometric mask and refit
+    photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
+    data.apply_mask(photo_mask, 'photometry')
+    data.use_mask('photometry')
+    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy')
+
+    ffit.delin = True
+    ffit.fit(fdata)
+
+    # Final fit with refined mask
+    data.use_mask('default')
+    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy')
+    photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
+    data.apply_mask(photo_mask, 'photometry')
+    data.use_mask('photometry')
+    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy')
+    ffit.fit(fdata)
+
+    print(f"Final fit variance: {ffit.wssrndf}")
+
+    return ffit
+
+def setup_photometric_model(ffit, options):
+    """
+    Set up the photometric model based on command line options.
+
+    Args:
+    ffit (fotfit.fotfit): The photometric fitting object.
+    options (argparse.Namespace): Command line options.
+    """
+    # Load model from file if specified
+    if options.model:
+        load_model_from_file(ffit, options.model)
+
+    ffit.fixall()  # Fix all terms initially
+    ffit.fixterm(["N1"], values=[0])
+
+    # Set up fitting terms
+    if options.terms:
+        setup_fitting_terms(ffit, options.terms, options.verbose, options.fit_xy)
+
+def load_model_from_file(ffit, model_file):
+    """
+    Load a photometric model from a file.
+
+    Args:
+    ffit (fotfit.fotfit): The photometric fitting object.
+    model_file (str): Path to the model file.
+    """
+    model_paths = [
+        model_file,
+        f"/home/mates/pyrt/model/{model_file}.mod",
+        f"/home/mates/pyrt/model/{model_file}-{ffit.det.meta['FILTER']}.mod"
+    ]
+    for path in model_paths:
+        try:
+            ffit.readmodel(path)
+            print(f"Model imported from {path}")
+            return
+        except:
+            pass
+    print(f"Cannot open model {model_file}")
+
+def setup_fitting_terms(ffit, terms, verbose, fit_xy):
+    """
+    Set up fitting terms based on the provided options.
+
+    Args:
+    ffit (fotfit.fotfit): The photometric fitting object.
+    terms (str): Comma-separated list of terms to fit.
+    verbose (bool): Whether to print verbose output.
+    fit_xy (bool): Whether to fit xy tilt for each image separately.
+    """
+    for term in terms.split(","):
+        if term == "":
+            continue  # Skip empty terms
+        if term[0] == '.':
+            setup_polynomial_terms(ffit, term, verbose, fit_xy)
+        else:
+            ffit.fitterm([term], values=[1e-6])
+
+def setup_polynomial_terms(ffit, term, verbose, fit_xy):
+    """
+    Set up polynomial terms for fitting.
+
+    Args:
+    ffit (fotfit.fotfit): The photometric fitting object.
+    term (str): The polynomial term descriptor.
+    verbose (bool): Whether to print verbose output.
+    fit_xy (bool): Whether to fit xy tilt for each image separately.
+    """
+    if term[1] == 'p':
+        setup_surface_polynomial(ffit, term, verbose, fit_xy)
+    elif term[1] == 'r':
+        setup_radial_polynomial(ffit, term, verbose)
+
+def setup_surface_polynomial(ffit, term, verbose, fit_xy):
+    """Set up surface polynomial terms."""
+    pol_order = int(term[2:])
+    if verbose:
+        print(f"Setting up a surface polynomial of order {pol_order}:")
+    polytxt = "P(x,y)="
+    for pp in range(1, pol_order + 1):
+        if fit_xy and pp == 1:
+            continue
+        for rr in range(0, pp + 1):
+            polytxt += f"+P{rr}X{pp-rr}Y*x**{rr}*y**{pp-rr}"
+            ffit.fitterm([f"P{rr}X{pp-rr}Y"], values=[1e-6])
+    if verbose:
+        print(polytxt)
+
+def setup_radial_polynomial(ffit, term, verbose):
+    """Set up radial polynomial terms."""
+    pol_order = int(term[2:])
+    if verbose:
+        print(f"Setting up a polynomial of order {pol_order} in radius:")
+    polytxt = "P(r)="
+    for pp in range(1, pol_order + 1):
+        polytxt += f"+P{pp}R*(x**2+y**2)**{pp}"
+        ffit.fitterm([f"P{pp}R"], values=[1e-6])
+    if verbose:
+        print(polytxt)
+
+def update_det_file(fitsimgf: str, options): #  -> Tuple[Optional[astropy.table.Table], str]:
+    """Update the .det file using cat2det.py."""
+    cmd = ["cat2det.py"]
+    if options.verbose:
+        cmd.append("-v")
+    if options.filter:
+        cmd.extend(["-f", options.filter])
+    cmd.append(fitsimgf)
+    
+    print(f"Running: {' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Error running cat2det.py: {e}")
+        return None, ""
+    
+    return try_det(os.path.splitext(fitsimgf)[0] + ".det", options.verbose)
+
+def should_update_det_file(det, fitsimg, detf, fitsimgf, options):
+    """Determine if the .det file should be updated."""
+    if det is None and fitsimg is not None:
+        return True
+    if det is not None and fitsimg is not None and options.autoupdate:
+        return os.path.getmtime(fitsimgf) > os.path.getmtime(detf)
+    return False
+
+def process_input_file(arg, options):
+
+    detf, det = try_det(arg, options.verbose)
+    if det is None: detf, det = try_det(os.path.splitext(arg)[0] + ".det", options.verbose)
+    if det is None: detf, det = try_det(arg + ".det", options.verbose)
+
+    fitsimgf, fitsimg = try_img(arg + ".fits", options.verbose)
+    if fitsimg is None: fitsimgf, fitsimg = try_img(os.path.splitext(arg)[0] + ".fits", options.verbose)
+    if fitsimg is None: fitsimgf, fitsimg = try_img(os.path.splitext(arg)[0], options.verbose)
+
+    # with these, we should have the possible filenames covered, now lets see what we got
+    # 1. have fitsimg, no .det: call cat2det, goto 3
+    # 2. have fitsimg, have det, det is older than fitsimg: same as 1
+    if should_update_det_file(det, fitsimg, detf, fitsimgf, options):
+        detf, det = update_det_file(fitsimgf, options)
+        logging.info("Back in dophot")
+
+    if det is None: return None
+    # print(type(det.meta)) # OrderedDict, so we can:
+    with suppress(KeyError): det.meta.pop('comments')
+    with suppress(KeyError): det.meta.pop('history')
+
+    # 3. have fitsimg, have .det, note the fitsimg filename, close fitsimg and run
+    # 4. have det, no fitsimg: just run, writing results into fits will be disabled
+    if fitsimgf is not None: det.meta['filename'] = fitsimgf
+    det.meta['detf'] = detf
+    logging.info(f"DetF={detf}, ImgF={fitsimgf}")
+
+    return det
+
+def setup_logging(verbose):
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(level=level, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ******** main() **********
 
@@ -274,35 +765,15 @@ def main():
     '''Take over the world.'''
     options = parse_arguments()
     print(options)
-    #options = readOptions(sys.argv[1:])
 
-    if options.verbose:
-        print(f"{os.path.basename(sys.argv[0])} running in Python {sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}")
-        print(f"Magnitude limit set to {options.maglim}")
+    setup_logging(options.verbose)
 
-    k = 0
-    i = 0
-    ast_projections = [ 'TAN', 'ZPN', 'ZEA', 'AZP' ]
+    logging.info(f"{os.path.basename(sys.argv[0])} running in Python {sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}")
+    logging.info(f"Magnitude limit set to {options.maglim}")
 
-    img = [] # cislo snimku
-    x = []
-    y = []
-    dy = []
-    aabs = []
-    adif = []
-    coord_x = []
-    coord_y = []
-    image_x = []
-    image_y = []
-    image_dxy = []
-    color1 = []
-    color2 = []
-    color3 = []
-    color4 = []
-    ra = []
-    dec = []
+    data = PhotometryData()
+
     target = []
-    tr = []
     zeropoints = []
     metadata = []
     alldet=[]
@@ -310,81 +781,24 @@ def main():
 
     for arg in options.files:
 
-        detf, det = try_det(arg, options.verbose)
-        if det is None: detf, det = try_det(os.path.splitext(arg)[0] + ".det", options.verbose)
-        if det is None: detf, det = try_det(arg + ".det", options.verbose)
-
-        fitsimgf, fitsimg = try_img(arg + ".fits", options.verbose)
-        if fitsimg is None: fitsimgf, fitsimg = try_img(os.path.splitext(arg)[0] + ".fits", options.verbose)
-        if fitsimg is None: fitsimgf, fitsimg = try_img(os.path.splitext(arg)[0], options.verbose)
-
-        # with these, we should have the possible filenames covered, now lets see what we got
-        # 1. have fitsimg, no .det: call cat2det, goto 3
-        # 2. have fitsimg, have det, det is older than fitsimg: same as 1
-        if (det is not None and fitsimg is not None and os.path.getmtime(fitsimgf) > os.path.getmtime(detf) and options.autoupdate) \
-            or (det is None and fitsimg is not None):
-            #cmd = f"cat2det.py {("","-v ")[options.verbose]}{fitsimgf}"
-            cmd = f"cat2det.py -v {fitsimgf}"
-            print(cmd)
-            os.system(cmd)
-            if options.verbose: print("Back in dophot")
-            detf, det = try_det(os.path.splitext(fitsimgf)[0] + ".det", options.verbose)
-
+        det = process_input_file(arg, options)
         if det is None:
-            print(f"I do not know what to do with {arg}")
+            logging.warning(f"I do not know what to do with {arg}")
             continue
-        # print(type(det.meta)) # OrderedDict, so we can:
-        with suppress(KeyError): det.meta.pop('comments')
-        with suppress(KeyError): det.meta.pop('history')
 
-        # 3. have fitsimg, have .det, note the fitsimg filename, close fitsimg and run
-        # 4. have det, no fitsimg: just run, writing results into fits will be disabled
-        if fitsimgf is not None: det.meta['filename'] = fitsimgf
-        print(f"DetF={detf}, ImgF={fitsimgf}")
-
-        some_file = open("det.reg", "w+")
-        some_file.write("# Region file format: DS9 version 4.1\nglobal color=red dashlist=8 3 width=3"\
-            " font=\"helvetica 10 normal roman\" select=1 highlite=1 dash=0 fixed=0 edit=1 move=1 delete=1 include=1 source=1\n")
-        for w_ra, w_dec in zip(det['X_IMAGE'],det['Y_IMAGE']):
-            some_file.write(f"circle({w_ra:.7f},{w_dec:.7f},3\") # color=red width=3\n")
-        some_file.close()
+#    some_file = open("det.reg", "w+")
+#    some_file.write("# Region file format: DS9 version 4.1\nglobal color=red dashlist=8 3 width=3"\
+#        " font=\"helvetica 10 normal roman\" select=1 highlite=1 dash=0 fixed=0 edit=1 move=1 delete=1 include=1 source=1\n")
+#    for w_ra, w_dec in zip(det['X_IMAGE'],det['Y_IMAGE']):
+#        some_file.write(f"circle({w_ra:.7f},{w_dec:.7f},3\") # color=red width=3\n")
+#    some_file.close()
 
         imgwcs = astropy.wcs.WCS(det.meta)
 
         det['ALPHA_J2000'], det['DELTA_J2000'] = imgwcs.all_pix2world( [det['X_IMAGE']], [det['Y_IMAGE']], 1)
 
-        if options.usewcs is not None:
-            # we may import a WCS solution from a file:
-            usewcs = astropy.table.Table.read(options.usewcs, format='ascii.ecsv')
-            remove_junk(usewcs.meta)
-
-            # we need to set the new center to what it should be:
-            usectr = imgwcs.all_pix2world( [usewcs.meta['CRPIX1']], [usewcs.meta['CRPIX2']], 1)
-            usewcs.meta['CRVAL1'] = usectr[0][0]
-            usewcs.meta['CRVAL2'] = usectr[1][0]
-
-            # and we need to rotate and rescale the transformation martix approprietely:
-            dra = (usectr[0][0] - det.meta['CRVAL1']) * np.pi / 180.0
-
-            scale = np.sqrt( \
-                (np.power(usewcs.meta['CD1_1'], 2) + np.power(usewcs.meta['CD1_2'], 2) \
-                + np.power(usewcs.meta['CD2_1'], 2) + np.power(usewcs.meta['CD2_2'], 2)) / 2) \
-                / np.sqrt((np.power(det.meta['CD1_1'],2) + np.power(det.meta['CD1_2'], 2) \
-                + np.power(det.meta['CD2_1'], 2) + np.power(det.meta['CD2_2'], 2)) / 2)
-
-            print(f"Scale WCS by {scale} and rotate by {dra*180/np.pi}")
-
-            usewcs.meta['CD1_1'] = det.meta['CD1_1'] * scale * np.cos(dra)
-            usewcs.meta['CD1_2'] = det.meta['CD1_2'] * scale * -np.sin(dra)
-            usewcs.meta['CD2_1'] = det.meta['CD2_1'] * scale * +np.sin(dra)
-            usewcs.meta['CD2_2'] = det.meta['CD2_2'] * scale * np.cos(dra)
-
-            #print(usewcs.meta)
-            for term in [ "CD1_1", "CD1_2", "CD2_1", "CD2_2", "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2" ]:
-                det.meta[term] = usewcs.meta[term]
-
-            # the rest should be ok
-            imgwcs = astropy.wcs.WCS(usewcs.meta)
+        # if options.usewcs is not None:
+        #      fixme from "broken_usewcs.py"            
 
         if options.enlarge is not None:
             enlarge = options.enlarge
@@ -407,23 +821,23 @@ def main():
         # Epoch for PM correction (Gaia DR2@2015.5)
         #epoch = ( det.meta['JD'] - 2457204.5 ) / 365.2425 # Epoch for PM correction (Gaia DR2@2015.5)
         epoch = ( (det.meta['JD'] - 2440587.5) - (cat.meta['astepoch'] - 1970.0)*365.2425  ) / 365.2425
-        if options.verbose: print("EPOCH_DIFF=", epoch)
+        logging.info(f"EPOCH_DIFF={epoch}")
         cat['radeg'] += epoch*cat['pmra']
         cat['decdeg'] += epoch*cat['pmdec']
 
-        if options.verbose: print(f"Catalog search took {time.time()-start:.3f}s")
-        if options.verbose: print(f"Catalog contains {len(cat)} entries")
+        logging.info(f"Catalog search took {time.time()-start:.3f}s")
+        logging.info(f"Catalog contains {len(cat)} entries")
 
-        write_region_file(cat, "cat.reg")
+        # write_region_file(cat, "cat.reg")
 
         if options.idlimit: idlimit = options.idlimit
         else:
             try:
                 idlimit = det.meta['FWHM']
-                if options.verbose: print(f"idlimit set to fits header FWHM value of {idlimit} pixels.")
+                logging.info(f"idlimit set to fits header FWHM value of {idlimit} pixels.")
             except KeyError:
                 idlimit = 2.0/3600
-                if options.verbose: print(f"idlimit set to a hard-coded default of {idlimit} pixels.")
+                logging.info(f"idlimit set to a hard-coded default of {idlimit} pixels.")
 
         # ===  identification with KDTree  ===
         Y = np.array([det['X_IMAGE'], det['Y_IMAGE']]).transpose()
@@ -432,7 +846,7 @@ def main():
         try:
             Xt = np.array(imgwcs.all_world2pix(cat['radeg'], cat['decdeg'],1))
         except (ValueError,KeyError):
-            if options.verbose: print(f"Astrometry of {arg} sucks! Skipping.")
+            logging.warning(f"Astrometry of {arg} sucks! Skipping.")
             continue
 
         # clean up the array from off-image objects
@@ -444,29 +858,25 @@ def main():
             Xt[0]>det.meta['IMGAXIS1'],
             Xt[1]>det.meta['IMGAXIS2']
             ], axis=0))]
- 
+
         Xt = np.array(imgwcs.all_world2pix(cat['radeg'], cat['decdeg'],1))
         X = Xt.transpose()
 
         tree = KDTree(X)
         nearest_ind, nearest_dist = tree.query_radius(Y, r=idlimit, return_distance=True, count_only=False)
-        if options.verbose: print(f"Object cross-id took {time.time()-start:.3f}s")
-
-        # non-id objects in frame:
-        for xx, dd in zip(nearest_ind, det):
-            if len(xx) < 1: tr.append(dd)
+        logging.info(f"Object cross-id took {time.time()-start:.3f}s")
 
         # identify the target object
         target.append(None)
         if det.meta['OBJRA']<-99 or det.meta['OBJDEC']<-99:
-            if options.verbose: print ("Target was not defined")
+            logging.info("Target was not defined")
         else:
-            if options.verbose: print (f"Target coordinates: {det.meta['OBJRA']:.6f} {det.meta['OBJDEC']:+6f}")
+            logging.info(f"Target coordinates: {det.meta['OBJRA']:.6f} {det.meta['OBJDEC']:+6f}")
             Z = np.array(imgwcs.all_world2pix([det.meta['OBJRA']],[det.meta['OBJDEC']],1)).transpose()
 
             if np.isnan(Z[0][0]) or np.isnan(Z[0][1]):
                 object_ind = None
-                print ("Target transforms to Nan... :(")
+                logging.warning("Target transforms to Nan... :(")
             else:
                 treeZ = KDTree(Z)
                 object_ind, object_dist = treeZ.query_radius(Y, r=idlimit, return_distance=True, count_only=False)
@@ -477,11 +887,10 @@ def main():
                         if len(i) > 0 and dd[0] < mindist:
                             target[imgno] = d
                             mindist = dd[0]
-                    if options.verbose:
-                        if target[imgno] is None:
-                            print ("Target was not found")
-                        else:
-                            print (f"Target is object id {target[imgno]['NUMBER']} at distance {mindist:.2f} px")
+#                        if target[imgno] is None:
+#                            logging.info("Target was not found")
+#                        else:
+#                            logging.info(f"Target is object id {target[imgno]['NUMBER']} at distance {mindist:.2f} px")
 
         # === objects identified ===
 
@@ -523,173 +932,39 @@ def main():
         det.meta['REFILTER'], det.meta['REJC'] = get_base_filter(det, options)
 
         # make pairs to be fitted
-        for i, d in zip(nearest_ind, det):
-            for k in i:
+        det.meta['IMGNO'] = imgno
+        make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data)
 
-                magcat = cat[k][det.meta['REFILTER']]
-
-                if det.meta['REJC']:
-                    mag0 = cat[k]['Johnson_B']
-                    mag1 = cat[k]['Johnson_V']
-                    mag2 = cat[k]['Johnson_R']
-                    mag3 = cat[k]['Johnson_I']
-                    mag4 = cat[k]['J']
-                else:
-                    mag0 = cat[k]['Sloan_g']
-                    mag1 = cat[k]['Sloan_r']
-                    mag2 = cat[k]['Sloan_i']
-                    mag3 = cat[k]['Sloan_z']
-                    mag4 = cat[k]['J']
-
-                if options.brightlim is not None and magcat < options.brightlim: continue
-                if options.maglim is not None and magcat > options.maglim: continue
-                if options.redlim is not None and (mag0 - mag2)/2 > options.redlim: continue
-                if options.bluelim is not None and (mag0 - mag2)/2 < options.bluelim: continue
-
-                x = np.append(x, magcat)
-                y = np.append(y, np.float64(d['MAG_AUTO']))
-                dy = np.append(dy, np.float64(d['MAGERR_AUTO']))
-
-                tmpra, tmpdec = imgwcs.all_pix2world(d['X_IMAGE'], d['Y_IMAGE'], 1)
-                rd = astropy.coordinates.SkyCoord( np.float64(tmpra), np.float64(tmpdec), unit=astropy.units.deg)
-                rdalt = rd.transform_to(astropy.coordinates.AltAz(obstime=cas, location=loc))
-                airm = airmass(np.pi/2-rdalt.alt.rad)
-
-                aabs = np.append(aabs, airm)
-                adif = np.append(adif, airm - det.meta['AIRMASS'])
-
-                coord_x = np.append(coord_x, (np.float64(d['X_IMAGE'])-det.meta['CTRX'])/1024)
-                coord_y = np.append(coord_y, (np.float64(d['Y_IMAGE'])-det.meta['CTRY'])/1024)
-                image_x = np.append(image_x, (np.float64(d['X_IMAGE'])))
-                image_y = np.append(image_y, (np.float64(d['Y_IMAGE'])))
-                _dx = np.max((np.float64(d['ERRX2_IMAGE']),0.001))
-                _dy = np.max((np.float64(d['ERRY2_IMAGE']),0.001))
-                image_dxy = np.append(image_dxy, (np.sqrt(_dx*_dx+_dy*_dy)) )
-
-                color1 = np.append(color1, np.float64(mag0-mag1)) #  g-r
-                color2 = np.append(color2, np.float64(mag1-mag2)) #  r-i
-                color3 = np.append(color3, np.float64(mag2-mag3)) #  i-z
-                color4 = np.append(color4, np.float64(mag3-mag4)) #  z-J (J_{Vega} - J_{AB}  = 0.901)
-
-                # catalog coordinates
-                ra = np.append(ra, np.float64(cat[k]['radeg']))
-                dec = np.append(dec, np.float64(cat[k]['decdeg']))
-                img = np.append(img, np.int64(imgno))
-
-        if len(dy)==0:
-            print("Not enough stars to work with (Records:", len(dy),")")
-            sys.exit(0)
-        dy = np.sqrt(dy*dy+0.0004)
-        # === fields are set up ===
+        #if len(data)==0: # if number of stars from this file is 0, do not increment imgno, effectively skipping the file
+        #    print("Not enough stars to work with (Records:", len(data),")")
+        #    sys.exit(0)
 
         alldet = alldet+[det]
         imgno=imgno+1
+
+    data.finalize()
+
 
     if imgno == 0:
         print("No images found to work with, quit")
         sys.exit(0)
 
-    if len(y) == 0:
+    if len(data) == 0:
         print("No objects found to work with, quit")
         sys.exit(0)
 
-    if options.verbose: print(f"Photometry will be fitted with {len(y)} objects from {imgno} files")
+    logging.info(f"Photometry will be fitted with {len(data)} objects from {imgno} files")
     # tady mame hvezdy ze snimku a hvezdy z katalogu nactene a identifikovane
 
-    ffit = fotfit.fotfit(fit_xy=options.fit_xy)
-
-    # Read a model to be fit from a file
-    if options.model is not None:
-        for modelfile in [  options.model,
-                f"/home/mates/pyrt/model/{options.model}.mod",
-                f"/home/mates/pyrt/model/{options.model}-{det.meta['FILTER']}.mod"]:
-            try:
-                print(f"Trying model {modelfile}")
-                ffit.readmodel(modelfile)
-                print(f"Model imported from {modelfile}")
-                break
-            except:
-                print(f"Cannot open model {options.model}")
-
-    ffit.fixall() # model read from the file is fixed even if it is not fixed in the file
-
-    ffit.fixterm(["N1"], values=[0])
-
-    if options.terms is not None:
-        for term in options.terms.split(","):
-            if term == "": continue # permit extra ","s
-            if term[0] == '.': # not a real term: expansion script
-                if term[1] == 'p':
-                    pol_order = int(term[2:])
-                    if options.verbose: print(f"set up a surface polynomial of order {pol_order:d}:")
-                    polytxt = "P(x,y)="
-                    for pp in range(1,pol_order+1):
-                        if options.fit_xy and pp == 1:
-                            continue
-                        for rr in range(0,pp+1):
-                            polytxt += f"+P{rr:d}X{pp-rr:d}Y*x**{rr:d}*y**{pp-rr:d}"
-                            ffit.fitterm([f"P{rr:d}X{pp-rr:d}Y"], values=[1e-6])
-                    if options.verbose: print(polytxt)
-                if term[1] == 'r':
-                    pol_order = int(term[2:])
-                    if options.verbose: print(f"set up a polynomial of order {pol_order:d} in radius:")
-                    polytxt = "P(r)="
-                    for pp in range(1,pol_order+1):
-                        polytxt += f"+P{pp:d}R*(x**2+y**2)**pp"
-                        ffit.fitterm([f"P{pp:d}R"], values=[1e-6])
-                    if options.verbose: print(polytxt)
-            else:
-                ffit.fitterm([term], values=[1e-6])
-
-    imgno-=1
-
-#    p0=[]
-    #for term in fit_terms:
-    #    p0+=[1e-6]
-    #p0+=zeropoints
-    ffit.zero = zeropoints
-    #if options.fit_xy:
-    #    p0 = np.append(p0, np.zeros(len(zeropoints)))
-    #    p0 = np.append(p0, np.zeros(len(zeropoints)))
-
+    # Usage in main function:
     start = time.time()
-
-    fdata = (y, adif, coord_x, coord_y, color1, color2, color3, color4, img, x, dy)
-    ffit.fit( fdata )
-#    print(ffit.wssrndf)
-
-    ok = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
-    fdata_ok = (y[ok], adif[ok], coord_x[ok], coord_y[ok], color1[ok], color2[ok], color3[ok], color4[ok], img[ok], x[ok], dy[ok])
-    ffit.delin = True
-    ffit.fit( fdata_ok )
-#    print(ffit.wssrndf)
-
-    ok = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
-    fdata_ok = (y[ok], adif[ok], coord_x[ok], coord_y[ok], color1[ok], color2[ok], color3[ok], color4[ok], img[ok], x[ok], dy[ok])
-    ffit.delin = True
-    ffit.fit( fdata_ok )
-
-    print("Variance:", ffit.wssrndf)
-
-    #ok = ffit.residuals(ffit.fitvalues, fdata) < 1.5
-    #fdata_ok = (y[ok], adif[ok], coord_x[ok], coord_y[ok], color1[ok], color2[ok], color3[ok], color4[ok], img[ok], x[ok], dy[ok])
-    #ffit.delin = True
-    #ffit.fit( fdata_ok )
-
-    # these objects are within 2-sigma of the photometric fit and snr > 10 sigma
-    #ok = ffit.residuals(ffit.fitvalues, fdata) < 2.5
-    #ok = np.all( [ffit.residuals0(ffit.fitvalues, fdata) < 2.0, dy < 1.091/10], axis=0)
-    #print(len(y[ok]))
-
-    if options.verbose: print("Fitting took %.3fs"%(time.time()-start))
-
-    if options.verbose:
-        print(ffit)
+    ffit = perform_photometric_fitting(data, options, zeropoints)
+    logging.info(ffit)
+    logging.info(f"Photometric fit took {time.time()-start:.3f}s")
 
     if options.reject:
         if ffit.wssrndf > options.reject:
-            if options.verbose:
-                print("rejected (too large reduced chi2)")
+            logging.info("rejected (too large reduced chi2)")
             out_file = open("rejected", "a+")
             out_file.write("%s %.6f -\n"%(metadata[0]['FITSFILE'], ffit.wssrndf))
             out_file.close()
@@ -699,55 +974,30 @@ def main():
         ffit.savemodel(options.save_model)
 
     # """ REFIT ASTROMETRY """
-    astra = 0 * dec
-    astdec = 0 * ra
-    ast = 0 * ra
     if options.astrometry:
-        zpntest, ok2 = refit_astrometry(det, ra, dec, image_x, image_y, image_dxy, options)
+        start = time.time()
+        zpntest = refit_astrometry(det, data, options)
+        logging.info(f"Astrometric fit took {time.time()-start:.3f}s")
         if zpntest is not None:
             # Update FITS file with new WCS
+            start = time.time()
             fitsbase = os.path.splitext(arg)[0]
             newfits = fitsbase + "t.fits"
             if os.path.isfile(newfits):
-                if options.verbose:
-                    print("Will overwrite", newfits)
+                logging.info(f"Will overwrite {newfits}")
                 os.unlink(newfits)
             os.system(f"cp {fitsbase}.fits {newfits}")
             zpntest.write(newfits)
             imgwcs = astropy.wcs.WCS(zpntest.wcs())
-    else:
-        ok2 = ok
+            logging.info(f"Saving a new fits with WCS took {time.time()-start:.3f}s")
     # ASTROMETRY END
 
     if options.stars:
-        astra,astdec = imgwcs.all_world2pix( ra, dec, 1)
-        stars_file  = open("stars", "a+")
-        nn = 0
-        stars_file.write("# x a image_x image_y color1 color2 color3 color4 y dy ra dec ok\n")
-        mags = ffit.model( np.array(ffit.fitvalues), (y, adif, coord_x, coord_y, color1, color2, color3, color4, img, x, dy))
-
-        while nn < len(x):
-            stars_file.write("%8.5f %8.5f %8.5f %8.5f %8.5f %8.5f %8.5f %8.5f %8.5f %8.5f %8.5f %8.5f %8.5f %8.5f %8.5f %s %s\n"
-                %(x[nn], aabs[nn], image_x[nn], image_y[nn], color1[nn], color2[nn], color3[nn], color4[nn], mags[nn], dy[nn], ra[nn], dec[nn], astra[nn], astdec[nn], ast[nn], ok[nn], ok2[nn]))
-            nn = nn+1
-        stars_file.close()
-
+        write_stars_file(data, ffit, imgwcs)
 
     zero, zerr = ffit.zero_val()
 
-    for img in range(0, imgno+1):
-
-    #    if options.verbose:
-    #        print("astropy.io.fits.setval(%s,MAGZERO,0,value=%.3f)"%(det.meta['FITSFILE'],zero[img]))
-    #    try:
-    #        astropy.io.fits.setval(det.meta['FITSFILE'], "LIMMAG", 0, value=zero[img]+metadata[img]['LIMFLX3'])
-    #        astropy.io.fits.setval(det.meta['FITSFILE'], "MAGZERO", 0, value=zero[img])
-    #    except: print("  ... writing MAGZERO failed")
-    #    if options.verbose:
-    #        print("astropy.io.fits.setval(%s,RESPONSE,0,value=%s)"%(det.meta['FITSFILE'],ffit.oneline()))
-    #    try: astropy.io.fits.setval(det.meta['FITSFILE'], "RESPONSE", 0, value=ffit.oneline())
-    #    except: print("  ... writing RESPONSE failed")
-
+    for img in range(0, imgno):
         if options.astrometry:
             try:
                 astropy.io.fits.setval( os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "LIMMAG", 0, value=zero[img]+metadata[img]['LIMFLX3'])
@@ -756,12 +1006,8 @@ def main():
             except: print("Writing LIMMAG/MAGZERO/RESPONSE to an astrometrized image failed")
 
         det = alldet[img]
-    #    det.meta['comments']=[]
-    #    det.meta['history']=[]
-        #try:
-        #    fn = os.path.splitext(det.meta['filename'])[0] + ".ecsv"
-        #except KeyError:
-        fn = os.path.splitext(detf)[0] + ".ecsv"
+
+        fn = os.path.splitext(det.meta['detf'])[0] + ".ecsv"
         det['MAG_CALIB'] = ffit.model(np.array(ffit.fitvalues), (det['MAG_AUTO'], metadata[img]['AIRMASS'], \
             det['X_IMAGE']/1024-metadata[img]['CTRX']/1024, det['Y_IMAGE']/1024-metadata[img]['CTRY']/1024,0,0,0,0, img,0,0)  )
         det['MAGERR_CALIB'] = np.sqrt(np.power(det['MAGERR_AUTO'],2)+np.power(zerr[img],2))
@@ -775,8 +1021,7 @@ def main():
         if (zerr[img] < 0.2) or (options.reject is None):
             det.write(fn, format="ascii.ecsv", overwrite=True)
         else:
-            if options.verbose:
-                print("rejected (too large uncertainity in zeropoint)")
+            logging.info("rejected (too large uncertainity in zeropoint)")
             out_file = open("rejected", "a+")
             out_file.write(f"{metadata[0]['FITSFILE']} {ffit.wssrndf:.6f} {zerr[img]:.3f}\n")
             out_file.close()
