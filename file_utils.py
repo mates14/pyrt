@@ -1,5 +1,6 @@
 import os
 import astropy.io.fits
+import logging
 from contextlib import suppress
 
 def try_img(arg, verbose=False):
@@ -7,20 +8,20 @@ def try_img(arg, verbose=False):
     try:
         with suppress(astropy.wcs.FITSFixedWarning):
             fitsfile = astropy.io.fits.open(arg)
-        if verbose: print(f"Argument {arg} is a fits file")
+        logging.info(f"Argument {arg} is a fits file")
         return arg, fitsfile
     except (FileNotFoundError,OSError):
-        if verbose: print(f"Argument {arg} is not a fits file")
+        logging.info(f"Argument {arg} is not a fits file")
         return None, None
 
 def try_sex(arg, verbose=False):
     """Try to open arg as a sextractor file, exit cleanly if it does not happen"""
     try:
         det = astropy.io.ascii.read(arg, format='sextractor')
-        if verbose: print(f"Argument {arg} is a sextractor catalog")
+        logging.info(f"Argument {arg} is a sextractor catalog")
         return arg, det
     except (FileNotFoundError,OSError,UnicodeDecodeError,astropy.io.ascii.core.InconsistentTableError):
-        if verbose: print(f"Argument {arg} is not a sextractor catalog")
+        logging.info(f"Argument {arg} is not a sextractor catalog")
         return None, None
 
 def try_ecsv(arg, verbose=False):
@@ -28,26 +29,26 @@ def try_ecsv(arg, verbose=False):
     try:
         det = astropy.io.ascii.read(arg, format='ecsv')
         det.meta=None # certainly contains interesting info, but breaks the code
-        if verbose: print(f"Argument {arg} is an ascii/ecsv catalog")
+        logging.info(f"Argument {arg} is an ascii/ecsv catalog")
         return arg, det
     except (FileNotFoundError,OSError,UnicodeDecodeError):
-        if verbose: print(f"Argument {arg} is not an ascii/ecsv catalog")
+        logging.info(f"Argument {arg} is not an ascii/ecsv catalog")
         return None, None
 
 def try_det(arg, verbose=False):
     """Try to open arg as an ecsv file, exit cleanly if it does not happen"""
     try:
         detfile = astropy.table.Table.read(arg, format="ascii.ecsv")
-        if verbose: print(f"Argument {arg} is an ecsv table")
+        logging.info(f"Argument {arg} is an ecsv table")
         return arg, detfile
     except (FileNotFoundError,OSError,UnicodeDecodeError,ValueError):
         pass
     try:
         detfile = astropy.table.Table.read(arg)
-        if verbose: print(f"Argument {arg} is a table")
+        logging.info(f"Argument {arg} is a table")
         return arg, detfile
     except (FileNotFoundError,OSError,UnicodeDecodeError,ValueError):
-        if verbose: print(f"Argument {arg} is not a table")
+        logging.info(f"Argument {arg} is not a table")
         return None, None
 
 import astropy.table

@@ -13,6 +13,7 @@ from astropy.io import fits
 import astropy.wcs
 import collections
 import termfit
+import logging
 
 import numpy as np
 
@@ -40,7 +41,7 @@ class zpnfit(termfit.termfit):
             try:
                 self.fixterm(["PROJ"], [self.projections.index(proj)])
             except ValueError:
-                print("Unsupported projection, defaulting to TAN")
+                logging.warning("Unsupported projection, defaulting to TAN")
                 self.fixterm(["PROJ"], [self.PROJ_TAN])
 
         if file is not None:
@@ -130,9 +131,9 @@ class zpnfit(termfit.termfit):
             "BP_2_0", "BP_2_1", "BP_2_2", "BP_3_0", "BP_3_1", "BP_4_0" ]
 
         if os.path.isfile(file):
-            print(f"Writing new WCS header into {file}")
+            logging.info(f"Writing new WCS header into {file}")
         else:
-            print(f"{file} does not exist, no WCS header written")
+            logging.info(f"{file} does not exist, no WCS header written")
             return
 
         nic=0

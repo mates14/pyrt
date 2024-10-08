@@ -83,9 +83,6 @@ def check_filter(nearest_ind, det):
         Zo = np.median(np.array(x)-np.array(y))
         Zoe = np.median(np.abs(np.array(x)-np.array(y)-Zo)) * 0.674490 #/np.sqrt(len(np.array(x)))
 
-#        if options.verbose:
-#            print("Raw zeropoints: %s"%(np.array(x)-np.array(y)))
-#            print("Median of this array is: Zo = %.3f"%(Zo))
         logging.info("Filter: %s Zo: %f Zoe: %f"%(flt, Zo, Zoe))
 
         if besterr>Zoe:
@@ -408,85 +405,6 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
     except Exception as e:
         print(f"Unexpected error in make_pairs_to_fit: {e}")
 
-def dead_make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
-    """
-    Efficiently create pairs of data to be fitted.
-
-    :param det: Detection table
-    :param cat: Catalog table
-    :param nearest_ind: Indices of nearest catalog stars for each detection
-    :param imgwcs: WCS object for the image
-    :param options: Command line options
-    :param data: PhotometryData object to store results
-    """
-    # Create a mask for valid matches
-    valid_matches = np.array([len(inds) > 0 for inds in nearest_ind])
-
-    # Get all required data from det and cat
-    det_data = np.array([det['X_IMAGE'], det['Y_IMAGE'], det['MAG_AUTO'], det['MAGERR_AUTO'], det['ERRX2_IMAGE'], det['ERRY2_IMAGE']]).T[valid_matches]
-    cat_inds = np.array([inds[0] if len(inds) > 0 else -1 for inds in nearest_ind])[valid_matches]
-
-    # Extract relevant catalog data
-    cat_data = cat[cat_inds]
-
-    # Compute celestial coordinates
-    ra, dec = imgwcs.all_pix2world(det_data[:, 0], det_data[:, 1], 1)
-
-    # Compute airmass
-    loc = EarthLocation(lat=det.meta['LATITUDE']*u.deg,
-                        lon=det.meta['LONGITUD']*u.deg,
-                        height=det.meta['ALTITUDE']*u.m)
-    time = Time(det.meta['JD'], format='jd')
-    coords = SkyCoord(ra*u.deg, dec*u.deg)
-    altaz = coords.transform_to(AltAz(obstime=time, location=loc))
-    airmass = altaz.secz.value
-
-    # Compute other required values
-    coord_x = (det_data[:, 0] - det.meta['CTRX']) / 1024
-    coord_y = (det_data[:, 1] - det.meta['CTRY']) / 1024
-
-    # Apply magnitude and color limits
-    if det.meta['REJC']:
-    #if options.rejc:
-        mag0, mag1, mag2, mag3, mag4 = [cat_data[f] for f in ['Johnson_B', 'Johnson_V', 'Johnson_R', 'Johnson_I', 'J']]
-    else:
-        mag0, mag1, mag2, mag3, mag4 = [cat_data[f] for f in ['Sloan_g', 'Sloan_r', 'Sloan_i', 'Sloan_z', 'J']]
-
-    magcat = cat_data[det.meta['REFILTER']]
-
-    mag_mask = (magcat >= options.brightlim) & (magcat <= options.maglim) if options.brightlim else (magcat <= options.maglim)
-    color_mask = ((mag0 - mag2)/2 <= options.redlim) & ((mag0 - mag2)/2 >= options.bluelim) if options.redlim and options.bluelim else True
-
-    final_mask = mag_mask & color_mask
-
-    temp_dy = det_data[:, 3][final_mask]
-    temp_dy_no_zero = np.sqrt(np.power(temp_dy,2)+0.0004)
-
-    _dx = det_data[:, 4][final_mask]
-    _dy = det_data[:, 5][final_mask]
-    _image_dxy = np.sqrt(np.power(_dx,2) + np.power(_dy,2) + 0.0025) # Do not trust errors better than 1/20 pixel
-
-    # Update PhotometryData object
-    data.extend(
-        x=magcat[final_mask],
-        aabs=airmass[final_mask],
-        image_x = det_data[:, 0][final_mask],
-        image_y = det_data[:, 1][final_mask],
-        color1=(mag0 - mag1)[final_mask],
-        color2=(mag1 - mag2)[final_mask],
-        color3=(mag2 - mag3)[final_mask],
-        color4=(mag3 - mag4)[final_mask],
-        y=det_data[:, 2][final_mask],
-        dy=temp_dy_no_zero,
-        ra=cat_data['radeg'][final_mask],
-        dec=cat_data['decdeg'][final_mask],
-        adif=airmass[final_mask] - det.meta['AIRMASS'],
-        coord_x=coord_x[final_mask],
-        coord_y=coord_y[final_mask],
-        image_dxy = _image_dxy,
-        img=np.full(np.sum(final_mask), det.meta['IMGNO'])
-    )
-
 def write_stars_file(data, ffit, imgwcs, filename="stars"):
     """
     Write star data to a file for visualization purposes.
@@ -764,8 +682,6 @@ def setup_logging(verbose):
 def main():
     '''Take over the world.'''
     options = parse_arguments()
-    print(options)
-
     setup_logging(options.verbose)
 
     logging.info(f"{os.path.basename(sys.argv[0])} running in Python {sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}")

@@ -4,6 +4,7 @@ import numpy as np
 #import astropy.wcs
 #import astropy.io.fits
 import zpnfit
+import logging
 
 def refine_fit(zpntest, data):
     """
