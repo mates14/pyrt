@@ -19,6 +19,7 @@ from astropy.coordinates import SkyCoord
 from astropy.time import Time
 from astropy.coordinates import SkyCoord, EarthLocation
 import astropy.units as u
+from file_utils import try_sex, try_ecsv, try_img
 
 def delin(number):
     """cauchy delinearization to give outliers less weight and have more robust fitting"""
