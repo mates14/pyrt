@@ -8,7 +8,7 @@ atlas_bin = "atlas"
 def get_atlas_dir(rasc, decl, width, height, directory, mlim):
     """get contents of one split of Atlas catalog (it is split into directories by magnitude)"""
     atlas_ecsv_tmp = f"atlas{os.getpid()}.ecsv"
-    cmd = f"atlas {rasc} {decl} -rect {width},{height} -dir {directory} -mlim {mlim:.2f} -ecsv > {atlas_ecsv_tmp}"
+    cmd = f"{atlas_bin} {rasc} {decl} -rect {width},{height} -dir {directory} -mlim {mlim:.2f} -ecsv > {atlas_ecsv_tmp}"
     print(cmd)
     os.system(cmd)
     new = astropy.io.ascii.read(atlas_ecsv_tmp, format='ecsv')
@@ -76,13 +76,13 @@ def get_catalog(filename, mlim=17):
         cat.add_column(astropy.table.MaskedColumn(name='pmdec', dtype=np.float64, data=catalog['pmDE']/1e6, fill_value=0))
 
         # we may do different arrangements of the primary/secondary filters
-        # for BV@Tautenburg the logical choice is BP primary and BP-RP to correct. 
+        # for BV@Tautenburg the logical choice is BP primary and BP-RP to correct.
         # PC = (R-B), PD = (B-G), PE = (G-R), with -B Sloan_i, Gmag as a bas may be chosen, default is BPmag
         cat.add_column(astropy.table.MaskedColumn(name='Sloan_g', dtype=np.float64, data=catalog['RPmag'],fill_value=99.9))
         cat.add_column(astropy.table.MaskedColumn(name='Sloan_r', dtype=np.float64, data=catalog['BPmag'],fill_value=99.9))
         cat.add_column(astropy.table.MaskedColumn(name='Sloan_i', dtype=np.float64, data=catalog['Gmag'],fill_value=99.9))
         cat.add_column(astropy.table.MaskedColumn(name='Sloan_z', dtype=np.float64, data=catalog['RPmag'],fill_value=99.9))
-        # BPmag values into the other filter columns 
+        # BPmag values into the other filter columns
         fltnames=['Johnson_B','Johnson_V','Johnson_R','Johnson_I','J','c','o']
         for fltname in fltnames:
             cat.add_column(astropy.table.MaskedColumn(name=fltname, dtype=np.float64, data=catalog['BPmag'], fill_value=99.9))
@@ -102,5 +102,3 @@ def get_catalog(filename, mlim=17):
     except astropy.io.ascii.core.InconsistentTableError:
         print("Catalog cannot be read as an ECSV or TAB-SEP-LIST file!")
     return None
-
-
