@@ -6,6 +6,7 @@ import time
 import logging
 import argparse
 from contextlib import suppress
+import subprocess
 
 import numpy as np
 

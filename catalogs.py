@@ -8,7 +8,7 @@ atlas_bin = "atlas"
 def get_atlas_dir(rasc, decl, width, height, directory, mlim):
     """get contents of one split of Atlas catalog (it is split into directories by magnitude)"""
     atlas_ecsv_tmp = f"atlas{os.getpid()}.ecsv"
-    cmd = f"{atlas_bin} {rasc} {decl} -rect {width},{height} -dir {directory} -mlim {mlim:.2f} -ecsv > {atlas_ecsv_tmp}"
+    cmd = f"atlas {rasc} {decl} -rect {width},{height} -dir {directory} -mlim {mlim:.2f} -ecsv > {atlas_ecsv_tmp}"
     print(cmd)
     os.system(cmd)
     new = astropy.io.ascii.read(atlas_ecsv_tmp, format='ecsv')
