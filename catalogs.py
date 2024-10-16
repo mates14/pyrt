@@ -2,6 +2,9 @@ import os
 import astropy.table
 import astropy.io.ascii
 
+atlas_dir = "/home/mates/cat/atlas"
+atlas_bin = "atlas"
+
 def get_atlas_dir(rasc, decl, width, height, directory, mlim):
     """get contents of one split of Atlas catalog (it is split into directories by magnitude)"""
     atlas_ecsv_tmp = f"atlas{os.getpid()}.ecsv"
@@ -27,11 +30,11 @@ def get_atlas_dir(rasc, decl, width, height, directory, mlim):
 
 def get_atlas(rasc, decl, width=0.25, height=0.25, mlim=17):
     """Load Atlas catalog from disk, (atlas command needs to be in path and working)"""
-    cat = get_atlas_dir(rasc, decl, width, height, '/home/mates/cat/atlas/00_m_16/', mlim)
-    if mlim > 16: cat=astropy.table.vstack([cat, get_atlas_dir(rasc, decl, width, height, '/home/mates/cat/atlas/16_m_17/', mlim)])
-    if mlim > 17: cat=astropy.table.vstack([cat, get_atlas_dir(rasc, decl, width, height, '/home/mates/cat/atlas/17_m_18/', mlim)])
-    if mlim > 18: cat=astropy.table.vstack([cat, get_atlas_dir(rasc, decl, width, height, '/home/mates/cat/atlas/18_m_19/', mlim)])
-    if mlim > 19: cat=astropy.table.vstack([cat, get_atlas_dir(rasc, decl, width, height, '/home/mates/cat/atlas/19_m_20/', mlim)])
+    cat = get_atlas_dir(rasc, decl, width, height, atlas_dir+'/00_m_16/', mlim)
+    if mlim > 16: cat=astropy.table.vstack([cat, get_atlas_dir(rasc, decl, width, height, atlas_dir+'/16_m_17/', mlim)])
+    if mlim > 17: cat=astropy.table.vstack([cat, get_atlas_dir(rasc, decl, width, height, atlas_dir+'/17_m_18/', mlim)])
+    if mlim > 18: cat=astropy.table.vstack([cat, get_atlas_dir(rasc, decl, width, height, atlas_dir+'/18_m_19/', mlim)])
+    if mlim > 19: cat=astropy.table.vstack([cat, get_atlas_dir(rasc, decl, width, height, atlas_dir+'/19_m_20/', mlim)])
 
     # Fill in the Stetson/Johnson filter transformations
     gr = cat['Sloan_g'] - cat['Sloan_r']
