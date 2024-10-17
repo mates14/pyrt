@@ -50,127 +50,6 @@ def summag(magarray):
     """add two magnitudes of the same zeropoint"""
     return -2.5 * np.log10(np.sum( np.power(10.0, -0.4*np.array(magarray))) )
 
-def check_filter(nearest_ind, det):
-    ''' check filter and return the most probable filter '''
-
-    bestflt="-"
-    besterr=np.float64(9e99)
-    bestzero=0
-
-    filters = ['B', 'V', 'R', 'I', 'N', 'Sloan_r', 'Sloan_g', 'Sloan_i', 'Sloan_z']
-
-    for flt in filters:
-        x = []
-        y = []
-        dy = []
-
-        for i, d in zip(nearest_ind, det):
-
-            mag1 = np.float64(9e99)
-            mag2 = np.float64(9e99)
-
-            for k in i:
-                mag1 = summag([mag1, cat[k][first_filter[flt]]])
-                mag2 = summag([mag2, cat[k][second_filter[flt]]])
-
-            if len(i)>0:
-
-                try:
-                    x = np.append(x, mag1 + color_termB[flt] * (mag2 - mag1))
-                except:
-                    x = np.append(x, mag1 + color_termB['R'] * (mag2 - mag1))
-                y = np.append(y, np.float64(d['MAG_AUTO']))
-                dy = np.append(dy, np.float64(d['MAGERR_AUTO']))
-
-        if len(x)<0: print("No identified stars within image"); continue
-
-        Zo = np.median(np.array(x)-np.array(y))
-        Zoe = np.median(np.abs(np.array(x)-np.array(y)-Zo)) * 0.674490 #/np.sqrt(len(np.array(x)))
-
-        logging.info("Filter: %s Zo: %f Zoe: %f"%(flt, Zo, Zoe))
-
-        if besterr>Zoe:
-            bestzero=Zo
-            besterr=Zoe
-            bestflt=flt
-
-    return bestflt
-
-def median_zeropoint(nearest_ind, det, cat, flt, forceAB=False):
-    ''' check filter and return the most likely value '''
-
-    # Bessel filter transforms by Lupton (2005)
-    first_filter = \
-        {     "B":"Sloan_g",       "V":"Sloan_g",       "R":"Sloan_r",       "I":'Sloan_i', \
-              "N":"Sloan_r", "Sloan_r":"Sloan_r", "Sloan_g":"Sloan_g", "Sloan_i":"Sloan_i", \
-        "Sloan_z":"Sloan_z", "Sloan_u":"Sloan_u",  "halpha":"Sloan_r",    "oiii":"Sloan_g", \
-            "sii":"Sloan_i"} # basic filter to be fitted against
-    second_filter = \
-        {     "B":"Sloan_r",       "V":"Sloan_r",       "R":"Sloan_g",       "I":'Sloan_z', \
-              "N":"Sloan_i", "Sloan_r":"Sloan_i", "Sloan_g":"Sloan_r", "Sloan_i":"Sloan_r", \
-        "Sloan_z":"Sloan_i", "Sloan_u":"Sloan_g",  "halpha":"Sloan_i",    "oiii":"Sloan_r", \
-            "sii":"Sloan_r"} # filter to compute color
-    third_filter = \
-        {     "B":"Sloan_i",       "V":"Sloan_i",       "R":"Sloan_i",       "I":'Sloan_r', \
-              "N":"Sloan_g", "Sloan_r":"Sloan_g", "Sloan_g":"Sloan_i", "Sloan_i":"Sloan_z", \
-        "Sloan_z":"Sloan_r", "Sloan_u":"Sloan_r",  "halpha":"Sloan_z",    "oiii":"Sloan_i", \
-            "sii":"Sloan_z"} # filter to compute color
-    color_term0 =  \
-        {     "B":+0.2271,         "V":-0.0038,         "R":-0.0971,         "I":-0.3974,   \
-              "N":0,         "Sloan_r":0,         "Sloan_g":0,         "Sloan_i":0,         \
-        "Sloan_z":0,         "Sloan_u":0,          "halpha":0,            "oiii":0,         \
-            "sii":0} # color term zeropoint
-    color_termB = \
-        {     "B":+0.3130,         "V":-0.5784,         "R":+0.1837,         "I":-0.3780,   \
-              "N":0,         "Sloan_r":0,         "Sloan_g":0,         "Sloan_i":0,         \
-        "Sloan_z":0,         "Sloan_u":0,          "halpha":0,            "oiii":0,         \
-            "sii":0} # color index
-
-#    bestflt="-"
-#    besterr=np.float64(9e99)
-#    bestzero=0
-
-    x = []
-    y = []
-    dy = []
-
-    for i, d in zip(nearest_ind, det):
-
-        mag1 = np.float64(9e99)
-        mag2 = np.float64(9e99)
-
-#        try:
-#            test=color_term0[flt]
-#        except KeyError:
-#            flt='R'
-
-        if forceAB: zero=0
-        else:
-            try:
-                zero=color_term0[flt]
-            except KeyError:
-                flt="V"
-                zero=0
-
-        for k in i:
-            mag1 = summag([mag1, cat[k][first_filter[flt]]])
-            mag2 = summag([mag2, cat[k][second_filter[flt]]])
-
-        if len(i)>0:
-            x = np.append(x, mag1 + color_termB[flt] * (mag2 - mag1))
-            y = np.append(y, np.float64(d['MAG_AUTO']))
-            dy = np.append(dy, np.float64(d['MAGERR_AUTO']))
-
-    # median would complain but not crash if there are no identifications, this is a clean way out
-    if len(x)<=0:
-        # print("No identified stars within image")
-        return np.nan, np.nan, 0
-
-    Zo = np.median(np.array(x)-np.array(y))
-    Zoe = np.median(np.abs(np.array(x)-np.array(y)-Zo)) * 0.674490 #/np.sqrt(len(np.array(x)))
-
-    return Zo, Zoe, len(x)
-
 def print_image_line(det, flt, Zo, Zoe, target=None, idnum=0):
     ''' print photometric status for an image '''
     if target==None:
@@ -191,13 +70,15 @@ def print_image_line(det, flt, Zo, Zoe, target=None, idnum=0):
 
 def get_base_filter(det, options):
     '''set up or guess the base filter to use for fitting'''
+
     johnson_filters = ['Johnson_B', 'Johnson_V', 'Johnson_R', 'Johnson_I', 'B', 'V', 'R', 'I']
-    fit_in_johnson = False
+
+    fit_in_johnson = 'AB'
     basemag = 'Sloan_r'
 
     if options.johnson:
         basemag = 'Johnson_V'
-        fit_in_johnson = True
+        fit_in_johnson = 'Johnson'
 
     if options.guessbase:
         if det.meta['FILTER'] == 'Sloan_g': basemag = 'Sloan_g'
@@ -220,10 +101,13 @@ def get_base_filter(det, options):
         if det.meta['FILTER'] == 'V': basemag = 'Johnson_V'
         if det.meta['FILTER'] == 'R': basemag = 'Johnson_R'
         if det.meta['FILTER'] == 'I': basemag = 'Johnson_I'
-        fit_in_johnson = bool(basemag in johnson_filters)
+        
+        if basemag in johnson_filters: 
+            fit_in_johnson = 'Johnson'
 
     if options.basemag is not None:
-        fit_in_johnson = bool(options.basemag in johnson_filters)
+        if options.basemag in johnson_filters: 
+            fit_in_johnson = 'Johnson'
         basemag = options.basemag
 
     logging.info(f"basemag={basemag} fit_in_johnson={fit_in_johnson}")
@@ -237,6 +121,8 @@ class PhotometryData:
         self._current_mask = None
         self._filter_columns = []
         self._current_filter = None
+        self._required_columns = ['y', 'adif', 'coord_x', 'coord_y', 'img', 'dy']
+        self._image_counts = {}  # New: keep track of object counts per image
 
     def init_column(self, name):
         """Initialize a new column."""
@@ -256,6 +142,15 @@ class PhotometryData:
             if name != 'x':
                 self.init_column(name)
                 self._data[name].extend(value)
+                if name == 'img':
+                    for img_no in value:
+                        self._image_counts[img_no] = self._image_counts.get(img_no, 0) + 1
+#    def extend(self, **kwargs):
+#        """Extend multiple columns with iterable data at once."""
+#        for name, value in kwargs.items():
+#            if name != 'x':
+#                self.init_column(name)
+#                self._data[name].extend(value)
 
     def set_meta(self, key, value):
         """Set metadata."""
@@ -271,8 +166,17 @@ class PhotometryData:
             self._data[name] = np.array(self._data[name])
 
         # Initialize a default mask that includes all data
-        self.add_mask('default', np.ones(len(next(iter(self._data.values()))), dtype=bool))
+        total_objects = sum(self._image_counts.values())
+        self.add_mask('default', np.ones(total_objects, dtype=bool))
         self.use_mask('default')
+#    def finalize(self):
+#        """Convert list-based data to numpy arrays."""
+#        for name in self._data:
+#            self._data[name] = np.array(self._data[name])
+#
+#        # Initialize a default mask that includes all data
+#        self.add_mask('default', np.ones(len(next(iter(self._data.values()))), dtype=bool))
+#        self.use_mask('default')
 
     def add_mask(self, name, mask):
         """Add a new mask or update an existing one."""
@@ -321,25 +225,35 @@ class PhotometryData:
         self._data['color3'] = mags[2] - mags[3]
         self._data['color4'] = mags[3] - mags[4]
 
+        #color_mask = self._data['color3'] > 5
         # Apply color limits
+        #if options.redlim is not None:
+        #    color_mask &= (self._data['color1'] + self._data['color2'])/2 <= options.redlim
+        #if options.bluelim is not None:
+        #    color_mask &=  (self._data['color1'] + self._data['color2'])/2 >= options.bluelim
         if options.redlim is not None and options.bluelim is not None:
             color_mask = ((self._data['color1'] + self._data['color2'])/2 <= options.redlim) & \
-                         ((self._data['color1'] + self._data['color2'])/2 >= options.bluelim)
+                         ((self._data['color1'] + self._data['color2'])/2 >= options.bluelim) & \
+                         (self._data['color3'] > 5)
             self.apply_mask(color_mask)
 
     def get_arrays(self, *names):
         """
         Get multiple columns as separate numpy arrays, applying the current mask.
-        'y' is treated as an alias for the current filter column.
+        'x' is treated as an alias for the current filter column.
         """
+#        self.check_required_columns()  # Ensure all required columns are present
+
         arrays = []
         for name in names:
             if name == 'x':
                 if not self._current_filter:
                     raise ValueError("No filter is currently set. Use set_current_filter() first.")
                 arrays.append(self._data[self._current_filter][self._masks[self._current_mask]])
-            else:
+            elif name in self._data:
                 arrays.append(self._data[name][self._masks[self._current_mask]])
+            else:
+                raise KeyError(f"Column '{name}' not found in data. Available columns: {', '.join(self._data.keys())}")
         return tuple(arrays)
 
     def apply_mask(self, mask, name=None):
@@ -360,7 +274,9 @@ class PhotometryData:
 
     def add_filter_column(self, filter_name, data):
         """Add a new filter magnitude column."""
-        self._data[filter_name] = np.array(data)
+        if filter_name not in self._data:
+            self._data[filter_name] = []
+        self._data[filter_name].extend(data)
         if filter_name not in self._filter_columns:
             self._filter_columns.append(filter_name)
         if not self._current_filter:
@@ -439,6 +355,7 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
         mag_mask = (magcat >= options.brightlim) & (magcat <= options.maglim) if options.brightlim else (magcat <= options.maglim)
 
         # We'll compute color masks later when we know which filter system we're using
+        
 
         # Calculate errors
         temp_dy = det_data[:, 3][mag_mask]
@@ -471,7 +388,7 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
 
         # Store the image number for each point
         data.extend(img=np.full(np.sum(mag_mask), det.meta['IMGNO']))
-
+    
         return n_matched_stars
 
     except KeyError as e:
@@ -561,17 +478,21 @@ def perform_photometric_fitting(data, options, metadata):
     Returns:
     fotfit.fotfit: The fitted photometry model.
     """
-    # First, try fitting zeropoints to each available catalog filter
-    best_filter = select_best_filter(data, metadata)
-    print(f"Selected best filter for initial calibration: {best_filter}")
 
-    # Set the current filter in the PhotometryData object
-    data.set_current_filter(best_filter)
+#    fits_filter, photometric_system = get_base_filter(det, options)
+    data.set_current_filter(metadata[0]['REFILTER'])
+    photometric_system = metadata[0]['REJC']
+
+    if options.select_best:
+        # First, try fitting zeropoints to each available catalog filter
+        best_filter = select_best_filter(data, metadata)
+        print(f"Selected best filter for initial calibration: {best_filter}")
+        # Set the current filter in the PhotometryData object
+        data.set_current_filter(best_filter)
+        # Determine the photometric system based on the best filter
+        photometric_system = 'Johnson' if best_filter.startswith('Johnson') else 'AB'
 
     zeropoints = compute_initial_zeropoints(data, metadata)
-
-    # Determine the photometric system based on the best filter
-    photometric_system = 'Johnson' if best_filter.startswith('Johnson') else 'AB'
 
     # Compute colors and apply color limits
     data.compute_colors_and_apply_limits(photometric_system, options)
@@ -1062,8 +983,8 @@ def compute_initial_zeropoints(data, metadata):
         if len(img_x) > 0:
             zeropoint = np.median(img_x - img_y)  # x (catalog mag) - y (observed mag)
         else:
-            logging.warning(f"No data for image {img_meta['IMGNO']}, using default zeropoint of 0")
-            zeropoint = 0
+            logging.warning(f"No data for image {img_meta['IMGNO']}, using default zeropoint of 25")
+            zeropoint = 25
         
         zeropoints.append(zeropoint)
     

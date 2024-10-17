@@ -72,6 +72,7 @@ def parse_arguments(args=None):
     parser.add_argument("-n", "--nonlin", help="CCD is not linear, apply linear correction on mag", action='store_true')
     parser.add_argument("-p", "--plot", help="Produce plots", action='store_true')
     parser.add_argument("-r", "--reject", help="No outputs for Reduced Chi^2 > value", type=float)
+    parser.add_argument("--select-best", action='store_true', default=config.get('select_best', None), help="Try to select the best filter for photometric fitting")
     parser.add_argument("-s", "--stars", action='store_true', default=config.get('stars', 'False'), help="Output fitted numbers to a file")
     parser.add_argument("-S", "--sip", help="Order of SIP refinement for the astrometric solution (0=disable)", type=int)
     parser.add_argument("-t", "--fit-terms", help="Comma separated list of terms to fit", type=str)
@@ -94,7 +95,7 @@ def parse_arguments(args=None):
     args = parser.parse_args(remaining_argv)
 
     # Convert string 'True'/'False' to boolean for action="store_true" arguments
-    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'fsr']:
+    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'fsr', 'select_best']:
         setattr(args, arg, str(getattr(args, arg)).lower() == 'true')
 
     return args
