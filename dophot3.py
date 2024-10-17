@@ -18,6 +18,9 @@ import astropy.units as u
 from astropy.time import Time
 from astropy.coordinates import SkyCoord, AltAz, EarthLocation
 
+import concurrent.futures
+from copy import deepcopy
+
 # This is to silence a particular annoying warning (MJD not present in a fits file)
 import warnings
 from astropy.wcs import FITSFixedWarning
@@ -232,23 +235,27 @@ class PhotometryData:
         self._meta = {}
         self._masks = {}
         self._current_mask = None
+        self._filter_columns = []
+        self._current_filter = None
 
     def init_column(self, name):
         """Initialize a new column."""
-        if name not in self._data:
+        if name not in self._data and name != 'x':
             self._data[name] = []
 
     def append(self, **kwargs):
         """Append data to multiple columns at once."""
         for name, value in kwargs.items():
-            self.init_column(name)
-            self._data[name].append(value)
+            if name != 'x':
+                self.init_column(name)
+                self._data[name].append(value)
 
     def extend(self, **kwargs):
         """Extend multiple columns with iterable data at once."""
         for name, value in kwargs.items():
-            self.init_column(name)
-            self._data[name].extend(value)
+            if name != 'x':
+                self.init_column(name)
+                self._data[name].extend(value)
 
     def set_meta(self, key, value):
         """Set metadata."""
@@ -283,9 +290,57 @@ class PhotometryData:
             raise ValueError("No mask is currently active.")
         return self._masks[self._current_mask]
 
+    def compute_colors_and_apply_limits(self, photometric_system, options):
+        """
+        Compute colors based on the selected photometric system and apply color limits.
+
+        Args:
+        photometric_system (str): Either 'Johnson' or 'AB' to indicate the photometric system.
+        options (argparse.Namespace): Command line options containing redlim and bluelim.
+
+        Returns:
+        None. Updates the object in-place.
+        """
+        if photometric_system not in ['Johnson', 'AB']:
+            raise ValueError("photometric_system must be either 'Johnson' or 'AB'")
+
+        if photometric_system == 'Johnson':
+            filters = ['Johnson_B', 'Johnson_V', 'Johnson_R', 'Johnson_I', 'J']
+        else:  # AB system
+            filters = ['Sloan_g', 'Sloan_r', 'Sloan_i', 'Sloan_z', 'J']
+
+        # Ensure all required filters are present
+        for f in filters:
+            if f not in self._filter_columns:
+                raise ValueError(f"Required filter {f} not found in data")
+
+        # Compute colors
+        mags = [self._data[f] for f in filters]
+        self._data['color1'] = mags[0] - mags[1]
+        self._data['color2'] = mags[1] - mags[2]
+        self._data['color3'] = mags[2] - mags[3]
+        self._data['color4'] = mags[3] - mags[4]
+
+        # Apply color limits
+        if options.redlim is not None and options.bluelim is not None:
+            color_mask = ((self._data['color1'] + self._data['color2'])/2 <= options.redlim) & \
+                         ((self._data['color1'] + self._data['color2'])/2 >= options.bluelim)
+            self.apply_mask(color_mask)
+
     def get_arrays(self, *names):
-        """Get multiple columns as separate numpy arrays, applying the current mask."""
-        return tuple(self._data[name][self._masks[self._current_mask]] for name in names)
+        """
+        Get multiple columns as separate numpy arrays, applying the current mask.
+        'y' is treated as an alias for the current filter column.
+        """
+        arrays = []
+        for name in names:
+            if name == 'x':
+                if not self._current_filter:
+                    raise ValueError("No filter is currently set. Use set_current_filter() first.")
+                arrays.append(self._data[self._current_filter][self._masks[self._current_mask]])
+            else:
+                arrays.append(self._data[name][self._masks[self._current_mask]])
+        return tuple(arrays)
 
     def apply_mask(self, mask, name=None):
         """Apply a boolean mask to the current mask or create a new named mask."""
@@ -303,6 +358,28 @@ class PhotometryData:
             name = self._current_mask
         self._masks[name] = np.ones(len(next(iter(self._data.values()))), dtype=bool)
 
+    def add_filter_column(self, filter_name, data):
+        """Add a new filter magnitude column."""
+        self._data[filter_name] = np.array(data)
+        if filter_name not in self._filter_columns:
+            self._filter_columns.append(filter_name)
+        if not self._current_filter:
+            self.set_current_filter(filter_name)
+
+    def get_filter_columns(self):
+        """Get the list of available filter columns."""
+        return self._filter_columns
+
+    def set_current_filter(self, filter_name):
+        """Set the current filter to be used as 'x'."""
+        if filter_name not in self._filter_columns:
+            raise ValueError(f"Filter '{filter_name}' not found in data.")
+        self._current_filter = filter_name
+
+    def get_current_filter(self):
+        """Get the name of the current filter."""
+        return self._current_filter
+
     def __len__(self):
         """Return the number of rows in the data (considering the current mask)."""
         if self._data:
@@ -311,13 +388,7 @@ class PhotometryData:
 
     def __repr__(self):
         """Return a string representation of the data."""
-        return f"PhotometryData with columns: {list(self._data.keys())}, current mask: {self._current_mask}"
-
-    def write(self, filename, format="ascii.ecsv", **kwargs):
-        """Write the data to a file using astropy.table.Table.write method."""
-        table = astropy.table.Table({k: v[self._masks[self._current_mask]] for k, v in self._data.items()})
-        table.meta.update(self._meta)
-        table.write(filename, format=format, **kwargs)
+        return f"PhotometryData with columns: {list(self._data.keys())}, current filter: {self._current_filter}, current mask: {self._current_mask}"
 
 def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
     """
@@ -357,54 +428,60 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
         coord_x = (det_data[:, 0] - det.meta['CTRX']) / 1024
         coord_y = (det_data[:, 1] - det.meta['CTRY']) / 1024
 
-        # Apply magnitude and color limits
-        if det.meta['REJC']:
-            mag0, mag1, mag2, mag3, mag4 = [cat_data[f] for f in ['Johnson_B', 'Johnson_V', 'Johnson_R', 'Johnson_I', 'J']]
-        else:
-            mag0, mag1, mag2, mag3, mag4 = [cat_data[f] for f in ['Sloan_g', 'Sloan_r', 'Sloan_i', 'Sloan_z', 'J']]
+        # Get all available filter magnitudes
+        filter_mags = {}
+        for filter_name in cat.columns:
+            if filter_name.startswith(('Sloan_', 'Johnson_', 'J')):
+                filter_mags[filter_name] = cat_data[filter_name]
 
+        # Apply magnitude limits
         magcat = cat_data[det.meta['REFILTER']]
-
-        # Create masks for magnitude and color limits
         mag_mask = (magcat >= options.brightlim) & (magcat <= options.maglim) if options.brightlim else (magcat <= options.maglim)
-        color_mask = ((mag0 - mag2)/2 <= options.redlim) & ((mag0 - mag2)/2 >= options.bluelim) if options.redlim and options.bluelim else True
 
-        final_mask = mag_mask & color_mask
+        # We'll compute color masks later when we know which filter system we're using
 
         # Calculate errors
-        temp_dy = det_data[:, 3][final_mask]
+        temp_dy = det_data[:, 3][mag_mask]
         temp_dy_no_zero = np.sqrt(np.power(temp_dy,2)+0.0004)
 
-        _dx = det_data[:, 4][final_mask]
-        _dy = det_data[:, 5][final_mask]
+        _dx = det_data[:, 4][mag_mask]
+        _dy = det_data[:, 5][mag_mask]
         _image_dxy = np.sqrt(np.power(_dx,2) + np.power(_dy,2) + 0.0025)  # Do not trust errors better than 1/20 pixel
+
+        n_matched_stars = np.sum(mag_mask)
 
         # Update PhotometryData object
         data.extend(
-            x=magcat[final_mask],
-            aabs=airmass[final_mask],
-            image_x = det_data[:, 0][final_mask],
-            image_y = det_data[:, 1][final_mask],
-            color1=(mag0 - mag1)[final_mask],
-            color2=(mag1 - mag2)[final_mask],
-            color3=(mag2 - mag3)[final_mask],
-            color4=(mag3 - mag4)[final_mask],
-            y=det_data[:, 2][final_mask],
+            aabs=airmass[mag_mask],
+            image_x=det_data[:, 0][mag_mask],
+            image_y=det_data[:, 1][mag_mask],
+            y=det_data[:, 2][mag_mask],
             dy=temp_dy_no_zero,
-            ra=cat_data['radeg'][final_mask],
-            dec=cat_data['decdeg'][final_mask],
-            adif=airmass[final_mask] - det.meta['AIRMASS'],
-            coord_x=coord_x[final_mask],
-            coord_y=coord_y[final_mask],
-            image_dxy = _image_dxy,
-            img=np.full(np.sum(final_mask), det.meta['IMGNO'])
+            ra=cat_data['radeg'][mag_mask],
+            dec=cat_data['decdeg'][mag_mask],
+            adif=airmass[mag_mask] - det.meta['AIRMASS'],
+            coord_x=coord_x[mag_mask],
+            coord_y=coord_y[mag_mask],
+            image_dxy=_image_dxy
         )
+
+        # Add all filter magnitudes to the data
+        for filter_name, mag_values in filter_mags.items():
+            data.add_filter_column(filter_name, mag_values[mag_mask])
+
+        # Store the image number for each point
+        data.extend(img=np.full(np.sum(mag_mask), det.meta['IMGNO']))
+
+        return n_matched_stars
+
     except KeyError as e:
         print(f"Error: Missing key in detection or catalog data: {e}")
     except ValueError as e:
         print(f"Error: Invalid value encountered: {e}")
     except Exception as e:
         print(f"Unexpected error in make_pairs_to_fit: {e}")
+
+    return 0
 
 def write_stars_file(data, ffit, imgwcs, filename="stars"):
     """
@@ -471,9 +548,10 @@ def write_stars_file(data, ffit, imgwcs, filename="stars"):
     # Write the table to a file
     stars_table.write(filename, format='ascii.ecsv', overwrite=True)
 
-def perform_photometric_fitting(data, options, zeropoints):
+def perform_photometric_fitting(data, options, metadata):
     """
-    Perform photometric fitting on the data.
+    Perform photometric fitting on the data using forward stepwise regression,
+    including an initial step to select the best catalog filter.
 
     Args:
     data (PhotometryData): Object containing all photometry data.
@@ -483,22 +561,71 @@ def perform_photometric_fitting(data, options, zeropoints):
     Returns:
     fotfit.fotfit: The fitted photometry model.
     """
+    # First, try fitting zeropoints to each available catalog filter
+    best_filter = select_best_filter(data, metadata)
+    print(f"Selected best filter for initial calibration: {best_filter}")
+
+    # Set the current filter in the PhotometryData object
+    data.set_current_filter(best_filter)
+
+    zeropoints = compute_initial_zeropoints(data, metadata)
+
+    # Determine the photometric system based on the best filter
+    photometric_system = 'Johnson' if best_filter.startswith('Johnson') else 'AB'
+
+    # Compute colors and apply color limits
+    data.compute_colors_and_apply_limits(photometric_system, options)
+
     ffit = fotfit.fotfit(fit_xy=options.fit_xy)
 
-    # Set up the model
-    setup_photometric_model(ffit, options)
-
-    # Set initial zeropoints
+    # Set initial zeropoints and use the best filter
     ffit.zero = zeropoints
 
-    # Perform initial fit
+    # Perform initial fit with just the zeropoints
     fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy')
     ffit.fit(fdata)
+    best_wssrndf = ffit.wssrndf
 
+    # Parse the terms from options.terms
+    all_terms = parse_terms(options.terms) if options.terms else []
+
+    selected_terms = []
+    remaining_terms = all_terms.copy()
+
+    while remaining_terms:
+        best_term = None
+        best_improvement = 0
+
+        # Try each remaining term in parallel
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            future_to_term = {executor.submit(try_term, ffit, term, selected_terms, fdata, options): term for term in remaining_terms}
+            for future in concurrent.futures.as_completed(future_to_term):
+                term = future_to_term[future]
+                try:
+                    new_wssrndf = future.result()
+                    improvement = best_wssrndf - new_wssrndf
+                    if improvement > best_improvement:
+                        best_improvement = improvement
+                        best_term = term
+                except Exception as exc:
+                    print(f'{term} generated an exception: {exc}')
+
+        if best_improvement > 0:
+            selected_terms.append(best_term)
+            remaining_terms.remove(best_term)
+            best_wssrndf -= best_improvement
+            print(f"Added term {best_term}. New wssrndf: {best_wssrndf}")
+        else:
+            break  # No more terms improve the fit
+
+    # Final fit with all selected terms
+    setup_photometric_model(ffit, options, trying=",".join(selected_terms))
+    ffit.fit(fdata)
     # Apply photometric mask and refit
     photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
     data.apply_mask(photo_mask, 'photometry')
     data.use_mask('photometry')
+    # 1.
     fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy')
 
     ffit.delin = True
@@ -510,14 +637,49 @@ def perform_photometric_fitting(data, options, zeropoints):
     photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
     data.apply_mask(photo_mask, 'photometry')
     data.use_mask('photometry')
+    # 1.
     fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy')
     ffit.fit(fdata)
 
     print(f"Final fit variance: {ffit.wssrndf}")
 
+
+    print(f"Final fit variance: {ffit.wssrndf}")
+    print(f"Selected terms: {selected_terms}")
+
     return ffit
 
-def setup_photometric_model(ffit, options):
+def try_term(ffit, term, selected_terms, fdata, options):
+    """
+    Try fitting with a new term added to the currently selected terms.
+
+    Args:
+    ffit (fotfit.fotfit): The current fitting object.
+    term (str): The new term to try.
+    selected_terms (list): List of currently selected terms.
+    fdata (tuple): The fitting data.
+
+    Returns:
+    float: The new wssrndf after fitting with the added term.
+    """
+    new_ffit = deepcopy(ffit)
+    setup_photometric_model(new_ffit, options, trying=",".join(selected_terms + [term]))
+    new_ffit.fit(fdata)
+    return new_ffit.wssrndf
+
+def parse_terms(terms_string):
+    """
+    Parse the terms string into a list of individual terms.
+
+    Args:
+    terms_string (str): Comma-separated string of terms.
+
+    Returns:
+    list: List of individual terms.
+    """
+    return [term.strip() for term in terms_string.split(',') if term.strip()]
+
+def setup_photometric_model(ffit, options, trying=None):
     """
     Set up the photometric model based on command line options.
 
@@ -525,6 +687,7 @@ def setup_photometric_model(ffit, options):
     ffit (fotfit.fotfit): The photometric fitting object.
     options (argparse.Namespace): Command line options.
     """
+
     # Load model from file if specified
     if options.model:
         load_model_from_file(ffit, options.model)
@@ -533,8 +696,11 @@ def setup_photometric_model(ffit, options):
     ffit.fixterm(["N1"], values=[0])
 
     # Set up fitting terms
-    if options.terms:
-        setup_fitting_terms(ffit, options.terms, options.verbose, options.fit_xy)
+    if trying is None:
+        if options.terms:
+            setup_fitting_terms(ffit, options.terms, options.verbose, options.fit_xy)
+    else:
+        setup_fitting_terms(ffit, trying, options.verbose, options.fit_xy)
 
 def load_model_from_file(ffit, model_file):
     """
@@ -827,6 +993,82 @@ def write_output_line(det, options, zero, zerr, ffit, target):
     except Exception as e:
         print(f"Error writing to dophot.dat: {e}")
 
+def select_best_filter(data, metadata):
+    """
+    Select the best catalog filter for initial calibration.
+
+    Args:
+    data (PhotometryData): Object containing all photometry data.
+    metadata (list): List of metadata for each image.
+
+    Returns:
+    str: The name of the best filter to use for initial calibration.
+    """
+    available_filters = data.get_filter_columns()
+    best_filter = None
+    best_wssrndf = float('inf')
+
+    for filter_name in available_filters:
+        ffit = fotfit.fotfit()
+        # Initialize zeropoints with zeros (we'll estimate them later)
+        ffit.zero = [0] * len(metadata)
+
+        # Temporarily set the current filter
+        data.set_current_filter(filter_name)
+
+        # Get the data for fitting, including placeholder color columns
+        try:
+            fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'img', 'x', 'dy')
+            
+            # Add placeholder color columns
+            placeholder_colors = np.zeros((4, len(fdata[0])))
+            fdata = fdata[:5] + tuple(placeholder_colors) + fdata[5:]
+
+            ffit.fit(fdata)
+            if ffit.wssrndf < best_wssrndf:
+                best_wssrndf = ffit.wssrndf
+                best_filter = filter_name
+            print(f"Successfully fitted filter {filter_name} with wssrndf: {ffit.wssrndf}")
+        except Exception as e:
+            print(f"Error fitting filter {filter_name}: {str(e)}")
+            print(f"fdata shape: {[len(arr) for arr in fdata]}")
+            print(f"First few elements of fdata: {[arr[:5] for arr in fdata]}")
+
+    if best_filter is None:
+        raise ValueError("Failed to fit any filter. Check the input data and fitting process.")
+
+    print(f"Best filter: {best_filter} with wssrndf: {best_wssrndf}")
+    return best_filter
+
+def compute_initial_zeropoints(data, metadata):
+    """
+    Compute initial zeropoints for each image based on the selected best filter.
+    
+    Args:
+    data (PhotometryData): Object containing all photometry data.
+    metadata (list): List of metadata for each image.
+    
+    Returns:
+    list: Initial zeropoints for each image.
+    """
+    zeropoints = []
+    x, y, img = data.get_arrays('x', 'y', 'img')
+    
+    for img_meta in metadata:
+        img_mask = img == img_meta['IMGNO']
+        img_x = x[img_mask]
+        img_y = y[img_mask]
+        
+        if len(img_x) > 0:
+            zeropoint = np.median(img_x - img_y)  # x (catalog mag) - y (observed mag)
+        else:
+            logging.warning(f"No data for image {img_meta['IMGNO']}, using default zeropoint of 0")
+            zeropoint = 0
+        
+        zeropoints.append(zeropoint)
+    
+    return zeropoints
+
 # ******** main() **********
 
 def main():
@@ -840,7 +1082,6 @@ def main():
     data = PhotometryData()
 
     target = []
-    zeropoints = []
     metadata = []
     alldet=[]
     imgno=0
@@ -961,52 +1202,57 @@ def main():
         # === objects identified ===
 
         # TODO: handle discrepancy between estimated and fitsheader filter
-        flt = det.meta['FILTER']
+#        flt = det.meta['FILTER']
 
-        if options.tryflt:
-            fltx = check_filter(nearest_ind, det)
+#        if options.tryflt:
+#            fltx = check_filter(nearest_ind, det)
     #        print("Filter: %s"%(fltx))
-            flt = fltx
+#            flt = fltx
 
         # crude estimation of an image photometric zeropoint
-        Zo, Zoe, Zn = median_zeropoint(nearest_ind, det, cat, flt)
+#        Zo, Zoe, Zn = median_zeropoint(nearest_ind, det, cat, flt)
 
-        if Zn == 0:
-            print(f"Warning: no identified stars in {det.meta['FITSFILE']}, skip image")
-            continue
+#        if Zn == 0:
+#            print(f"Warning: no identified stars in {det.meta['FITSFILE']}, skip image")
+#            continue
 
-        if options.tryflt:
-            print_image_line(det, flt, Zo, Zoe, target[imgno], Zn)
-            sys.exit(0)
+#        if options.tryflt:
+#            print_image_line(det, flt, Zo, Zoe, target[imgno], Zn)
+#            sys.exit(0)
 
         # === fill up fields to be fitted ===
-        zeropoints=zeropoints+[Zo]
-        det.meta['IDNUM'] = Zn
-        metadata.append(det.meta)
+#        zeropoints=zeropoints+[Zo]
+#        det.meta['IDNUM'] = Zn
+#        metadata.append(det.meta)
 
-        cas = astropy.time.Time(det.meta['JD'], format='jd')
-        loc = astropy.coordinates.EarthLocation(\
-            lat=det.meta['LATITUDE']*astropy.units.deg, \
-            lon=det.meta['LONGITUD']*astropy.units.deg, \
-            height=det.meta['ALTITUDE']*astropy.units.m)
-
-        tmpra, tmpdec = imgwcs.all_pix2world(det.meta['CTRX'], det.meta['CTRY'], 1)
-        rd = astropy.coordinates.SkyCoord( np.float64(tmpra), np.float64(tmpdec), unit=astropy.units.deg)
-        rdalt = rd.transform_to(astropy.coordinates.AltAz(obstime=cas, location=loc))
-        det.meta['AIRMASS'] = airmass(np.pi/2-rdalt.alt.rad)
+# Tohle tady asi nema co delat, mozna do cat2det nebo uplne pryc?
+#        cas = astropy.time.Time(det.meta['JD'], format='jd')
+#        loc = astropy.coordinates.EarthLocation(\
+#            lat=det.meta['LATITUDE']*astropy.units.deg, \
+#            lon=det.meta['LONGITUD']*astropy.units.deg, \
+#            height=det.meta['ALTITUDE']*astropy.units.m)
+#
+#        tmpra, tmpdec = imgwcs.all_pix2world(det.meta['CTRX'], det.meta['CTRY'], 1)
+#        rd = astropy.coordinates.SkyCoord( np.float64(tmpra), np.float64(tmpdec), unit=astropy.units.deg)
+#        rdalt = rd.transform_to(astropy.coordinates.AltAz(obstime=cas, location=loc))
+#        det.meta['AIRMASS'] = airmass(np.pi/2-rdalt.alt.rad)
 
         det.meta['REFILTER'], det.meta['REJC'] = get_base_filter(det, options)
 
         # make pairs to be fitted
         det.meta['IMGNO'] = imgno
-        make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data)
+        n_matched_stars = make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data)
+        det.meta['IDNUM'] = n_matched_stars
 
-        #if len(data)==0: # if number of stars from this file is 0, do not increment imgno, effectively skipping the file
-        #    print("Not enough stars to work with (Records:", len(data),")")
-        #    sys.exit(0)
+        if n_matched_stars == 0:
+            logging.warning(f"No matched stars in {det.meta['FITSFILE']}, skipping image")
+            continue
 
-        alldet = alldet+[det]
-        imgno=imgno+1
+        # Store metadata for later use
+#        det.meta['IMGNO'] = imgno
+        metadata.append(det.meta)
+        alldet.append(det)
+        imgno += 1
 
     data.finalize()
 
@@ -1021,9 +1267,8 @@ def main():
     logging.info(f"Photometry will be fitted with {len(data)} objects from {imgno} files")
     # tady mame hvezdy ze snimku a hvezdy z katalogu nactene a identifikovane
 
-    # Usage in main function:
     start = time.time()
-    ffit = perform_photometric_fitting(data, options, zeropoints)
+    ffit = perform_photometric_fitting(data, options, metadata)
     logging.info(ffit)
     logging.info(f"Photometric fit took {time.time()-start:.3f}s")
 

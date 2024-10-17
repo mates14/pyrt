@@ -52,6 +52,8 @@ def parse_arguments(args=None):
     parser.add_argument("-d", "--date", action='store', help="what to put into the third column (char,mid,bjd), default=mid")
     parser.add_argument("-e", "--enlarge", type=float, default=config.get('enlarge'), help="Enlarge catalog search region")
     parser.add_argument("-f", "--filter", default=config.get('filter'), help="Override filter info from fits")
+    parser.add_argument("--fsr", help="Use forward stepwise regression", default=config.get('fsr', 'False') )
+    parser.add_argument("--fsr-terms", help="Terms to be used to do forward stepwise regression", default=config.get('fsr_terms', None) )
     parser.add_argument("-F", "--flat", help="Produce flats", action='store_true')
     parser.add_argument("-g", "--guessbase", action="store_true", default=config.get('guessbase', 'False'),
                         help="Try and set base filter from fits header (implies -j if Bessel filter is found)")
@@ -92,7 +94,7 @@ def parse_arguments(args=None):
     args = parser.parse_args(remaining_argv)
 
     # Convert string 'True'/'False' to boolean for action="store_true" arguments
-    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak']:
+    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'fsr']:
         setattr(args, arg, str(getattr(args, arg)).lower() == 'true')
 
     return args
