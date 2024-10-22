@@ -100,6 +100,8 @@ def call_iraf(file, det):
     base = os.path.splitext(file)[0]
 
     fwhm = np.median(det[ det['MAGERR_AUTO'] < 1.091/10 ]['FWHM_IMAGE'])
+    if np.isnan(fwhm):
+        fwhm = np.nanmedian(det)
     print(f'FWHM={fwhm}')
 
     some_file = open(base+".coo.1", "w+")
@@ -152,8 +154,12 @@ def main():
     options = read_options(sys.argv[1:])
     for file in options.files:
         base = os.path.splitext(file)[0]
-        det = call_sextractor(file, 1.5)
-        det = call_sextractor(file, np.median(det[ det['MAGERR_AUTO'] < 1.091/10 ]['FWHM_IMAGE']), bg=options.background)
+        det = call_sextractor(file, 2.0)
+        new_fwhm = np.median(det[ det['MAGERR_AUTO'] < 1.091/10 ]['FWHM_IMAGE'])
+        if np.isnan(new_fwhm):
+            new_fwhm = np.median(det)
+        if not np.isnan(new_fwhm):
+            det = call_sextractor(file, new_fwhm, bg=options.background)
 
         if options.noiraf:
             tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
