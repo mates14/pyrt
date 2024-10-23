@@ -30,7 +30,8 @@ from sklearn.neighbors import KDTree
 
 import zpnfit
 import fotfit
-from catalogs import get_atlas, get_catalog
+#from catalogs import get_atlas, get_catalog
+from catalog import CatalogManager
 from cat2det import remove_junk
 from refit_astrometry import refit_astrometry
 from file_utils import try_det, try_img, write_region_file
@@ -70,7 +71,133 @@ def print_image_line(det, flt, Zo, Zoe, target=None, idnum=0):
 
     return
 
-def get_base_filter(det, options):
+def get_base_filter(det, options, catalog_info=None):
+    '''
+    Set up or guess the base filter to use for fitting.
+    
+    Args:
+        det: Detection table with metadata
+        options: Command line options
+        catalog_info: Optional catalog information from CatalogManager
+    
+    Returns:
+        tuple: (base_filter_name, photometric_system)
+    '''
+    # Define known filter mappings
+    FILTER_MAPPINGS = {
+        # Standard names
+        'Sloan_g': 'Sloan_g',
+        'Sloan_r': 'Sloan_r',
+        'Sloan_i': 'Sloan_i',
+        'Sloan_z': 'Sloan_z',
+        'Johnson_B': 'Johnson_B',
+        'Johnson_V': 'Johnson_V',
+        'Johnson_R': 'Johnson_R',
+        'Johnson_I': 'Johnson_I',
+        # Alternative names
+        'g-SLOAN': 'Sloan_g',
+        'r-SLOAN': 'Sloan_r',
+        'i-SLOAN': 'Sloan_i',
+        'z-SLOAN': 'Sloan_z',
+        'g': 'Sloan_g',
+        'r': 'Sloan_r',
+        'i': 'Sloan_i',
+        'z': 'Sloan_z',
+        'B': 'Johnson_B',
+        'V': 'Johnson_V',
+        'R': 'Johnson_R',
+        'I': 'Johnson_I',
+        # Add Gaia mappings
+        'G': 'G',
+        'BP': 'BP',
+        'RP': 'RP',
+        # Add PanSTARRS mappings
+        'gMeanPSFMag': 'Sloan_g',
+        'rMeanPSFMag': 'Sloan_r',
+        'iMeanPSFMag': 'Sloan_i',
+        'zMeanPSFMag': 'Sloan_z',
+        'yMeanPSFMag': 'y'
+    }
+    
+    # Define filter systems
+    JOHNSON_FILTERS = {
+        'Johnson_B', 'Johnson_V', 'Johnson_R', 'Johnson_I',
+        'B', 'V', 'R', 'I'
+    }
+    
+    def get_available_filters(catalog_info):
+        """Get available filters from catalog info"""
+        if catalog_info is None:
+            # Default to ATLAS filters if no catalog specified
+            return set(FILTER_MAPPINGS.values())
+        return set(catalog_info['filters'].keys())
+    
+    def map_filter_name(filter_name, available_filters):
+        """Map filter name to standardized name if available"""
+        mapped_name = FILTER_MAPPINGS.get(filter_name, filter_name)
+        if mapped_name in available_filters:
+            return mapped_name
+        return None
+    
+    # Get available filters
+    available_filters = get_available_filters(catalog_info)
+    
+    # Start with defaults
+    fit_in_johnson = 'AB'
+    basemag = 'Sloan_r'
+    
+    # Handle Johnson preference
+    if options.johnson and 'Johnson_V' in available_filters:
+        basemag = 'Johnson_V'
+        fit_in_johnson = 'Johnson'
+    
+    # Handle explicit base magnitude
+    if options.basemag is not None:
+        mapped_filter = map_filter_name(options.basemag, available_filters)
+        if mapped_filter is not None:
+            basemag = mapped_filter
+            if mapped_filter in JOHNSON_FILTERS:
+                fit_in_johnson = 'Johnson'
+        else:
+            logging.warning(f"Requested filter {options.basemag} not available in catalog. Using {basemag}")
+    
+    # Handle automatic filter detection
+    elif options.guessbase:
+        filter_name = det.meta.get('FILTER')
+        if filter_name:
+            mapped_filter = map_filter_name(filter_name, available_filters)
+            if mapped_filter is not None:
+                basemag = mapped_filter
+                if mapped_filter in JOHNSON_FILTERS:
+                    fit_in_johnson = 'Johnson'
+    
+    # Handle case where selected filter is not available
+    if basemag not in available_filters:
+        # Try to find best alternative
+        if fit_in_johnson == 'Johnson':
+            alternatives = JOHNSON_FILTERS & available_filters
+            if alternatives:
+                basemag = next(iter(alternatives))
+            else:
+                # Fall back to Sloan if no Johnson filters available
+                basemag = 'Sloan_r' if 'Sloan_r' in available_filters else next(iter(available_filters))
+                fit_in_johnson = 'AB'
+        else:
+            # Try to find closest Sloan filter
+            sloan_order = ['Sloan_r', 'Sloan_g', 'Sloan_i', 'Sloan_z']
+            for alt in sloan_order:
+                if alt in available_filters:
+                    basemag = alt
+                    break
+            else:
+                # Last resort: use first available filter
+                basemag = next(iter(available_filters))
+    
+    logging.info(f"basemag={basemag} fit_in_johnson={fit_in_johnson} (available filters: {sorted(available_filters)})")
+    return basemag, fit_in_johnson
+
+
+def x_get_base_filter(det, options):
     '''set up or guess the base filter to use for fitting'''
 
     johnson_filters = ['Johnson_B', 'Johnson_V', 'Johnson_R', 'Johnson_I', 'B', 'V', 'R', 'I']
@@ -677,6 +804,98 @@ def select_best_filter(data, metadata):
     print(f"Best filter: {best_filter} with wssrndf: {best_wssrndf}")
     return best_filter
 
+def get_catalog_data(det, options, enlarge=1.0):
+    """
+    Get catalog data with proper epoch correction.
+    
+    Args:
+        det: Detection table with metadata
+        options: Command line options
+        enlarge: Factor to enlarge search area
+    
+    Returns:
+        astropy.table.Table: Catalog data with corrected positions
+    """
+    start_time = time.time()
+    
+    try:
+        if options.makak:
+            # Handle custom catalog case
+            cat = astropy.table.Table.read('/home/mates/test/catalog.fits')
+            
+            # Filter by field of view
+            ctr = SkyCoord(det.meta['CTRRA']*u.deg, det.meta['CTRDEC']*u.deg, frame='fk5')
+            cat_coords = SkyCoord(cat['radeg']*u.deg, cat['decdeg']*u.deg, frame='fk5')
+            within_field = cat_coords.separation(ctr) < (det.meta['FIELD']*u.deg / 2)
+            cat = cat[within_field]
+            
+            # Set default epoch if not present
+            if 'astepoch' not in cat.meta:
+                cat.meta['astepoch'] = 2015.5  # Default to DR2 epoch
+                logging.warning("No epoch information in custom catalog, assuming 2015.5")
+        else:
+            # Use CatalogManager for standard catalogs
+            catman = CatalogManager()
+            
+            if options.catalog:
+                # Use specified catalog
+                cat = catman.get_catalog(
+                    ra=det.meta['CTRRA'],
+                    dec=det.meta['CTRDEC'],
+                    width=enlarge * det.meta['FIELD'],
+                    height=enlarge * det.meta['FIELD'],
+                    mlim=options.maglim,
+                    catalog=options.catalog
+                )
+            else:
+                # Default to ATLAS
+                cat = catman.get_catalog(
+                    ra=det.meta['CTRRA'],
+                    dec=det.meta['CTRDEC'],
+                    width=enlarge * det.meta['FIELD'],
+                    height=enlarge * det.meta['FIELD'],
+                    mlim=options.maglim,
+                    catalog='ATLAS'
+                )
+        
+        if cat is None or len(cat) == 0:
+            raise ValueError("No catalog data retrieved")
+            
+        # Compute epoch difference and apply proper motion correction
+        # Converts observation JD to Unix epoch days, then to years
+        obs_epoch = (det.meta['JD'] - 2440587.5) / 365.2425 + 1970.0
+        cat_epoch = cat.meta['astepoch']
+        epoch_diff = obs_epoch - cat_epoch
+        
+        logging.info(f"Observation epoch: {obs_epoch:.1f}")
+        logging.info(f"Catalog epoch: {cat_epoch:.1f}")
+        logging.info(f"Epoch difference: {epoch_diff:.1f} years")
+        
+        # Apply proper motion correction if available
+        if 'pmra' in cat.columns and 'pmdec' in cat.columns:
+            # Handle missing proper motions (set to 0)
+            pmra = np.nan_to_num(cat['pmra'])
+            pmdec = np.nan_to_num(cat['pmdec'])
+            
+            # Apply corrections
+            cat['radeg'] += epoch_diff * pmra
+            cat['decdeg'] += epoch_diff * pmdec
+            
+            logging.info("Applied proper motion corrections")
+        else:
+            logging.warning("No proper motion data available in catalog")
+        
+        logging.info(f"Catalog search took {time.time()-start_time:.3f}s")
+        logging.info(f"Catalog contains {len(cat)} entries")
+        
+        return cat
+        
+    except Exception as e:
+        logging.error(f"Error getting catalog data: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 # ******** main() **********
 
 def main():
@@ -715,23 +934,30 @@ def main():
         # if options.usewcs is not None:
         #      fixme from "broken_usewcs.py"            
 
-        if options.enlarge is not None:
-            enlarge = options.enlarge
-        else: enlarge=1
-
         start = time.time()
-        if options.makak:
-            cat = astropy.table.Table.read('/home/mates/test/catalog.fits')
-            ctr = SkyCoord(det.meta['CTRRA']*astropy.units.deg,det.meta['CTRDEC']*astropy.units.deg,frame='fk5')
-            c2 = SkyCoord(cat['radeg']*astropy.units.deg,cat['decdeg']*astropy.units.deg,frame='fk5').separation(ctr) < \
-                det.meta['FIELD']*astropy.units.deg / 2
-            cat=cat[c2]
-        else:
-            if options.catalog:
-                cat = get_catalog(options.catalog, mlim=options.maglim)
-            else:
-                cat = get_atlas(det.meta['CTRRA'], det.meta['CTRDEC'], width=enlarge*det.meta['FIELD'],
-                    height=enlarge*det.meta['FIELD'], mlim=options.maglim)
+        catman = CatalogManager()
+
+        #if options.makak_path: CatalogManager.set_makak_path(options.makak_path)
+        catalog = 'MAKAK' if options.makak else (options.catalog or 'ATLAS')
+        enlarge = options.enlarge if options.enlarge is not None else 1.0
+
+        logging.info(f"Catalog to be used: {catalog} {options.catalog}")
+
+        cat = catman.get_catalog(
+            ra=det.meta['CTRRA'],
+            dec=det.meta['CTRDEC'],
+            width=enlarge * det.meta['FIELD'],
+            height=enlarge * det.meta['FIELD'],
+            mlim=options.maglim,
+            catalog=catalog
+        )
+        
+        if cat is None:
+            logging.error(f"Failed to get {catalog} catalog data")
+            return None
+
+        catalog_info = CatalogManager.KNOWN_CATALOGS.get(catalog)
+        base_filter, photometric_system = get_base_filter(det, options, catalog_info)
 
         # Epoch for PM correction (Gaia DR2@2015.5)
         #epoch = ( det.meta['JD'] - 2457204.5 ) / 365.2425 # Epoch for PM correction (Gaia DR2@2015.5)
