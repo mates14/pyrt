@@ -45,6 +45,7 @@ class CatalogFilters:
         'Sloan_r': CatalogFilter('Sloan_r', 6170, 'AB'),
         'Sloan_i': CatalogFilter('Sloan_i', 7520, 'AB'),
         'Sloan_z': CatalogFilter('Sloan_z', 8660, 'AB'),
+        'J': CatalogFilter('J', 12000, 'AB'),
         'Johnson_B': CatalogFilter('Johnson_B', 4353, 'Vega'),
         'Johnson_V': CatalogFilter('Johnson_V', 5477, 'Vega'),
         'Johnson_R': CatalogFilter('Johnson_R', 6349, 'Vega'),
@@ -117,10 +118,12 @@ class CatalogManager:
                 'rmag': 'Sloan_r',
                 'imag': 'Sloan_i',
                 'zmag': 'Sloan_z',
+                'Jmag': 'J',
                 'e_gmag': 'Sloan_g_err',
                 'e_rmag': 'Sloan_r_err',
                 'e_imag': 'Sloan_i_err',
                 'e_zmag': 'Sloan_z_err',
+                'e_Jmag': 'J_err',
                 'pmRA': 'pmra',
                 'pmDE': 'pmdec'
             }
