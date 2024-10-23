@@ -234,7 +234,6 @@ class CatalogManager:
             warnings.warn(f"Error in _get_atlas_local: {e}")
             return None
 
-
     def _get_atlas_split(self, ra, dec, width, height, directory, mlim):
         """Get data from one magnitude split of ATLAS catalog"""
         atlas_ecsv_tmp = f"atlas{os.getpid()}.ecsv"
@@ -265,6 +264,7 @@ class CatalogManager:
     def _get_panstarrs_mast(self, ra, dec, width, height, mlim, timeout):
         """Get PanSTARRS DR2 data using their specific API"""
         try:
+            from astroquery.mast import Catalogs
             # Convert width/height to radius in degrees
             radius = np.sqrt(width**2 + height**2) / 2
             
@@ -295,7 +295,7 @@ class CatalogManager:
             cat = astropy.table.Table()
             
             # Initialize columns from mapping
-            column_mapping = self.KNOWN_CATALOGS['PANSTARRS_DR2']['column_mapping']
+            column_mapping = self.KNOWN_CATALOGS['PANSTARRS']['column_mapping']
             our_columns = set(column_mapping.values())  # Use set to remove any duplicates
             for col in our_columns:
                 cat[col] = np.zeros(len(ps1), dtype=np.float64)
@@ -310,9 +310,9 @@ class CatalogManager:
                     cat[our_name] = ps1[ps1_name].astype(np.float64)
             
             # Add metadata
-            cat.meta['catalog'] = 'PANSTARRS_DR2'
-            cat.meta['astepoch'] = self.KNOWN_CATALOGS['PANSTARRS_DR2']['epoch']
-            cat.meta['filters'] = list(self.KNOWN_CATALOGS['PANSTARRS_DR2']['filters'].keys())
+            cat.meta['catalog'] = 'PANSTARRS'
+            cat.meta['astepoch'] = self.KNOWN_CATALOGS['PANSTARRS']['epoch']
+            cat.meta['filters'] = list(self.KNOWN_CATALOGS['PANSTARRS']['filters'].keys())
             
             return cat
             
@@ -322,115 +322,10 @@ class CatalogManager:
             traceback.print_exc()
             return None
 
-
-    def x_get_panstarrs_mast(self, ra, dec, width, height, mlim, timeout):
-        """Get PanSTARRS DR2 data from MAST"""
-        try:
-            # Convert width/height to radius for cone search
-            radius = np.sqrt(width**2 + height**2) / 2
-
-            # Create coordinate object
-            coords = SkyCoord(ra=ra*u.deg, dec=dec*u.deg, frame='icrs')
-
-            # Columns in PanSTARRS:
-            # 'objName', 'objAltName1', 'objAltName2', 'objAltName3', 'objID',
-            # 'uniquePspsOBid', 'ippObjID', 'surveyID', 'htmID', 'zoneID',
-            # 'tessID', 'projectionID', 'skyCellID', 'randomID', 'batchID',
-            # 'dvoRegionID', 'processingVersion', 'objInfoFlag', 'qualityFlag',
-            # 'raStack', 'decStack', 'raStackErr', 'decStackErr', 'raMean',
-            # 'decMean', 'raMeanErr', 'decMeanErr', 'epochMean',
-            # 'posMeanChisq', 'cx', 'cy', 'cz', 'lambda', 'beta', 'l', 'b',
-            # 'nStackObjectRows', 'nStackDetections', 'nDetections', 'ng',
-            # 'nr', 'ni', 'nz', 'ny', 'gQfPerfect', 'gMeanPSFMag',
-            # 'gMeanPSFMagErr', 'gMeanPSFMagStd', 'gMeanPSFMagNpt',
-            # 'gMeanPSFMagMin', 'gMeanPSFMagMax', 'gMeanKronMag',
-            # 'gMeanKronMagErr', 'gMeanKronMagStd', 'gMeanKronMagNpt',
-            # 'gMeanApMag', 'gMeanApMagErr', 'gMeanApMagStd', 'gMeanApMagNpt',
-            # 'gFlags', 'rQfPerfect', 'rMeanPSFMag', 'rMeanPSFMagErr',
-            # 'rMeanPSFMagStd', 'rMeanPSFMagNpt', 'rMeanPSFMagMin',
-            # 'rMeanPSFMagMax', 'rMeanKronMag', 'rMeanKronMagErr',
-            # 'rMeanKronMagStd', 'rMeanKronMagNpt', 'rMeanApMag',
-            # 'rMeanApMagErr', 'rMeanApMagStd', 'rMeanApMagNpt', 'rFlags',
-            # 'iQfPerfect', 'iMeanPSFMag', 'iMeanPSFMagErr', 'iMeanPSFMagStd',
-            # 'iMeanPSFMagNpt', 'iMeanPSFMagMin', 'iMeanPSFMagMax',
-            # 'iMeanKronMag', 'iMeanKronMagErr', 'iMeanKronMagStd',
-            # 'iMeanKronMagNpt', 'iMeanApMag', 'iMeanApMagErr',
-            # 'iMeanApMagStd', 'iMeanApMagNpt', 'iFlags', 'zQfPerfect',
-            # 'zMeanPSFMag', 'zMeanPSFMagErr', 'zMeanPSFMagStd',
-            # 'zMeanPSFMagNpt', 'zMeanPSFMagMin', 'zMeanPSFMagMax',
-            # 'zMeanKronMag', 'zMeanKronMagErr', 'zMeanKronMagStd',
-            # 'zMeanKronMagNpt', 'zMeanApMag', 'zMeanApMagErr',
-            # 'zMeanApMagStd', 'zMeanApMagNpt', 'zFlags', 'yQfPerfect',
-            # 'yMeanPSFMag', 'yMeanPSFMagErr', 'yMeanPSFMagStd',
-            # 'yMeanPSFMagNpt', 'yMeanPSFMagMin', 'yMeanPSFMagMax',
-            # 'yMeanKronMag', 'yMeanKronMagErr', 'yMeanKronMagStd',
-            # 'yMeanKronMagNpt', 'yMeanApMag', 'yMeanApMagErr',
-            # 'yMeanApMagStd', 'yMeanApMagNpt', 'yFlags', 'distance'
-            
-            # Set up columns - use actual PS1 column names
-            columns = [
-                'objID', 'raMean', 'decMean',
-                'gMeanPSFMag', 'gMeanPSFMagErr', 'gFlags',
-                'rMeanPSFMag', 'rMeanPSFMagErr', 'rFlags',
-                'iMeanPSFMag', 'iMeanPSFMagErr', 'iFlags',
-                'zMeanPSFMag', 'zMeanPSFMagErr', 'zFlags',
-                'yMeanPSFMag', 'yMeanPSFMagErr', 'yFlags',
-                'qualityFlag', 'nDetections'
-            ]
-
-            # Query MAST with more constraints
-            constraints = {
-                'nDetections.gt': 4,  # At least 5 detections
-                'rMeanPSFMag.lt': mlim,  # Magnitude limit
-                'qualityFlag.lt': 128  # Basic quality cut
-            }
-
-            ps1 = Catalogs.query_region(
-                coords,
-#                catalog="Galex",
-               catalog="Panstarrs",
-                radius=radius * u.deg,
-                data_release="dr2",# has no effect
-#                table="mean",
-#                columns=columns,
-                **constraints
-            )
-
-            if len(ps1) == 0:
-                return None
-
-            print(ps1.columns)
-            
-            # Create output catalog
-            cat = astropy.table.Table()
-
-            # Position
-            cat['radeg'] = ps1['raMean']
-            cat['decdeg'] = ps1['decMean']
-            cat['pmra'] = np.zeros(len(ps1))
-            cat['pmdec'] = np.zeros(len(ps1))
-
-            # Map PS1 filters to our standardized format
-            filters = self.KNOWN_CATALOGS['PANSTARRS_DR2']['filters']
-            for filter_name, filter_info in filters.items():
-                cat[filter_info.name] = ps1[filter_info.name]
-                if filter_info.error_name:
-                    cat[filter_info.error_name] = ps1[filter_info.error_name]
-
-            # Add metadata
-            cat.meta['catalog'] = 'PANSTARRS_DR2'
-            cat.meta['astepoch'] = self.KNOWN_CATALOGS['PANSTARRS_DR2']['epoch']
-            cat.meta['filters'] = list(filters.keys())
-
-            return cat
-
-        except Exception as e:
-            warnings.warn(f"PanSTARRS query failed: {e}")
-            return None
-
     def _get_atlas_vizier(self, ra, dec, width, height, mlim, timeout):
         """Get ATLAS RefCat2 data from VizieR with updated column mapping"""
         try:
+            from astroquery.vizier import Vizier
             # Configure Vizier with correct column names
             column_mapping = self.KNOWN_CATALOGS['ATLAS_REFCAT2']['column_mapping']
             vizier = Vizier(
@@ -491,6 +386,7 @@ class CatalogManager:
     def _get_gaia(self, ra, dec, width, height, mlim, timeout):
         """Get Gaia DR3 data"""
         try:
+            from astroquery.gaia import Gaia
             # Construct ADQL query with better formatting
             query = f"""
             SELECT
