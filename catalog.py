@@ -205,7 +205,7 @@ class CatalogManager:
         try:
             # Get data for each magnitude range
             for dirname, maglim in self.KNOWN_CATALOGS['ATLAS']['mag_splits']:
-                if mlim <= maglim:
+                if mlim > maglim:
                     continue
 
                 directory = os.path.join(self.atlas_dir, dirname)
@@ -270,17 +270,17 @@ class CatalogManager:
             from astroquery.mast import Catalogs
             # Convert width/height to radius in degrees
             radius = np.sqrt(width**2 + height**2) / 2
-            
+
             # Create coordinate object
             coords = SkyCoord(ra=ra*u.deg, dec=dec*u.deg, frame='icrs')
-            
+
             # Query parameters - note: no columns restriction
             constraints = {
                 'nDetections.gt': 4,  # At least 5 detections
                 'rMeanPSFMag.lt': mlim,  # Magnitude limit
                 'qualityFlag.lt': 128  # Basic quality cut
             }
-            
+
             # Make the query without specifying columns
             ps1 = Catalogs.query_region(
                 coords,
@@ -290,35 +290,35 @@ class CatalogManager:
                 table="mean",
                 **constraints
             )
-            
+
             if len(ps1) == 0:
                 return None
-            
+
             # Create output catalog
             cat = astropy.table.Table()
-            
+
             # Initialize columns from mapping
             column_mapping = self.KNOWN_CATALOGS['PANSTARRS']['column_mapping']
             our_columns = set(column_mapping.values())  # Use set to remove any duplicates
             for col in our_columns:
                 cat[col] = np.zeros(len(ps1), dtype=np.float64)
-            
+
             # Add proper motion columns (not provided by PanSTARRS)
             cat['pmra'] = np.zeros(len(ps1), dtype=np.float64)
             cat['pmdec'] = np.zeros(len(ps1), dtype=np.float64)
-            
+
             # Map the data
             for ps1_name, our_name in column_mapping.items():
                 if ps1_name in ps1.columns:
                     cat[our_name] = ps1[ps1_name].astype(np.float64)
-            
+
             # Add metadata
             cat.meta['catalog'] = 'PANSTARRS'
             cat.meta['astepoch'] = self.KNOWN_CATALOGS['PANSTARRS']['epoch']
             cat.meta['filters'] = list(self.KNOWN_CATALOGS['PANSTARRS']['filters'].keys())
-            
+
             return cat
-            
+
         except Exception as e:
             warnings.warn(f"PanSTARRS query failed: {e}")
             import traceback
@@ -459,24 +459,29 @@ class CatalogManager:
         try:
             # Read the pre-filtered catalog
             cat = astropy.table.Table.read(self.KNOWN_CATALOGS['MAKAK']['filepath'])
-            
+
             # Filter by field of view
             ctr = SkyCoord(ra*u.deg, dec*u.deg, frame='fk5')
+            cnr = SkyCoord((ra+width)*u.deg, (dec+height)*u.deg, frame='fk5')
+            dia = cnr.separation(ctr)
             cat_coords = SkyCoord(cat['radeg']*u.deg, cat['decdeg']*u.deg, frame='fk5')
-            within_field = cat_coords.separation(ctr) < (height*u.deg / 2)  # Using height as diameter
+            within_field = cat_coords.separation(ctr) < (dia / 2)  # Using height as diameter
             cat = cat[within_field]
-            
+
             if len(cat) > 0:
                 # Set metadata
                 cat.meta['catalog'] = 'MAKAK'
-                cat.meta['astepoch'] = cat.meta.get('astepoch', 
+                cat.meta['astepoch'] = cat.meta.get('astepoch',
                     self.KNOWN_CATALOGS['MAKAK']['epoch'])
                 cat.meta['filters'] = list(self.KNOWN_CATALOGS['MAKAK']['filters'].keys())
-                
+
+                cat['pmra'] = np.zeros(len(cat), dtype=np.float64)
+                cat['pmdec'] = np.zeros(len(cat), dtype=np.float64)
+
                 return cat
-                
+
             return None
-            
+
         except Exception as e:
             warnings.warn(f"MAKAK catalog access failed: {e}")
             return None
@@ -701,51 +706,110 @@ class ColorSelector:
 
         return color_array, descriptions
 
-# Example usage in CatalogManager:
+# Example usage (for transients.py)
 def transform_to_instrumental(self, cat, det, wcs):
-    """Transform catalog magnitudes to instrumental system"""
-    catalog = cat.meta.get('catalog', 'ATLAS')
-    filters = self.KNOWN_CATALOGS[catalog]['filters']
+    """
+    Transform catalog magnitudes to instrumental system.
 
-    # Create color selector
-    selector = ColorSelector(filters)
+    Args:
+        cat: Catalog data table
+        det: Detection metadata table
+        wcs: WCS for coordinate transformation
 
-    # Get target filter
-    target_filter = det.meta.get('REFILTER')
-    if not target_filter:
-        raise ValueError("No target filter specified in detection metadata")
+    Returns:
+        astropy.table.Table: Catalog with added instrumental magnitudes
+    """
+    try:
+        # Get catalog info
+        catalog_name = cat.meta.get('catalog', 'ATLAS')
+        catalog_info = self.KNOWN_CATALOGS[catalog_name]
+        filters = catalog_info['filters']
 
-    # Prepare colors
-    colors, color_descriptions = selector.prepare_color_terms(cat, target_filter)
+        # Get target filter
+        target_filter = det.meta.get('REFILTER')
+        if not target_filter:
+            raise ValueError("No target filter (REFILTER) specified in detection metadata")
 
-    # Store color information in output metadata
-    cat_out = cat.copy()
-    cat_out.meta['color_terms'] = color_descriptions
+        # Create color selector
+        selector = ColorSelector(filters)
 
-    # Transform coordinates
-    cat_x, cat_y = wcs.all_world2pix(cat['radeg'], cat['decdeg'], 1)
+        # Get colors for this filter
+        colors, color_descriptions = selector.prepare_color_terms(cat, target_filter)
 
-    # Load and apply photometric model
-    ffit = fotfit.fotfit()
-    ffit.from_oneline(det.meta['RESPONSE'])
+        # Create output catalog
+        cat_out = cat.copy()
 
-    # Prepare model input
-    model_input = (
-        cat[filters[target_filter].name],
-        det.meta['AIRMASS'],
-        (cat_x - det.meta['CTRX'])/1024,
-        (cat_y - det.meta['CTRY'])/1024,
-        colors[0],
-        colors[1],
-        colors[2],
-        colors[3],
-        det.meta['IMGNO'],
-        np.zeros_like(cat_x),
-        np.ones_like(cat_x)
-    )
+        # Add color information to metadata
+        cat_out.meta['color_terms'] = color_descriptions
+        cat_out.meta['target_filter'] = target_filter
 
-    cat_out['mag_instrument'] = ffit.model(ffit.fixvalues, model_input)
-    return cat_out
+        # Transform coordinates to pixel space
+        try:
+            cat_x, cat_y = wcs.all_world2pix(cat['radeg'], cat['decdeg'], 1)
+        except Exception as e:
+            raise ValueError(f"Failed to transform coordinates: {e}")
+
+        # Load photometric model
+        try:
+            if 'RESPONSE' not in det.meta:
+                raise ValueError("No RESPONSE model in detection metadata")
+            ffit = fotfit.fotfit()
+            ffit.from_oneline(det.meta['RESPONSE'])
+        except Exception as e:
+            raise ValueError(f"Failed to load photometric model: {e}")
+
+        # Get base magnitude from catalog
+        filter_info = filters[target_filter]
+        base_mag = cat[filter_info.name]
+
+        # Prepare model input
+        model_input = (
+            base_mag,                                    # catalog magnitude
+            det.meta['AIRMASS'],                        # airmass
+            (cat_x - det.meta['CTRX'])/1024,           # normalized X coordinate
+            (cat_y - det.meta['CTRY'])/1024,           # normalized Y coordinate
+            colors[0],                                  # color term 1
+            colors[1],                                  # color term 2
+            colors[2],                                  # color term 3
+            colors[3],                                  # color term 4
+            det.meta['IMGNO'],                         # image number
+            np.zeros_like(base_mag),                   # y (not used in this context)
+            np.ones_like(base_mag)                     # error (not used in this context)
+        )
+
+        # Apply photometric model
+        try:
+            cat_out['mag_instrument'] = ffit.model(ffit.fixvalues, model_input)
+        except Exception as e:
+            raise ValueError(f"Failed to apply photometric model: {e}")
+
+        # Add error estimates if available
+        if filter_info.error_name and filter_info.error_name in cat.columns:
+            cat_out['mag_instrument_err'] = np.sqrt(
+                cat[filter_info.error_name]**2 +       # catalog magnitude error
+                np.full_like(base_mag, 0.01)**2        # systematic error floor
+            )
+        else:
+            cat_out['mag_instrument_err'] = np.full_like(base_mag, 0.03)  # default error
+
+        # Add transformation metadata
+        cat_out.meta['transform_info'] = {
+            'source_catalog': catalog_name,
+            'source_filter': filter_info.name,
+            'target_filter': target_filter,
+            'color_terms': color_descriptions,
+            'airmass': float(det.meta['AIRMASS']),
+            'model': det.meta['RESPONSE']
+        }
+
+        return cat_out
+
+    except Exception as e:
+        logging.error(f"Error in transform_to_instrumental: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 
 def add_catalog_argument(parser):
     """Add catalog selection argument to argument parser"""

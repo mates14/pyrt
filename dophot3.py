@@ -804,98 +804,6 @@ def select_best_filter(data, metadata):
     print(f"Best filter: {best_filter} with wssrndf: {best_wssrndf}")
     return best_filter
 
-def get_catalog_data(det, options, enlarge=1.0):
-    """
-    Get catalog data with proper epoch correction.
-    
-    Args:
-        det: Detection table with metadata
-        options: Command line options
-        enlarge: Factor to enlarge search area
-    
-    Returns:
-        astropy.table.Table: Catalog data with corrected positions
-    """
-    start_time = time.time()
-    
-    try:
-        if options.makak:
-            # Handle custom catalog case
-            cat = astropy.table.Table.read('/home/mates/test/catalog.fits')
-            
-            # Filter by field of view
-            ctr = SkyCoord(det.meta['CTRRA']*u.deg, det.meta['CTRDEC']*u.deg, frame='fk5')
-            cat_coords = SkyCoord(cat['radeg']*u.deg, cat['decdeg']*u.deg, frame='fk5')
-            within_field = cat_coords.separation(ctr) < (det.meta['FIELD']*u.deg / 2)
-            cat = cat[within_field]
-            
-            # Set default epoch if not present
-            if 'astepoch' not in cat.meta:
-                cat.meta['astepoch'] = 2015.5  # Default to DR2 epoch
-                logging.warning("No epoch information in custom catalog, assuming 2015.5")
-        else:
-            # Use CatalogManager for standard catalogs
-            catman = CatalogManager()
-            
-            if options.catalog:
-                # Use specified catalog
-                cat = catman.get_catalog(
-                    ra=det.meta['CTRRA'],
-                    dec=det.meta['CTRDEC'],
-                    width=enlarge * det.meta['FIELD'],
-                    height=enlarge * det.meta['FIELD'],
-                    mlim=options.maglim,
-                    catalog=options.catalog
-                )
-            else:
-                # Default to ATLAS
-                cat = catman.get_catalog(
-                    ra=det.meta['CTRRA'],
-                    dec=det.meta['CTRDEC'],
-                    width=enlarge * det.meta['FIELD'],
-                    height=enlarge * det.meta['FIELD'],
-                    mlim=options.maglim,
-                    catalog='ATLAS'
-                )
-        
-        if cat is None or len(cat) == 0:
-            raise ValueError("No catalog data retrieved")
-            
-        # Compute epoch difference and apply proper motion correction
-        # Converts observation JD to Unix epoch days, then to years
-        obs_epoch = (det.meta['JD'] - 2440587.5) / 365.2425 + 1970.0
-        cat_epoch = cat.meta['astepoch']
-        epoch_diff = obs_epoch - cat_epoch
-        
-        logging.info(f"Observation epoch: {obs_epoch:.1f}")
-        logging.info(f"Catalog epoch: {cat_epoch:.1f}")
-        logging.info(f"Epoch difference: {epoch_diff:.1f} years")
-        
-        # Apply proper motion correction if available
-        if 'pmra' in cat.columns and 'pmdec' in cat.columns:
-            # Handle missing proper motions (set to 0)
-            pmra = np.nan_to_num(cat['pmra'])
-            pmdec = np.nan_to_num(cat['pmdec'])
-            
-            # Apply corrections
-            cat['radeg'] += epoch_diff * pmra
-            cat['decdeg'] += epoch_diff * pmdec
-            
-            logging.info("Applied proper motion corrections")
-        else:
-            logging.warning("No proper motion data available in catalog")
-        
-        logging.info(f"Catalog search took {time.time()-start_time:.3f}s")
-        logging.info(f"Catalog contains {len(cat)} entries")
-        
-        return cat
-        
-    except Exception as e:
-        logging.error(f"Error getting catalog data: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
 # ******** main() **********
 
 def main():
@@ -941,7 +849,7 @@ def main():
         catalog = 'MAKAK' if options.makak else (options.catalog or 'ATLAS')
         enlarge = options.enlarge if options.enlarge is not None else 1.0
 
-        logging.info(f"Catalog to be used: {catalog} {options.catalog}")
+        logging.info(f"Catalog: {options.catalog} from command line, {catalog}  to be used.")
 
         cat = catman.get_catalog(
             ra=det.meta['CTRRA'],
