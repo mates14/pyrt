@@ -31,7 +31,7 @@ from sklearn.neighbors import KDTree
 import zpnfit
 import fotfit
 #from catalogs import get_atlas, get_catalog
-from catalog import CatalogManager
+from catalog import Catalog
 from cat2det import remove_junk
 from refit_astrometry import refit_astrometry
 from file_utils import try_det, try_img, write_region_file
@@ -78,7 +78,7 @@ def get_base_filter(det, options, catalog_info=None):
     Args:
         det: Detection table with metadata
         options: Command line options
-        catalog_info: Optional catalog information from CatalogManager
+        catalog_info: Optional catalog information from Catalog
     
     Returns:
         tuple: (base_filter_name, photometric_system)
@@ -843,15 +843,14 @@ def main():
         #      fixme from "broken_usewcs.py"            
 
         start = time.time()
-        catman = CatalogManager()
 
         #if options.makak_path: CatalogManager.set_makak_path(options.makak_path)
-        catalog = 'MAKAK' if options.makak else (options.catalog or 'ATLAS')
+        catalog = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
         enlarge = options.enlarge if options.enlarge is not None else 1.0
 
         logging.info(f"Catalog: {options.catalog} from command line, {catalog}  to be used.")
 
-        cat = catman.get_catalog(
+        cat = Catalog(
             ra=det.meta['CTRRA'],
             dec=det.meta['CTRDEC'],
             width=enlarge * det.meta['FIELD'],
@@ -859,12 +858,12 @@ def main():
             mlim=options.maglim,
             catalog=catalog
         )
-        
+         
         if cat is None:
             logging.error(f"Failed to get {catalog} catalog data")
             return None
 
-        catalog_info = CatalogManager.KNOWN_CATALOGS.get(catalog)
+        catalog_info = Catalog.KNOWN_CATALOGS.get(catalog)
         base_filter, photometric_system = get_base_filter(det, options, catalog_info)
 
         # Epoch for PM correction (Gaia DR2@2015.5)
@@ -907,7 +906,7 @@ def main():
             Xt[0]>det.meta['IMGAXIS1'],
             Xt[1]>det.meta['IMGAXIS2']
             ], axis=0))]
-
+        
         Xt = np.array(imgwcs.all_world2pix(cat['radeg'], cat['decdeg'],1))
         X = Xt.transpose()
 
