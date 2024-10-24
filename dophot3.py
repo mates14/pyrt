@@ -116,7 +116,12 @@ def get_base_filter(det, options, catalog_info=None):
         'rMeanPSFMag': 'Sloan_r',
         'iMeanPSFMag': 'Sloan_i',
         'zMeanPSFMag': 'Sloan_z',
-        'yMeanPSFMag': 'y'
+        'yMeanPSFMag': 'y',
+        # what's in USNO-B
+        'R1': 'Johnson_R',
+        'R2': 'Johnson_R',
+        'B1': 'Johnson_B',
+        'B2': 'Johnson_B'
     }
     
     # Define filter systems
@@ -195,7 +200,6 @@ def get_base_filter(det, options, catalog_info=None):
     
     logging.info(f"basemag={basemag} fit_in_johnson={fit_in_johnson} (available filters: {sorted(available_filters)})")
     return basemag, fit_in_johnson
-
 
 def x_get_base_filter(det, options):
     '''set up or guess the base filter to use for fitting'''

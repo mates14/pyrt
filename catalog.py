@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
-from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass, asdict
+from typing import List, Dict, Optional, Tuple, Any
 import numpy as np
 import warnings
 import os
@@ -11,6 +11,17 @@ import astropy.io.ascii
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from contextlib import suppress
+
+@dataclass
+class QueryParams:
+    """Parameters used for catalog queries"""
+    ra: Optional[float] = None
+    dec: Optional[float] = None
+    width: float = 0.25
+    height: float = 0.25
+    mlim: float = 17.0
+    timeout: int = 60
+    atlas_dir: str = "/home/mates/cat/atlas"
 
 @dataclass
 class CatalogFilter:
@@ -48,6 +59,13 @@ class CatalogFilters:
         'Johnson_R': CatalogFilter('Johnson_R', 6349, 'Vega'),
         'Johnson_I': CatalogFilter('Johnson_I', 8797, 'Vega'),
     }
+    USNOB = {
+        'B1': CatalogFilter('B1mag', 4500, 'AB', 'e_B1mag'),
+        'R1': CatalogFilter('R1mag', 6400, 'AB', 'e_R1mag'),
+        'B2': CatalogFilter('B2mag', 4500, 'AB', 'e_B2mag'),
+        'R2': CatalogFilter('R2mag', 6400, 'AB', 'e_R2mag'),
+        'I': CatalogFilter('Imag', 8100, 'AB', 'e_Imag'),
+    }
 
 class Catalog(astropy.table.Table):
     """
@@ -61,6 +79,7 @@ class Catalog(astropy.table.Table):
     PANSTARRS = 'panstarrs'
     GAIA = 'gaia'
     MAKAK = 'makak'
+    USNOB = 'usno'
 
     # Define available catalogs with their properties
     KNOWN_CATALOGS = {
@@ -141,55 +160,114 @@ class Catalog(astropy.table.Table):
             'local': True,
             'service': 'local',
             'filepath': '/home/mates/test/catalog.fits'  # Default path, could be configurable
+        },
+        USNOB: {
+        'description': 'USNO-B1.0 Catalog',
+        'filters': CatalogFilters.USNOB,
+        'epoch': 2000.0,
+        'local': False,
+        'service': 'VizieR',
+        'catalog_id': 'I/284/out',
+        'column_mapping': {
+            'RAJ2000': 'radeg',
+            'DEJ2000': 'decdeg',
+            'B1mag': 'B1mag',
+            'R1mag': 'R1mag',
+            'B2mag': 'B2mag',
+            'R2mag': 'R2mag',
+            'Imag': 'Imag',
+            'e_B1mag': 'e_B1mag',
+            'e_R1mag': 'e_R1mag',
+            'e_B2mag': 'e_B2mag',
+            'e_R2mag': 'e_R2mag',
+            'e_Imag': 'e_Imag',
+            'pmRA': 'pmra',
+            'pmDE': 'pmdec'
         }
+    }
     }
 
     def __init__(self, *args, **kwargs):
-        """Initialize the catalog."""
-        # Extract catalog query parameters if provided
-        self.ra = kwargs.pop('ra', None)
-        self.dec = kwargs.pop('dec', None)
-        self.width = kwargs.pop('width', 0.25)
-        self.height = kwargs.pop('height', 0.25)
-        self.mlim = kwargs.pop('mlim', 17.0)
-        self.catalog_name = kwargs.pop('catalog', None)
-        self.timeout = kwargs.pop('timeout', 60)
-        self.atlas_dir = kwargs.pop('atlas_dir', "/home/mates/cat/atlas")
+        """Initialize the catalog with proper handling of properties."""
+        # Extract and store query parameters
+        query_params = {}
+        for param in QueryParams.__dataclass_fields__:
+            if param in kwargs:
+                query_params[param] = kwargs.pop(param)
+        self._query_params = QueryParams(**query_params)
 
-        # If catalog name provided, fetch data
-        if self.catalog_name:
+        # Store catalog name and get config
+        self._catalog_name = kwargs.pop('catalog', None)
+        self._config = (self.KNOWN_CATALOGS[self._catalog_name]
+                       if self._catalog_name in self.KNOWN_CATALOGS
+                       else {})
+
+        # Initialize base Table
+        if self._catalog_name:
             result = self._fetch_catalog_data()
             super().__init__(result, *args, **kwargs)
         else:
             super().__init__(*args, **kwargs)
 
+        # Ensure catalog metadata is properly stored
+        self._init_metadata()
+
+    def _init_metadata(self):
+        """Initialize or update catalog metadata"""
+        if 'catalog_props' not in self.meta:
+            self.meta['catalog_props'] = {}
+
+        catalog_props = {
+            'catalog_name': self._catalog_name,
+            'query_params': asdict(self._query_params) if self._query_params else None,
+            'epoch': self._config.get('epoch'),
+            'filters': {k: asdict(v) for k, v in self._config.get('filters', {}).items()},
+            'description': self._config.get('description'),
+        }
+
+        self.meta['catalog_props'].update(catalog_props)
+
+    @property
+    def query_params(self) -> QueryParams:
+        """Get query parameters used to create this catalog"""
+        params_dict = self.meta.get('catalog_props', {}).get('query_params', {})
+        return QueryParams(**params_dict) if params_dict else None
+
+    @property
+    def catalog_name(self) -> str:
+        """Get catalog name"""
+        return self.meta.get('catalog_props', {}).get('catalog_name')
+
     def _fetch_catalog_data(self):
         """Fetch data from the specified catalog source"""
-        if self.catalog_name not in self.KNOWN_CATALOGS:
-            raise ValueError(f"Unknown catalog: {self.catalog_name}")
+        #print(self._catalog_name," in ",self.KNOWN_CATALOGS.keys())
+        if self._catalog_name not in self.KNOWN_CATALOGS.keys():
+            raise ValueError(f"Unknown catalog: {self._catalog_name}")
 
-        config = self.KNOWN_CATALOGS[self.catalog_name]
+        config = self.KNOWN_CATALOGS[self._catalog_name]
         result = None
 
         # Get catalog data
-        if self.catalog_name == self.ATLAS:
+        if self._catalog_name == self.ATLAS:
             result = self._get_atlas_local()
-        elif self.catalog_name == self.ATLAS_VIZIER:
+        elif self._catalog_name == self.ATLAS_VIZIER:
             result = self._get_atlas_vizier()
-        elif self.catalog_name == self.PANSTARRS:
+        elif self._catalog_name == self.PANSTARRS:
             result = self._get_panstarrs_data()
-        elif self.catalog_name == self.GAIA:
+        elif self._catalog_name == self.GAIA:
             result = self._get_gaia_data()
-        elif self.catalog_name == self.MAKAK:
+        elif self._catalog_name == self.MAKAK:
             result = self._get_makak_data()
+        elif self._catalog_name == self.USNOB:
+            result = self._get_usnob_data()
         else:
             raise ValueError(f"Unknown catalog: {catalog}")
 
         if result is None:
-            raise ValueError(f"No data retrieved from {self.catalog_name}")
+            raise ValueError(f"No data retrieved from {self._catalog_name}")
 
         result.meta.update({
-            'catalog': self.catalog_name,
+            'catalog': self._catalog_name,
             'astepoch': config['epoch'],
             'filters': list(config['filters'].keys())
         })
@@ -201,34 +279,37 @@ class Catalog(astropy.table.Table):
         result = None
 
         for dirname, magspl in config['mag_splits']:
-            if self.mlim <= magspl:
+            if self._query_params.mlim <= magspl:
                 continue
 
-            print(f"get_atlas: mlim:{self.mlim} > magspl:{magspl}")
+            # print(f"get_atlas: mlim:{mlim} > magspl:{magspl}")
 
-            directory = os.path.join(self.atlas_dir, dirname)
-            try:
+            directory = os.path.join(self._query_params.atlas_dir, dirname)
+        #    try:
+            if True:
                 new_data = self._get_atlas_split(directory)
                 if new_data is None:
                     continue
 
                 result = new_data if result is None else astropy.table.vstack([result, new_data])
 
-            except Exception as e:
-                warnings.warn(f"get_atlas: Failed to get data from {directory}: {e}")
+#            except Exception as e:
+#                warnings.warn(f"get_atlas: Failed to get data from {directory}: {e}")
 
         if result is not None and len(result) > 0:
             self._add_transformed_magnitudes(result)
 
-        print(f"get_atlas: returning {len(result)} records")
+        # print(f"get_atlas: returning {len(result)} records")
         return result
 
     def _get_atlas_split(self, directory):
         """Get data from one magnitude split of ATLAS catalog"""
         atlas_ecsv_tmp = f"atlas{os.getpid()}.ecsv"
         try:
-            cmd = f'atlas {self.ra} {self.dec} -rect {self.width},{self.height} '\
-                  f'-dir {directory} -mlim {self.mlim:.2f} -ecsv > {atlas_ecsv_tmp}'
+            cmd =   f'atlas {self._query_params.ra} {self._query_params.dec} '\
+                    f'-rect {self._query_params.width},{self._query_params.height} '\
+                    f'-dir {directory} -mlim {self._query_params.mlim:.2f} -ecsv '\
+                    f'> {atlas_ecsv_tmp}'
             os.system(cmd)
             return astropy.table.Table.read(atlas_ecsv_tmp, format='ascii.ecsv')
         finally:
@@ -260,19 +341,19 @@ class Catalog(astropy.table.Table):
             vizier = Vizier(
                 columns=list(column_mapping.keys()),
                 column_filters={
-                    "rmag": f"<{self.mlim}"  # Magnitude limit in r-band
+                    "rmag": f"<{self._query_params.mlim}"  # Magnitude limit in r-band
                 },
                 row_limit=-1
             )
 
             # Create coordinate object
-            coords = SkyCoord(ra=self.ra*u.deg, dec=self.dec*u.deg, frame='icrs')
+            coords = SkyCoord(ra=self._query_params.ra*u.deg, dec=self._query_params.dec*u.deg, frame='icrs')
 
             # Query VizieR
             result = vizier.query_region(
                 coords,
-                width=self.width * u.deg,
-                height=self.height * u.deg,
+                width=self._query_params.width * u.deg,
+                height=self._query_params.height * u.deg,
                 catalog=self.KNOWN_CATALOGS[self.ATLAS_VIZIER]['catalog_id']
             )
 
@@ -320,12 +401,12 @@ class Catalog(astropy.table.Table):
             from astroquery.mast import Catalogs
 
             config = self.KNOWN_CATALOGS[self.PANSTARRS]
-            radius = np.sqrt(self.width**2 + self.height**2) / 2
-            coords = SkyCoord(ra=self.ra*u.deg, dec=self.dec*u.deg, frame='icrs')
+            radius = np.sqrt(self._query_params.width**2 + self._query_params.height**2) / 2
+            coords = SkyCoord(ra=self._query_params.ra*u.deg, dec=self._query_params.dec*u.deg, frame='icrs')
 
             constraints = {
                 'nDetections.gt': 4,
-                'rMeanPSFMag.lt': self.mlim,
+                'rMeanPSFMag.lt': self._query_params.mlim,
                 'qualityFlag.lt': 128
             }
 
@@ -372,8 +453,8 @@ class Catalog(astropy.table.Table):
             FROM {config['catalog_id']}
             WHERE 1=CONTAINS(
                 POINT('ICRS', ra, dec),
-                BOX('ICRS', {self.ra}, {self.dec}, {self.width}, {self.height}))
-                AND phot_g_mean_mag < {self.mlim}
+                BOX('ICRS', {self._query_params.ra}, {self._query_params.dec}, {self._query_params.width}, {self._query_params.height}))
+                AND phot_g_mean_mag < {self._query_params.mlim}
                 AND ruwe < 1.4
                 AND visibility_periods_used >= 8
             """
@@ -404,6 +485,78 @@ class Catalog(astropy.table.Table):
         except Exception as e:
             raise ValueError(f"Gaia query failed: {str(e)}")
 
+    def _get_usnob_data(self):
+        """Get USNO-B1.0 data from VizieR"""
+        try:
+            from astroquery.vizier import Vizier
+
+            config = self.KNOWN_CATALOGS[self.USNOB]
+            column_mapping = config['column_mapping']
+
+            # Configure Vizier
+            vizier = Vizier(
+                columns=list(column_mapping.keys()),
+                column_filters={
+                    "R1mag": f"<{self._query_params.mlim}"  # Magnitude limit in R1
+                },
+                row_limit=-1  # Get all matching objects
+            )
+
+            # Create coordinate object
+            coords = SkyCoord(
+                ra=self._query_params.ra*u.deg,
+                dec=self._query_params.dec*u.deg,
+                frame='icrs'
+            )
+
+            # Query VizieR
+            result = vizier.query_region(
+                coords,
+                width=self._query_params.width * u.deg,
+                height=self._query_params.height * u.deg,
+                catalog=config['catalog_id']
+            )
+
+            if not result or len(result) == 0:
+                return None
+
+            usnob = result[0]
+
+            # Create output catalog
+            cat = astropy.table.Table()
+
+            # Initialize mapped columns
+            our_columns = set(column_mapping.values())
+            for col in our_columns:
+                cat[col] = np.zeros(len(usnob), dtype=np.float64)
+
+            # Map columns according to configuration
+            for vizier_name, our_name in column_mapping.items():
+                if vizier_name in usnob.columns:
+                    # Convert proper motions from mas/yr to deg/yr if needed
+                    if vizier_name in ['pmRA', 'pmDE']:
+                        cat[our_name] = usnob[vizier_name] / (3.6e6)
+                    else:
+                        cat[our_name] = usnob[vizier_name]
+
+            # Handle quality flags and uncertainties
+            for band in ['B1', 'R1', 'B2', 'R2', 'I']:
+                mag_col = f'{band}mag'
+                err_col = f'e_{band}mag'
+                if mag_col in cat.columns:
+                    # Set typical errors if not provided
+                    if err_col not in cat.columns or np.all(cat[err_col] == 0):
+                        cat[err_col] = np.where(
+                            cat[mag_col] < 19,
+                            0.1,  # Brighter stars
+                            0.2   # Fainter stars
+                        )
+
+            return cat
+
+        except Exception as e:
+            raise ValueError(f"USNO-B query failed: {str(e)}")
+
     def _get_makak_data(self):
         """Get data from pre-filtered MAKAK catalog"""
         try:
@@ -413,9 +566,9 @@ class Catalog(astropy.table.Table):
             cat = astropy.table.Table.read(config['filepath'])
 
             # Filter by field of view
-            ctr = SkyCoord(self.ra*u.deg, self.dec*u.deg, frame='fk5')
-            cnr = SkyCoord((self.ra+self.width)*u.deg, (self.dec+self.height)*u.deg, frame='fk5')
-            radius = cnr.separation(ctr) / 2
+            ctr = SkyCoord(self._query_params.ra*u.deg, self._query_params.dec*u.deg, frame='fk5')
+            corner = SkyCoord((self._query_params.ra+self._query_params.width)*u.deg, (self._query_params.dec+self._query_params.height)*u.deg, frame='fk5')
+            radius = corner.separation(ctr) / 2
 
             cat_coords = SkyCoord(cat['radeg']*u.deg, cat['decdeg']*u.deg, frame='fk5')
             within_field = cat_coords.separation(ctr) < radius
@@ -447,25 +600,39 @@ class Catalog(astropy.table.Table):
             raise ValueError(f"Failed to read catalog from {filename}: {str(e)}")
 
     @property
-    def description(self):
-        """Get catalog description."""
-        if self.catalog_name in self.KNOWN_CATALOGS:
-            return self.KNOWN_CATALOGS[self.catalog_name].description
-        return "Unknown catalog"
+    def description(self) -> str:
+        """Get catalog description"""
+        return self.meta.get('catalog_props', {}).get('description', "Unknown catalog")
 
     @property
-    def filters(self):
-        """Get available filters."""
-        if self.catalog_name in self.KNOWN_CATALOGS:
-            return self.KNOWN_CATALOGS[self.catalog_name].filters
-        return {}
+    def filters(self) -> Dict[str, CatalogFilter]:
+        """Get available filters"""
+        filters_dict = self.meta.get('catalog_props', {}).get('filters', {})
+        return {k: CatalogFilter(**v) for k, v in filters_dict.items()}
 
     @property
-    def epoch(self):
-        """Get catalog epoch."""
-        if self.catalog_name in self.KNOWN_CATALOGS:
-            return self.KNOWN_CATALOGS[self.catalog_name].epoch
-        return None
+    def epoch(self) -> float:
+        """Get catalog epoch"""
+        return self.meta.get('catalog_props', {}).get('epoch')
+
+    def __array_finalize__(self, obj):
+        """Ensure proper handling of metadata during numpy operations"""
+        super().__array_finalize__(obj)
+        if obj is None:
+            return
+
+        # Copy catalog properties if they exist
+        if hasattr(obj, 'meta') and 'catalog_props' in obj.meta:
+            if not hasattr(self, 'meta'):
+                self.meta = {}
+            self.meta['catalog_props'] = obj.meta['catalog_props'].copy()
+
+    def copy(self, copy_data=True):
+        """Create a copy ensuring catalog properties are preserved"""
+        new_cat = super().copy(copy_data=copy_data)
+        if 'catalog_props' in self.meta:
+            new_cat.meta['catalog_props'] = self.meta['catalog_props'].copy()
+        return new_cat
 
     def transform_to_instrumental(self, det, wcs):
         """
@@ -479,6 +646,7 @@ class Catalog(astropy.table.Table):
             Catalog: New catalog instance with transformed data
         """
         try:
+            cat_out = super().copy()
             # Get target filter
             target_filter = det.meta.get('REFILTER')
             if not target_filter:
@@ -537,6 +705,9 @@ class Catalog(astropy.table.Table):
             else:
                 cat_out['mag_instrument_err'] = np.full_like(base_mag, 0.03)
 
+            # Preserve catalog properties
+            if 'catalog_props' in self.meta:
+                cat_out.meta['catalog_props'] = self.meta['catalog_props'].copy()
             # Add transformation metadata
             cat_out.meta['transform_info'] = {
                 'source_catalog': self.catalog_name,
@@ -552,154 +723,31 @@ class Catalog(astropy.table.Table):
         except Exception as e:
             raise ValueError(f"Transformation failed: {str(e)}")
 
-class ColorSelector:
-    """
-    Manages selection of optimal color terms for photometric fitting.
-    Chooses colors based on filter wavelengths and target wavelength.
-    """
+    @classmethod
+    def from_file(cls, filename):
+        """Create catalog instance from a local file with proper metadata handling"""
+        try:
+            data = astropy.table.Table.read(filename)
 
-    def __init__(self, filters: Dict[str, CatalogFilter]):
-        """Initialize with available filters."""
-        self.filters = filters
-        self.sorted_filters = sorted(
-            filters.items(),
-            key=lambda x: x[1].effective_wl
-        )
+            # Initialize catalog with data
+            obj = cls(data.as_array())
 
-    def select_colors(self, target_wavelength: float, max_colors: int = 4) -> List[dict]:
-        """Select optimal color pairs for photometric fitting."""
-        colors = []
-        used_filters = set()
+            # Copy existing metadata
+            obj.meta.update(data.meta)
 
-        # Find closest filter to target
-        base_filter = min(
-            self.filters.items(),
-            key=lambda x: abs(x[1].effective_wl - target_wavelength)
-        )
-        used_filters.add(base_filter[0])
+            # Initialize catalog properties if not present
+            if 'catalog_props' not in obj.meta:
+                obj.meta['catalog_props'] = {
+                    'catalog_name': 'local',
+                    'description': f'Local catalog from {filename}',
+                    'epoch': None,
+                    'filters': {}
+                }
 
-        # Split remaining filters by wavelength
-        blue_filters = [
-            f for f in self.sorted_filters
-            if f[1].effective_wl < target_wavelength
-            and f[0] not in used_filters
-        ]
-        red_filters = [
-            f for f in self.sorted_filters
-            if f[1].effective_wl > target_wavelength
-            and f[0] not in used_filters
-        ]
+            return obj
 
-        # Get color pairs
-        span_pairs = self._make_spanning_pairs(blue_filters, red_filters, target_wavelength)
-        neighbor_pairs = self._make_neighbor_pairs(self.sorted_filters, target_wavelength)
-
-        # Combine and sort
-        all_pairs = span_pairs + neighbor_pairs
-        all_pairs.sort(key=lambda x: self._score_color_pair(x, target_wavelength))
-
-        # Select best pairs
-        selected = []
-        used = set()
-
-        # First try without filter reuse
-        for pair in all_pairs:
-            if len(selected) >= max_colors:
-                break
-
-            if pair['blue_filter'] in used or pair['red_filter'] in used:
-                continue
-
-            selected.append(pair)
-            used.add(pair['blue_filter'])
-            used.add(pair['red_filter'])
-
-        # Allow filter reuse if needed
-        if len(selected) < max_colors:
-            for pair in all_pairs:
-                if len(selected) >= max_colors:
-                    break
-                if pair not in selected:
-                    selected.append(pair)
-
-        return selected
-
-    def prepare_color_terms(self, cat: astropy.table.Table, target_filter: str) -> Tuple[np.ndarray, List[str]]:
-        """Prepare color arrays for photometric fitting."""
-        if target_filter not in self.filters:
-            raise ValueError(f"Unknown target filter: {target_filter}")
-
-        target_wl = self.filters[target_filter].effective_wl
-        selected_colors = self.select_colors(target_wl)
-
-        n_stars = len(cat)
-        color_array = np.zeros((4, n_stars))
-        descriptions = []
-
-        for i, color in enumerate(selected_colors):
-            if i >= 4:
-                break
-
-            blue_mag = cat[self.filters[color['blue_filter']].name]
-            red_mag = cat[self.filters[color['red_filter']].name]
-
-            color_array[i] = blue_mag - red_mag
-            descriptions.append(color['description'])
-
-        while len(descriptions) < 4:
-            descriptions.append('unused')
-
-        return color_array, descriptions
-
-    def _make_spanning_pairs(self, blue_filters, red_filters, target_wavelength):
-        """Create color pairs that span the target wavelength."""
-        pairs = []
-        for blue in blue_filters:
-            for red in red_filters:
-                blue_wl = blue[1].effective_wl
-                red_wl = red[1].effective_wl
-
-                if red_wl - blue_wl < 100:
-                    continue
-
-                pairs.append({
-                    'blue_filter': blue[0],
-                    'red_filter': red[0],
-                    'effective_wl': (blue_wl + red_wl) / 2,
-                    'width': red_wl - blue_wl,
-                    'description': f"{blue[0]}-{red[0]}"
-                })
-        return pairs
-
-    def _make_neighbor_pairs(self, sorted_filters, target_wavelength):
-        """Create color pairs from neighboring filters."""
-        pairs = []
-        for i in range(len(sorted_filters) - 1):
-            blue = sorted_filters[i]
-            red = sorted_filters[i + 1]
-
-            pairs.append({
-                'blue_filter': blue[0],
-                'red_filter': red[0],
-                'effective_wl': (blue[0].effective_wl + red[1].effective_wl) / 2,
-                'width': red[1].effective_wl - blue[1].effective_wl,
-                'description': f"{blue[0]}-{red[0]}"
-            })
-        return pairs
-
-    def _score_color_pair(self, pair: dict, target_wavelength: float) -> float:
-        """Score a color pair based on relevance to target wavelength."""
-        effective_wl = pair['effective_wl']
-        width = pair['width']
-
-        target_distance = abs(effective_wl - target_wavelength) / 1000.0
-        width_score = abs(width - 1000) / 1000.0
-
-        blue_wl = self.filters[pair['blue_filter']].effective_wl
-        red_wl = self.filters[pair['red_filter']].effective_wl
-        spans_target = (blue_wl <= target_wavelength <= red_wl)
-
-        return target_distance + width_score + (0 if spans_target else 1)
+        except Exception as e:
+            raise ValueError(f"Failed to read catalog from {filename}: {str(e)}")
 
 def add_catalog_argument(parser):
     """Add catalog selection argument to argument parser"""
