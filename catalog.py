@@ -410,7 +410,7 @@ class Catalog(astropy.table.Table):
             config = self.KNOWN_CATALOGS[self.MAKAK]
 
             # Read the pre-filtered catalog
-            cat = astropy.table.Table.read(config.filepath)
+            cat = astropy.table.Table.read(config['filepath'])
 
             # Filter by field of view
             ctr = SkyCoord(self.ra*u.deg, self.dec*u.deg, frame='fk5')
