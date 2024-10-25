@@ -312,6 +312,46 @@ def write_stars_file(data, ffit, imgwcs, filename="stars"):
     # Write the table to a file
     stars_table.write(filename, format='ascii.ecsv', overwrite=True)
 
+def expand_pseudo_term(term):
+    """
+    Expands pseudo-terms like '.p3' or '.r2' into their constituent terms.
+    
+    Args:
+        term (str): The term to expand (e.g., '.p3' or '.r2')
+    
+    Returns:
+        list: List of expanded terms
+    """
+    expanded_terms = []
+    
+    if term[0] == '.':
+        if term[1] == 'p':
+            # Surface polynomial
+            pol_order = int(term[2:])
+            for pp in range(1, pol_order + 1):
+                for rr in range(0, pp + 1):
+                    expanded_terms.append(f"P{rr}X{pp-rr}Y")
+        elif term[1] == 'r':
+            # Radial polynomial
+            pol_order = int(term[2:])
+            for pp in range(1, pol_order + 1):
+                expanded_terms.append(f"P{pp}R")
+        elif term[1] == 'c':
+            # Radial polynomial
+            pol_order = int(term[2:])
+            for pp in range(1, pol_order + 1):
+                expanded_terms.append(f"P{pp}C")
+        elif term[1] == 'd':
+            # Radial polynomial
+            pol_order = int(term[2:])
+            for pp in range(1, pol_order + 1):
+                expanded_terms.append(f"P{pp}D")
+    else:
+        # Regular term, no expansion needed
+        expanded_terms.append(term)
+        
+    return expanded_terms
+
 def perform_photometric_fitting(data, options, metadata):
     """
     Perform photometric fitting on the data using forward stepwise regression,
@@ -354,8 +394,13 @@ def perform_photometric_fitting(data, options, metadata):
     ffit.fit(fdata)
     best_wssrndf = ffit.wssrndf
 
+    all_terms = []
+    if options.terms:
+        for term in parse_terms(options.terms):
+            all_terms.extend(expand_pseudo_term(term))
+
     # Parse the terms from options.terms
-    all_terms = parse_terms(options.terms) if options.terms else []
+#    all_terms = parse_terms(options.terms) if options.terms else []
 
     selected_terms = []
     remaining_terms = all_terms.copy()
@@ -363,6 +408,7 @@ def perform_photometric_fitting(data, options, metadata):
     while remaining_terms:
         best_term = None
         best_improvement = 0
+        best_mask = None
 
         # Try each remaining term in parallel
         with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -370,11 +416,12 @@ def perform_photometric_fitting(data, options, metadata):
             for future in concurrent.futures.as_completed(future_to_term):
                 term = future_to_term[future]
                 try:
-                    new_wssrndf = future.result()
+                    new_wssrndf, new_mask = future.result()
                     improvement = best_wssrndf - new_wssrndf
                     if improvement > best_improvement:
                         best_improvement = improvement
                         best_term = term
+                        best_mask = new_mask
                 except Exception as exc:
                     print(f'{term} generated an exception: {exc}')
 
@@ -418,6 +465,54 @@ def perform_photometric_fitting(data, options, metadata):
     return ffit
 
 def try_term(ffit, term, selected_terms, fdata, options):
+    """
+    Try fitting with a new term added to the currently selected terms, including outlier removal.
+    Each thread works with its own copy of the data and mask.
+
+    Args:
+    ffit (fotfit.fotfit): The current fitting object.
+    term (str): The new term to try.
+    selected_terms (list): List of currently selected terms.
+    fdata (tuple): The fitting data.
+    options (argparse.Namespace): Command line options.
+
+    Returns:
+    tuple: (wssrndf, mask) The fit quality and the mask identifying good points
+    """
+    new_ffit = deepcopy(ffit)
+    setup_photometric_model(new_ffit, options, trying=",".join(selected_terms + [term]))
+    
+    # Make a copy of the input data for this thread
+    thread_data = tuple(np.copy(arr) for arr in fdata)
+    
+    # Iterative fitting with outlier removal
+    max_iterations = 3  # Limit iterations to prevent infinite loops
+    current_mask = np.ones(len(thread_data[0]), dtype=bool)
+    prev_wssrndf = float('inf')
+    
+    for iteration in range(max_iterations):
+        # Apply current mask to data
+        masked_data = tuple(arr[current_mask] for arr in thread_data)
+        
+        # Perform the fit
+        new_ffit.fit(masked_data)
+        
+        # Calculate residuals on all points
+        residuals = new_ffit.residuals(new_ffit.fitvalues, thread_data)
+        
+        # Create new mask for points within 5-sigma
+        new_mask = np.abs(residuals) < 5 * new_ffit.wssrndf
+        
+        # Check for convergence
+        if np.array_equal(new_mask, current_mask) or new_ffit.wssrndf >= prev_wssrndf:
+            break
+            
+        current_mask = new_mask
+        prev_wssrndf = new_ffit.wssrndf
+    
+    return new_ffit.wssrndf, current_mask
+
+def simple_try_term(ffit, term, selected_terms, fdata, options):
     """
     Try fitting with a new term added to the currently selected terms.
 

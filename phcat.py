@@ -46,13 +46,13 @@ def call_sextractor(file, fwhm, bg=False):
     base = os.path.splitext(file)[0]
     some_file = open(base+".sex", "w+")
     some_file.write( "CATALOG_TYPE     ASCII_HEAD\n")
-    some_file.write( "VERBOSE_TYPE     QUIET\n")
+#    some_file.write( "VERBOSE_TYPE     QUIET\n")
     some_file.write( "DETECT_THRESH 1\n")
     some_file.write( "ANALYSIS_THRESH 1\n")
     some_file.write(f"BACK_SIZE  {int(fwhm*1.5)+1}\n")
-    #some_file.write(f"BACK_FILTERSIZE  3\n")
+    some_file.write(f"BACK_FILTERSIZE  3\n")
     #some_file.write(f"BACK_SIZE 5\n")
-    some_file.write("BACK_FILTERSIZE  1\n")
+    #some_file.write("BACK_FILTERSIZE  1\n")
     some_file.write(f"PARAMETERS_NAME  {base}.param\n")
     some_file.write(f"FILTER_NAME      {base}.conv\n")
     some_file.write(f"CATALOG_NAME     {base}.cat\n")
@@ -84,6 +84,7 @@ def call_sextractor(file, fwhm, bg=False):
     os.system(f"sex -c {base}.sex {file}")
     det = astropy.io.ascii.read(base+".cat", format='sextractor')
     os.system(f'rm {base}.cat {base}.conv {base}.sex {base}.param')
+#    os.system(f'rm {base}.conv {base}.sex {base}.param')
     return det
 
 def try_target(file):
@@ -99,7 +100,8 @@ def call_iraf(file, det):
     """call iraf/digiphot/daophot/phot on a file"""
     base = os.path.splitext(file)[0]
 
-    fwhm = np.median(det[ det['MAGERR_AUTO'] < 1.091/10 ]['FWHM_IMAGE'])
+    fwhm = get_fwhm_from_detections(det)
+    #fwhm = np.median(det[ det['MAGERR_AUTO'] < 1.091/10 ]['FWHM_IMAGE'])
     if np.isnan(fwhm):
         fwhm = np.nanmedian(det)
     print(f'FWHM={fwhm}')
@@ -108,11 +110,13 @@ def call_iraf(file, det):
 
     orix, oriy = try_target(file)
     print(orix,oriy)
-    if orix is not None and oriy is not None:
+    if orix is not None and oriy is not None and not np.isnan(orix) and not np.isnan(oriy):
         some_file.write(f"{orix:.3f} {oriy:.3f}\n")
+    else:
+        target_not_valid = True
 
     for x,y in zip(det['X_IMAGE'],det['Y_IMAGE']):
-        if orix is None or oriy is None or np.sqrt((x-orix)*(x-orix)+(y-oriy)*(y-oriy)) > fwhm:
+        if target_not_valid or np.sqrt((x-orix)*(x-orix)+(y-oriy)*(y-oriy)) > fwhm:
             some_file.write(f"{x:.3f} {y:.3f}\n")
     some_file.close()
 
@@ -149,15 +153,38 @@ def call_iraf(file, det):
     os.system(f'rm {base}.mag.1')
     return mag
 
+def get_fwhm_from_detections(det, min_good_detections=30):
+    """
+    Calculate FWHM from detections using a two-tier approach:
+    1. Try detections with good magnitude errors
+    2. If insufficient, fall back to brightest objects
+    
+    Parameters:
+    det: astropy.table.Table - Detection table from sextractor
+    min_good_detections: int - Minimum number of detections needed before falling back
+    
+    Returns:
+    float - Median FWHM value
+    """
+    # First try: all detections with good magnitude errors
+    good_detections = det[det['MAGERR_AUTO'] < 1.091/10]
+    
+    if len(good_detections) >= min_good_detections:
+        return np.median(good_detections['FWHM_IMAGE'])
+    
+    # Second try: use 30 brightest objects
+    # Sort by magnitude (lower is brighter)
+    bright_detections = det[np.argsort(det['MAG_AUTO'])[:30]]
+    return np.median(bright_detections['FWHM_IMAGE'])
+
+
 def main():
     '''Take over the world'''
     options = read_options(sys.argv[1:])
     for file in options.files:
         base = os.path.splitext(file)[0]
         det = call_sextractor(file, 2.0)
-        new_fwhm = np.median(det[ det['MAGERR_AUTO'] < 1.091/10 ]['FWHM_IMAGE'])
-        if np.isnan(new_fwhm):
-            new_fwhm = np.median(det)
+        new_fwhm = get_fwhm_from_detections(det)
         if not np.isnan(new_fwhm):
             det = call_sextractor(file, new_fwhm, bg=options.background)
 
@@ -179,7 +206,6 @@ def main():
             tbl = tbl[np.all([tbl['PIER'] == 0,tbl['FLUX'] > 0,tbl['MAGERR_AUTO']<1.091/2],axis=0)]
         tbl.write(base+".cat", format="ascii.ecsv", overwrite=True)
         print(f'OBJECTS={len(tbl)}')
-        #print(tbl)
 
 # this way, the variables local to main() are not globally available, avoiding some programming errors
 if __name__ == "__main__":
