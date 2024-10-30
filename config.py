@@ -5,23 +5,71 @@ import configparser
 import os
 #from typing import Dict, Any
 
+# Default configuration including filter schemas
+DEFAULT_CONFIG = """
+[DEFAULT]
+astrometry = False
+basemag = Sloan_r
+verbose = False
+autoupdate = False
+fsr = False
+guessbase = False
+johnson = False
+makak = False
+select_best = False
+stars = False
+gain = 2.3
+
+[FILTER_SCHEMAS]
+JohnsonU = Johnson_U, Johnson_B, Johnson_V, Johnson_R, Johnson_I
+JohnsonJ = Johnson_B, Johnson_V, Johnson_R, Johnson_I, J
+SloanU = Sloan_u, Sloan_g, Sloan_r, Sloan_i, Sloan_z
+SloanJ = Sloan_g, Sloan_r, Sloan_i, Sloan_z, J
+Gaia = BP, G, RP
+PS = g, r, i, z, y
+"""
+
 DEFAULT_CONFIG_FILE = '~/.config/dophot3/config'
+
+
 
 def load_config(config_file: str): # -> Dict[str, Any]:
     """
     Load configuration from the specified file.
-    
+
     :param config_file: Path to the configuration file
     :return: Dictionary containing configuration options
     """
+    # First load the default configuration
     config = configparser.ConfigParser()
-    config.read(os.path.expanduser(config_file))
-    return dict(config['DEFAULT'])
+    config.read_string(DEFAULT_CONFIG)
+
+    # Then try to read the user's config file
+    user_config = configparser.ConfigParser()
+    user_config.read(os.path.expanduser(config_file))
+
+    # Update defaults with user configuration
+    for section in user_config.sections():
+        if section not in config:
+            config[section] = {}
+        config[section].update(user_config[section])
+
+    # Create the result dictionary with the DEFAULT section
+    result = dict(config['DEFAULT'])
+
+    # Add filter schemas
+    result['filter_schemas'] = {}
+    if 'FILTER_SCHEMAS' in config:
+        for schema_name, filters in config['FILTER_SCHEMAS'].items():
+            # Convert comma-separated string to set of filters
+            result['filter_schemas'][schema_name] = set(f.strip() for f in filters.split(','))
+
+    return result
 
 def parse_arguments(args=None):
     """
     Parse command-line arguments, integrating with config file options.
-    
+
     :param args: Command line arguments (if None, sys.argv is used)
     :return: Namespace object containing all configuration options
     """
@@ -93,6 +141,9 @@ def parse_arguments(args=None):
 
     # Parse remaining arguments
     args = parser.parse_args(remaining_argv)
+
+    # Add the filter schemas to the parsed arguments
+    args.filter_schemas = config['filter_schemas']
 
     # Convert string 'True'/'False' to boolean for action="store_true" arguments
     for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'fsr', 'select_best']:

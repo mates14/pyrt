@@ -43,9 +43,10 @@ class CatalogFilters:
     }
     # Gaia DR3 filters
     GAIA = {
-        'G': CatalogFilter('phot_g_mean_mag', 5890, 'Vega', 'phot_g_mean_mag_error'),
-        'BP': CatalogFilter('phot_bp_mean_mag', 5050, 'Vega', 'phot_bp_mean_mag_error'),
-        'RP': CatalogFilter('phot_rp_mean_mag', 7730, 'Vega', 'phot_rp_mean_mag_error'),
+        # IS THIS VEGA OR AB?
+        'G': CatalogFilter('G', 5890, 'AB', 'G_err'),
+        'BP': CatalogFilter('BP', 5050, 'AB', 'BP_err'),
+        'RP': CatalogFilter('RP', 7730, 'AB', 'RP_err'),
     }
     # ATLAS filters
     ATLAS = {
@@ -127,7 +128,15 @@ class Catalog(astropy.table.Table):
             'epoch': 2016.0,
             'local': False,
             'service': 'Gaia',
-            'catalog_id': 'gaiadr3.gaia_source'
+            'catalog_id': 'gaiadr3.gaia_source',
+            'column_mapping': {
+                'phot_g_mean_mag': 'G',
+                'phot_g_mean_mag_error': 'G_err',
+                'phot_bp_mean_mag': 'BP',
+                'phot_bp_mean_mag_error': 'BP_err',
+                'phot_rp_mean_mag': 'RP',
+                'phot_rp_mean_mag_error': 'RP_err',
+            }
         },
         ATLAS_VIZIER: {
             'description': 'ATLAS Reference Catalog 2',
@@ -473,12 +482,15 @@ class Catalog(astropy.table.Table):
             result['pmra'] = gaia_cat['pmra'] / (3.6e6)  # mas/yr to deg/yr
             result['pmdec'] = gaia_cat['pmdec'] / (3.6e6)  # mas/yr to deg/yr
 
-            # Add Gaia magnitudes and errors
-            for filter_name, filter_info in config['filters'].items():
-                result[filter_info.name] = gaia_cat[filter_info.name]
-                if filter_info.error_name:
-                    flux_over_error = gaia_cat[filter_info.name.replace('mag', 'flux_over_error')]
-                    result[filter_info.error_name] = 2.5 / (flux_over_error * np.log(10))
+            # Map columns according to configuration
+            print(config['column_mapping'].items())
+            for gaia_name, our_name in config['column_mapping'].items():
+                if gaia_name in gaia_cat.columns:
+                    result[our_name] = gaia_cat[gaia_name].astype(np.float64)
+                gaia_name_err = gaia_name.replace('_mag_error', '_flux_over_error')
+                if gaia_name_err in gaia_cat.columns:
+                    flux_over_error = gaia_cat[gaia_name_err]
+                    result[our_name] = 2.5 / (flux_over_error * np.log(10))
 
             return result
 

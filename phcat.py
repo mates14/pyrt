@@ -112,6 +112,7 @@ def call_iraf(file, det):
     print(orix,oriy)
     if orix is not None and oriy is not None and not np.isnan(orix) and not np.isnan(oriy):
         some_file.write(f"{orix:.3f} {oriy:.3f}\n")
+        target_not_valid = False
     else:
         target_not_valid = True
 

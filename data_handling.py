@@ -190,17 +190,18 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
         time = Time(det.meta['JD'], format='jd')
         coords = SkyCoord(ra*u.deg, dec*u.deg)
         altaz = coords.transform_to(AltAz(obstime=time, location=loc))
+        # FIXME: this is not a correct formula!
         airmass = altaz.secz.value
 
         coord_x = (det_data[:, 0] - det.meta['CTRX']) / 1024
         coord_y = (det_data[:, 1] - det.meta['CTRY']) / 1024
 
         filter_mags = {}
-        for filter_name in cat.columns:
-            if filter_name.startswith(('Sloan_', 'Johnson_', 'J')):
+        for filter_name in cat.filters:
+            if filter_name in options.filter_schemas[det.meta['PHSCHEMA']]:
                 filter_mags[filter_name] = cat_data[filter_name]
 
-        magcat = cat_data[det.meta['REFILTER']]
+        magcat = cat_data[det.meta['PHFILTER']]
         mag_mask = (magcat >= options.brightlim) & (magcat <= options.maglim) if options.brightlim else (magcat <= options.maglim)
 
         n_matched_stars = np.sum(mag_mask)
@@ -229,17 +230,17 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
         for filter_name, mag_values in filter_mags.items():
             data.add_filter_column(filter_name, mag_values[mag_mask])
 
-        if det.meta['REFILTER'] in filter_mags:
-            data.set_current_filter(det.meta['REFILTER'])
+        if det.meta['PHFILTER'] in filter_mags:
+            data.set_current_filter(det.meta['PHFILTER'])
         else:
-            raise ValueError(f"Filter '{det.meta['REFILTER']}' not found in catalog data")
+            raise ValueError(f"Filter '{det.meta['PHFILTER']}' not found in catalog data")
 
         return n_matched_stars
 
     except KeyError as e:
-        logging.error(f"Error: Missing key in detection or catalog data: {e}")
+        logging.error(f"Error in make_pairs_to_fit: Missing key in detection or catalog data: {e}")
     except ValueError as e:
-        logging.error(f"Error: Invalid value encountered: {e}")
+        logging.error(f"Error in make_pairs_to_fit: Invalid value encountered: {e}")
     except Exception as e:
         logging.error(f"Unexpected error in make_pairs_to_fit: {e}")
 
