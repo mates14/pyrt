@@ -453,6 +453,9 @@ class Catalog(astropy.table.Table):
             from astroquery.gaia import Gaia
 
             config = self.KNOWN_CATALOGS[self.GAIA]
+                #-- Convert null proper motions to 0
+                #COALESCE(pmra, 0.0) as pmra,
+                #COALESCE(pmdec, 0.0) as pmdec,
             query = f"""
             SELECT
                 source_id, ra, dec, pmra, pmdec,
@@ -462,10 +465,18 @@ class Catalog(astropy.table.Table):
             FROM {config['catalog_id']}
             WHERE 1=CONTAINS(
                 POINT('ICRS', ra, dec),
-                BOX('ICRS', {self._query_params.ra}, {self._query_params.dec}, {self._query_params.width}, {self._query_params.height}))
+                BOX('ICRS', {self._query_params.ra}, {self._query_params.dec},
+                    {self._query_params.width}, {self._query_params.height}))
                 AND phot_g_mean_mag < {self._query_params.mlim}
                 AND ruwe < 1.4
                 AND visibility_periods_used >= 8
+                -- Ensure we only get complete photometric data
+                AND phot_g_mean_mag IS NOT NULL
+                AND phot_bp_mean_mag IS NOT NULL
+                AND phot_rp_mean_mag IS NOT NULL
+                AND phot_g_mean_flux_over_error > 0
+                AND phot_bp_mean_flux_over_error > 0
+                AND phot_rp_mean_flux_over_error > 0
             """
 
             job = Gaia.launch_job_async(query)
@@ -479,11 +490,16 @@ class Catalog(astropy.table.Table):
             # Basic astrometry
             result['radeg'] = gaia_cat['ra']
             result['decdeg'] = gaia_cat['dec']
-            result['pmra'] = gaia_cat['pmra'] / (3.6e6)  # mas/yr to deg/yr
-            result['pmdec'] = gaia_cat['pmdec'] / (3.6e6)  # mas/yr to deg/yr
+            try:
+                result['pmra'] = np.float64(gaia_cat['pmra']) / (3.6e6)  # mas/yr to deg/yr
+            except TypeError:
+                result['pmra'] = 0
+            try:
+                result['pmdec'] = np.float64(gaia_cat['pmdec']) / (3.6e6)  # mas/yr to deg/yr
+            except TypeError:
+                result['pmdec'] = 0
 
             # Map columns according to configuration
-            print(config['column_mapping'].items())
             for gaia_name, our_name in config['column_mapping'].items():
                 if gaia_name in gaia_cat.columns:
                     result[our_name] = gaia_cat[gaia_name].astype(np.float64)

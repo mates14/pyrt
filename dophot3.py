@@ -176,14 +176,12 @@ def get_base_filter(det, options, catalog=None):
 
     # Get available filters from the catalog
     available_filters = catalog.filters
-    logging.info(f"{type(available_filters)} {available_filters}")
     if not available_filters:
         # Fallback to Sloan r if no catalog info available
         logging.warning(f"Catalog does not contain <available_filters>. Using Sloan_r + AB")
         return 'Sloan_r', 'AB'
 
     filter_name = det.meta.get('FILTER', 'Sloan_r')
-    logging.info(f"Filter is {filter_name}")
 
     if filter_name in available_filters:
         basemag = filter_name
@@ -207,7 +205,6 @@ def get_base_filter(det, options, catalog=None):
     if 'Johnson' in basemag.name:
         fit_in_johnson = 'Johnson'
 
-    logging.info(f"basemag={basemag} fit_in_johnson={fit_in_johnson} (available filters: {sorted(available_filters)})")
     return basemag.name, fit_in_johnson, schema_name
 
 def old_get_base_filter(det, options, catalog_info=None):
@@ -1217,7 +1214,7 @@ def main():
 #        det.meta['AIRMASS'] = airmass(np.pi/2-rdalt.alt.rad)
 
         det.meta['PHFILTER'], det.meta['PHSYSTEM'], det.meta['PHSCHEMA'] = get_base_filter(det, options, cat)
-        logging.info(f'phfilter:{det.meta['PHFILTER']}, phschema:{det.meta['PHSCHEMA']} phsystem:{det.meta['PHSYSTEM']}')
+        logging.info(f'Reference filter is {det.meta['PHFILTER']}, Photometric schema: {det.meta['PHSCHEMA']} Photometric system:{det.meta['PHSYSTEM']}')
 
         # make pairs to be fitted
         det.meta['IMGNO'] = imgno

@@ -14,6 +14,7 @@ class PhotometryData:
         self._current_filter = None
         self._required_columns = ['y', 'adif', 'coord_x', 'coord_y', 'img', 'dy']
         self._image_counts = {}
+        self._total_objects = 0
 
     def init_column(self, name):
         if name not in self._data and name != 'x':
@@ -44,11 +45,17 @@ class PhotometryData:
         for name in self._data:
             self._data[name] = np.array(self._data[name])
 
-        total_objects = sum(self._image_counts.values())
-        self.add_mask('default', np.ones(total_objects, dtype=bool))
+        # Calculate total objects after converting to arrays
+        self._total_objects = len(next(iter(self._data.values())))
+        # total_objects = sum(self._image_counts.values())
+        # Create default mask of appropriate length
+        self.add_mask('default', np.ones(self._total_objects, dtype=bool))
         self.use_mask('default')
 
     def add_mask(self, name, mask):
+        """Add a new mask, ensuring it matches the data length."""
+        if len(mask) != self._total_objects:
+            raise ValueError(f"Mask length ({len(mask)}) does not match data length ({self._total_objects})")
         self._masks[name] = mask
 
     def use_mask(self, name):
@@ -105,21 +112,38 @@ class PhotometryData:
             self.apply_mask(color_mask)
 
     def get_arrays(self, *names):
+        """Get arrays applying the current mask."""
         self.check_required_columns()
 
         arrays = []
+        current_mask = self._masks[self._current_mask]
+
         for name in names:
             if name == 'x':
                 if not self._current_filter:
                     raise ValueError("No filter is currently set. Use set_current_filter() first.")
-                arrays.append(self._data[self._current_filter][self._masks[self._current_mask]])
+                # Ensure the filter data matches the mask length
+                if len(self._data[self._current_filter]) != len(current_mask):
+                    raise ValueError(f"Filter data length ({len(self._data[self._current_filter])}) "
+                                   f"does not match mask length ({len(current_mask)})")
+                print(type(self._data[self._current_filter]), current_mask)
+                arrays.append(self._data[self._current_filter][current_mask])
             elif name in self._data:
-                arrays.append(self._data[name][self._masks[self._current_mask]])
+                # Ensure data array matches mask length
+                if len(self._data[name]) != len(current_mask):
+                    raise ValueError(f"Data array '{name}' length ({len(self._data[name])}) "
+                                   f"does not match mask length ({len(current_mask)})")
+                arrays.append(self._data[name][current_mask])
             else:
                 raise KeyError(f"Column '{name}' not found in data. Available columns: {', '.join(self._data.keys())}")
+
         return tuple(arrays)
 
     def apply_mask(self, mask, name=None):
+        """Apply a new mask, ensuring proper length."""
+        if len(mask) != self._total_objects:
+            raise ValueError(f"New mask length ({len(mask)}) does not match data length ({self._total_objects})")
+
         if name is None:
             self._masks[self._current_mask] &= mask
         else:
@@ -249,29 +273,29 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
 def compute_initial_zeropoints(data, metadata):
     """
     Compute initial zeropoints for each image based on the selected best filter.
-    
+
     Args:
     data (PhotometryData): Object containing all photometry data.
     metadata (list): List of metadata for each image.
-    
+
     Returns:
     list: Initial zeropoints for each image.
     """
     zeropoints = []
     x, y, img = data.get_arrays('x', 'y', 'img')
-    
+
     for img_meta in metadata:
         img_mask = img == img_meta['IMGNO']
         img_x = x[img_mask]
         img_y = y[img_mask]
-        
+
         if len(img_x) > 0:
             zeropoint = np.median(img_x - img_y)  # x (catalog mag) - y (observed mag)
         else:
             logging.warning(f"No data for image {img_meta['IMGNO']}, using default zeropoint of 0")
             zeropoint = 0
-        
+
         zeropoints.append(zeropoint)
-    
+
     return zeropoints
 
