@@ -503,10 +503,10 @@ class Catalog(astropy.table.Table):
             for gaia_name, our_name in config['column_mapping'].items():
                 if gaia_name in gaia_cat.columns:
                     result[our_name] = gaia_cat[gaia_name].astype(np.float64)
-                gaia_name_err = gaia_name.replace('_mag_error', '_flux_over_error')
-                if gaia_name_err in gaia_cat.columns:
-                    flux_over_error = gaia_cat[gaia_name_err]
-                    result[our_name] = 2.5 / (flux_over_error * np.log(10))
+#                gaia_name_err = gaia_name.replace('_mag_error', '_flux_over_error')
+#                if gaia_name_err in gaia_cat.columns:
+#                    flux_over_error = gaia_cat[gaia_name_err]
+#                    result[our_name] = 2.5 / (flux_over_error * np.log(10))
 
             return result
 

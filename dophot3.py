@@ -138,15 +138,15 @@ def get_base_filter(det, options, catalog=None):
 
         for schema_name, schema_filters in filter_schemas.items():
             # Check if basemag is in this schema
-            if basemag.name not in schema_filters:
+            if basemag not in schema_filters:
                 continue
 
             # Check if all schema filters are available
             if schema_filters.issubset(available_filter_set):
-                logging.info(f"Photometric schema: {schema_name} with base filter {basemag.name}")
+                logging.info(f"Photometric schema: {schema_name} with base filter {basemag}")
                 return schema_name, None
 
-        return None, f"No compatible filter schema found that includes base filter {basemag.name}"
+        return None, f"No compatible filter schema found that includes base filter {basemag}"
 
     # Define filter wavelengths (in Angstroms)
     FILTER_WAVELENGTHS = {
@@ -184,7 +184,7 @@ def get_base_filter(det, options, catalog=None):
     filter_name = det.meta.get('FILTER', 'Sloan_r')
 
     if filter_name in available_filters:
-        basemag = filter_name
+        basemag = available_filters[filter_name]
     else:
         # Find closest matching filter by wavelength
         target_wavelength = FILTER_WAVELENGTHS.get(filter_name)
@@ -195,7 +195,7 @@ def get_base_filter(det, options, catalog=None):
                 basemag = closest
 
     # Find compatible schema that includes basemag
-    schema_name, error = find_compatible_schema(available_filters, options.filter_schemas, basemag)
+    schema_name, error = find_compatible_schema(available_filters, options.filter_schemas, basemag.name)
     if error:
         logging.warning(error)
 
@@ -518,7 +518,7 @@ def perform_photometric_fitting(data, options, metadata):
     zeropoints = compute_initial_zeropoints(data, metadata)
 
     # Compute colors and apply color limits
-    data.compute_colors_and_apply_limits(photometric_system, options)
+    data.compute_colors_and_apply_limits(metadata[0]['PHSCHEMA'], options)
 
     ffit = fotfit.fotfit(fit_xy=options.fit_xy)
 

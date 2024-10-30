@@ -25,7 +25,7 @@ JohnsonU = Johnson_U, Johnson_B, Johnson_V, Johnson_R, Johnson_I
 JohnsonJ = Johnson_B, Johnson_V, Johnson_R, Johnson_I, J
 SloanU = Sloan_u, Sloan_g, Sloan_r, Sloan_i, Sloan_z
 SloanJ = Sloan_g, Sloan_r, Sloan_i, Sloan_z, J
-Gaia = BP, G, RP
+Gaia = BP, G, RP, BP, RP
 PS = g, r, i, z, y
 """
 

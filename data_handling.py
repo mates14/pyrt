@@ -68,7 +68,7 @@ class PhotometryData:
             raise ValueError("No mask is currently active.")
         return self._masks[self._current_mask]
 
-    def compute_colors_and_apply_limits(self, photometric_system, options):
+    def compute_colors_and_apply_limits(self, phschema, options):
         """
         Compute colors based on the selected photometric system and apply color limits.
 
@@ -79,25 +79,15 @@ class PhotometryData:
         Returns:
         None. Updates the object in-place.
         """
-        if photometric_system not in ['Johnson', 'AB']:
-            raise ValueError("photometric_system must be either 'Johnson' or 'AB'")
-
-        if photometric_system == 'Johnson':
-            filters = ['Johnson_B', 'Johnson_V', 'Johnson_R', 'Johnson_I', 'J']
-        else:  # AB system
-            filters = ['Sloan_g', 'Sloan_r', 'Sloan_i', 'Sloan_z', 'J']
-
-        # Ensure all required filters are present
-        for f in filters:
-            if f not in self._filter_columns:
-                raise ValueError(f"Required filter {f} not found in data")
 
         # Compute colors
-        mags = [self._data[f] for f in filters]
-        self._data['color1'] = mags[0] - mags[1]
-        self._data['color2'] = mags[1] - mags[2]
-        self._data['color3'] = mags[2] - mags[3]
-        self._data['color4'] = mags[3] - mags[4]
+        print(options.filter_schemas[phschema])
+        schema = options.filter_schemas[phschema]
+        mags = [self._data[f] for f in options.filter_schemas[phschema] ]
+        self._data['color1'] = mags[0%len(schema)] - mags[1%len(schema)]
+        self._data['color2'] = mags[1%len(schema)] - mags[2%len(schema)]
+        self._data['color3'] = mags[2%len(schema)] - mags[3%len(schema)]
+        self._data['color4'] = mags[3%len(schema)] - mags[4%len(schema)]
 
         #color_mask = self._data['color3'] > 5
         # Apply color limits
@@ -126,7 +116,6 @@ class PhotometryData:
                 if len(self._data[self._current_filter]) != len(current_mask):
                     raise ValueError(f"Filter data length ({len(self._data[self._current_filter])}) "
                                    f"does not match mask length ({len(current_mask)})")
-                print(type(self._data[self._current_filter]), current_mask)
                 arrays.append(self._data[self._current_filter][current_mask])
             elif name in self._data:
                 # Ensure data array matches mask length
