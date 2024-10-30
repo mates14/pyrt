@@ -27,6 +27,7 @@ SloanU = Sloan_u, Sloan_g, Sloan_r, Sloan_i, Sloan_z
 SloanJ = Sloan_g, Sloan_r, Sloan_i, Sloan_z, J
 Gaia = BP, G, RP, BP, RP
 PS = g, r, i, z, y
+USNO = B2, R2, I, R1, B1
 """
 
 DEFAULT_CONFIG_FILE = '~/.config/dophot3/config'

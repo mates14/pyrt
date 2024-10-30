@@ -61,11 +61,11 @@ class CatalogFilters:
         'Johnson_I': CatalogFilter('Johnson_I', 8797, 'Vega'),
     }
     USNOB = {
-        'B1': CatalogFilter('B1mag', 4500, 'AB', 'e_B1mag'),
-        'R1': CatalogFilter('R1mag', 6400, 'AB', 'e_R1mag'),
-        'B2': CatalogFilter('B2mag', 4500, 'AB', 'e_B2mag'),
-        'R2': CatalogFilter('R2mag', 6400, 'AB', 'e_R2mag'),
-        'I': CatalogFilter('Imag', 8100, 'AB', 'e_Imag'),
+        'B1': CatalogFilter('B1', 4500, 'AB', 'e_B1mag'),
+        'R1': CatalogFilter('R1', 6400, 'AB', 'e_R1mag'),
+        'B2': CatalogFilter('B2', 4500, 'AB', 'e_B2mag'),
+        'R2': CatalogFilter('R2', 6400, 'AB', 'e_R2mag'),
+        'I': CatalogFilter('I', 8100, 'AB', 'e_Imag'),
     }
 
 class Catalog(astropy.table.Table):
@@ -180,16 +180,16 @@ class Catalog(astropy.table.Table):
         'column_mapping': {
             'RAJ2000': 'radeg',
             'DEJ2000': 'decdeg',
-            'B1mag': 'B1mag',
-            'R1mag': 'R1mag',
-            'B2mag': 'B2mag',
-            'R2mag': 'R2mag',
-            'Imag': 'Imag',
-            'e_B1mag': 'e_B1mag',
-            'e_R1mag': 'e_R1mag',
-            'e_B2mag': 'e_B2mag',
-            'e_R2mag': 'e_R2mag',
-            'e_Imag': 'e_Imag',
+            'B1mag': 'B1',
+            'R1mag': 'R1',
+            'B2mag': 'B2',
+            'R2mag': 'R2',
+            'Imag': 'I',
+            'e_B1mag': 'B1_err',
+            'e_R1mag': 'R1_err',
+            'e_B2mag': 'B2_err',
+            'e_R2mag': 'R2_err',
+            'e_Imag': 'I_err',
             'pmRA': 'pmra',
             'pmDE': 'pmdec'
         }
