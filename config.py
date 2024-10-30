@@ -31,37 +31,43 @@ PS = g, r, i, z, y
 
 DEFAULT_CONFIG_FILE = '~/.config/dophot3/config'
 
-
-
-def load_config(config_file: str): # -> Dict[str, Any]:
+def load_config(config_file: str = None):
     """
-    Load configuration from the specified file.
+    Load configuration, properly merging [DEFAULT] sections from both built-in defaults
+    and the config file to preserve all keywords.
 
-    :param config_file: Path to the configuration file
-    :return: Dictionary containing configuration options
+    :param config_file: Optional path to user config file
+    :return: Dictionary containing configuration options including all DEFAULT keywords
     """
-    # First load the default configuration
-    config = configparser.ConfigParser()
-    config.read_string(DEFAULT_CONFIG)
+    # Load built-in defaults
+    default_config = configparser.ConfigParser()
+    default_config.read_string(DEFAULT_CONFIG)
 
-    # Then try to read the user's config file
-    user_config = configparser.ConfigParser()
-    user_config.read(os.path.expanduser(config_file))
+    # Create a new config parser for the file config
+    file_config = configparser.ConfigParser()
 
-    # Update defaults with user configuration
-    for section in user_config.sections():
-        if section not in config:
-            config[section] = {}
-        config[section].update(user_config[section])
+    # Load either the default config file or user-specified file
+    if config_file:
+        config_path = os.path.expanduser(config_file)
+    else:
+        config_path = os.path.expanduser(DEFAULT_CONFIG_FILE)
 
-    # Create the result dictionary with the DEFAULT section
-    result = dict(config['DEFAULT'])
+    if os.path.exists(config_path):
+        file_config.read(config_path)
 
-    # Add filter schemas
-    result['filter_schemas'] = {}
-    if 'FILTER_SCHEMAS' in config:
-        for schema_name, filters in config['FILTER_SCHEMAS'].items():
-            # Convert comma-separated string to set of filters
+    # Start with all keywords from the built-in DEFAULT section
+    result = dict(default_config['DEFAULT'])
+
+    # Add all keywords from the file's DEFAULT section, preserving existing ones
+    if 'DEFAULT' in file_config:
+        for key, value in file_config['DEFAULT'].items():
+            if key not in result:  # Only add if not already present
+                result[key] = value
+
+    # Handle FILTER_SCHEMAS section if present in file config
+    if 'FILTER_SCHEMAS' in file_config:
+        result['filter_schemas'] = {}
+        for schema_name, filters in file_config['FILTER_SCHEMAS'].items():
             result['filter_schemas'][schema_name] = set(f.strip() for f in filters.split(','))
 
     return result
@@ -126,7 +132,7 @@ def parse_arguments(args=None):
     parser.add_argument("-t", "--fit-terms", help="Comma separated list of terms to fit", type=str)
     parser.add_argument("-T", "--trypar", type=str, help="Terms to examine to see if necessary (and include in the fit if they are)")
     parser.add_argument("-u", "--autoupdate", action='store_true', help="Update .det if .fits is newer", default=config.get('autoupdate', 'False'))
-    parser.add_argument("-U", "--terms", help="Terms to fit", type=str)
+    parser.add_argument("-U", "--terms", help="Terms to fit", type=str, default=config.get('terms', ''))
     parser.add_argument("-w", "--weight", action='store_true', help="Produce weight image")
     parser.add_argument("-W", "--save-model", help="Write model into a file", type=str)
     parser.add_argument("-x", "--fix-terms", help="Comma separated list of terms to keep fixed", type=str)
