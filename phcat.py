@@ -84,6 +84,10 @@ def call_sextractor(file, fwhm, bg=False):
     os.system(f"sex -c {base}.sex {file}")
     det = astropy.io.ascii.read(base+".cat", format='sextractor')
     os.system(f'rm {base}.cat {base}.conv {base}.sex {base}.param')
+
+    det.meta['IMAGEW']=astropy.io.fits.getval(file, "IMAGEW", 0)
+    det.meta['IMAGEH']=astropy.io.fits.getval(file, "IMAGEH", 0)
+
 #    os.system(f'rm {base}.conv {base}.sex {base}.param')
     return det
 
@@ -145,9 +149,10 @@ def call_iraf(file, det):
     some_file.write("\n\n\n\n")
     some_file.write("logout\n")
     some_file.close()
-    os.system(f"irafcl < {base}.cl") # > /dev/null")
+    os.system(f"irafcl < {base}.cl > /dev/null")
     os.system(f'rm {base}.cl')
     os.system(f'rm {base}.coo.1')
+
 
     mag = astropy.io.ascii.read(base+".mag.1", format='daophot')
     #mag['MAG'] = mag['MAG'] - mag.meta['ZMAG']
@@ -167,15 +172,19 @@ def get_fwhm_from_detections(det, min_good_detections=30):
     Returns:
     float - Median FWHM value
     """
+
+    sel = np.all( [ det['X_IMAGE'] < det.meta['IMAGEW']-32, det['Y_IMAGE'] < det.meta['IMAGEH']-32, det['X_IMAGE'] > 32, det['Y_IMAGE'] > 32 ], axis=0) 
+    #print(sel, det, len(sel), len(det))
+    det2 = det [ sel ]
     # First try: all detections with good magnitude errors
-    good_detections = det[det['MAGERR_AUTO'] < 1.091/10]
+    good_detections = det2[det2['MAGERR_AUTO'] < 1.091/10]
     
     if len(good_detections) >= min_good_detections:
         return np.median(good_detections['FWHM_IMAGE'])
     
     # Second try: use 30 brightest objects
     # Sort by magnitude (lower is brighter)
-    bright_detections = det[np.argsort(det['MAG_AUTO'])[:30]]
+    bright_detections = det2[np.argsort(det['MAG_AUTO'])[:30]]
     return np.median(bright_detections['FWHM_IMAGE'])
 
 

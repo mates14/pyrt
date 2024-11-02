@@ -171,7 +171,8 @@ def get_base_filter(det, options, catalog=None):
         'Johnson_B': 4353,
         'Johnson_V': 5477,
         'Johnson_R': 6349,
-        'Johnson_I': 8797
+        'Johnson_I': 8797,
+        'N':6000
     }
 
     # Get available filters from the catalog
@@ -843,7 +844,7 @@ def setup_logging(verbose):
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def write_results(data, ffit, options, alldet, target):
+def write_results(data, ffit, options, alldet, target, zpntest):
     zero, zerr = ffit.zero_val()
 
     for img, det in enumerate(alldet):
@@ -883,8 +884,8 @@ def write_results(data, ffit, options, alldet, target):
             start = time.time()
             ffData = mesh_create_flat_field_data(det, ffit)
             logging.info(f"Generating the flat field took {time.time()-start:.3f}s")
-        if options.weight: save_weight_image(det, ffData, options)
-        if options.flat: save_flat_image(det, ffData)
+        if options.weight: save_weight_image(det, ffData, options, zpntest)
+        if options.flat: save_flat_image(det, ffData, zpntest)
 
         write_output_line(det, options, zero[img], zerr[img], ffit, target[img])
 
@@ -917,7 +918,7 @@ def old_create_flat_field_data(det, ffit):
     return np.fromfunction(ffit.old_flat, [det.meta['IMGAXIS2'], det.meta['IMGAXIS1']],
         ctrx=det.meta['CTRX'], ctry=det.meta['CTRY'], img=det.meta['IMGNO'])
 
-def save_weight_image(det, ffData, options):
+def save_weight_image(det, ffData, options, zpntest):
     """
     Generate and save the weight image.
 
@@ -939,10 +940,14 @@ def save_weight_image(det, ffData, options):
     with astropy.io.fits.open(weightfile, mode='append') as wwFile:
         wwFile.append(wwHDU)
 
+    if options.astrometry:
+        zpntest.write(weightfile)
+        astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "WGHTFILE", 0, value=weightfile)
+
     logging.info(f"Weight image saved to {weightfile}")
     logging.info(f"Writing the weight file took {time.time()-start:.3f}s")
 
-def save_flat_image(det, ffData):
+def save_flat_image(det, ffData, zpntest):
     """
     Generate and save the flat image.
 
@@ -960,6 +965,8 @@ def save_flat_image(det, ffData):
 
     with astropy.io.fits.open(flatfile, mode='append') as ffFile:
         ffFile.append(ffHDU)
+
+    zpntest.write(flatfile)
 
     logging.info(f"Flat image saved to {flatfile}")
     logging.info(f"Writing the flatfield file took {time.time()-start:.3f}s")
@@ -1261,6 +1268,7 @@ def main():
         ffit.savemodel(options.save_model)
 
     # """ REFIT ASTROMETRY """
+    zpntest=None # correct behaviour if astrometry is off
     if options.astrometry:
         start = time.time()
         zpntest = refit_astrometry(det, data, options)
@@ -1284,7 +1292,7 @@ def main():
         write_stars_file(data, ffit, imgwcs)
         logging.info(f"Saving the stars file took {time.time()-start:.3f}s")
 
-    write_results(data, ffit, options, alldet, target)
+    write_results(data, ffit, options, alldet, target, zpntest)
 
 # this way, the variables local to main() are not globally available, avoiding some programming errors
 if __name__ == "__main__":
