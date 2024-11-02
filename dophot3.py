@@ -128,25 +128,26 @@ def get_base_filter(det, options, catalog=None):
 
         Args:
             available_filters: Set or dict of available filters from the catalog
-            filter_schemas: Dictionary of filter schema definitions
+            filter_schemas: OrderedDict of filter schema definitions with ordered lists of filters
             basemag: The base filter that must be present in the schema
 
         Returns:
-            tuple: (schema_name, None) if found, (None, error_message) if not found
+            str or None: schema_name if found, None if not found
         """
         available_filter_set = set(available_filters.keys()) if isinstance(available_filters, dict) else set(available_filters)
 
         for schema_name, schema_filters in filter_schemas.items():
-            # Check if basemag is in this schema
+            # Check if basemag is in this schema's filter list
             if basemag not in schema_filters:
                 continue
 
-            # Check if all schema filters are available
-            if schema_filters.issubset(available_filter_set):
+            # Convert schema_filters list to set only for comparison
+            if set(schema_filters).issubset(available_filter_set):
                 logging.info(f"Photometric schema: {schema_name} with base filter {basemag}")
-                return schema_name, None
+                return schema_name
 
-        return None, f"No compatible filter schema found that includes base filter {basemag}"
+        logging.warning(f"No compatible filter schema found that includes base filter {basemag}")
+        return None
 
     # Define filter wavelengths (in Angstroms)
     FILTER_WAVELENGTHS = {
@@ -196,9 +197,7 @@ def get_base_filter(det, options, catalog=None):
                 basemag = closest
 
     # Find compatible schema that includes basemag
-    schema_name, error = find_compatible_schema(available_filters, options.filter_schemas, basemag.name)
-    if error:
-        logging.warning(error)
+    schema_name = find_compatible_schema(available_filters, options.filter_schemas, basemag.name)
 
     # This is relatively unimportant, the important part is to populate the
     # necessary 5 filters in a sensible way

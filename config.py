@@ -67,9 +67,11 @@ def load_config(config_file: str = None):
 
     # Handle FILTER_SCHEMAS section if present in file config
     if 'FILTER_SCHEMAS' in file_config:
-        result['filter_schemas'] = {}
+        result['filter_schemas'] = {} #OrderedDict()
         for schema_name, filters in file_config['FILTER_SCHEMAS'].items():
-            result['filter_schemas'][schema_name] = set(f.strip() for f in filters.split(','))
+            # Use a list instead of a set to maintain order
+            result['filter_schemas'][schema_name] = [f.strip() for f in filters.split(',')]
+        print("filter schemas from config file: ", {k: v for k, v in result['filter_schemas'].items()})
 
     return result
 
