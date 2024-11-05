@@ -30,7 +30,7 @@ class fotfit(termfit.termfit):
 
         self.fit_xy = fit_xy
         self.base_filter = None  # Store the filter used for fitting
-        self.color_filters = []  # Store filters used for colors
+        self.color_schema = None  # Store filters used for colors
 
         if file is not None:
             self.readmodel(file)
@@ -65,10 +65,10 @@ class fotfit(termfit.termfit):
 
         return output;
 
-    def set_filter_info(self, base_filter, color_filters):
+    def set_filter_info(self, base_filter, color_schema):
         """Store filter information used in the fit"""
         self.base_filter = base_filter
-        self.color_filters = color_filters
+        self.color_schema = color_schema
 
     def fit(self, data):
 
@@ -216,15 +216,17 @@ class fotfit(termfit.termfit):
 
     def oneline(self):
         """Enhanced model string with filter information"""
+        output=[]
         # Start with filter information
-        output = f"FILTER={self.base_filter}"
-        if self.color_filters:
-            output += f",COLORS={','.join(self.color_filters)}"
+        if self.base_filter is not None:
+            output.append(f"FILTER={self.base_filter}")
+        if self.color_schema is not None: 
+            output.append(f"SCHEMA={self.color_schema}")
 
         # Add all fitted and fixed terms
         for term, value in zip(self.fixterms + self.fitterms,
                              self.fixvalues + self.fitvalues):
-            output += f",{term}={value}"
+            output.append(f"{term}={value}")
 
         # For fit_xy mode, explicitly include per-image PX/PY terms
         if self.fit_xy:
@@ -232,9 +234,10 @@ class fotfit(termfit.termfit):
             px = self.fitvalues[len(self.fitterms) + N:len(self.fitterms) + 2*N]
             py = self.fitvalues[len(self.fitterms) + 2*N:len(self.fitterms) + 3*N]
             for i, (px_val, py_val) in enumerate(zip(px, py)):
-                output += f",PX{i}={px_val},PY{i}={py_val}"
+                output.append(f"PX{i}={px_val}")
+                output.append(f"PY{i}={py_val}")
 
-        return output
+        return ",".join(output)
 
     def savemodel(self, file):
         """Enhanced model saving with complete metadata"""
@@ -242,7 +245,7 @@ class fotfit(termfit.termfit):
 
         # Add filter information
         model_table.meta['base_filter'] = self.base_filter
-        model_table.meta['color_filters'] = ','.join(self.color_filters)
+        model_table.meta['color_schema'] = self.color_schema
         model_table.meta['fit_xy'] = self.fit_xy
 
         # Add terms and values
@@ -288,9 +291,9 @@ class fotfit(termfit.termfit):
 
         # Read filter information
         self.base_filter = model_table.meta.get('base_filter')
-        color_filters = model_table.meta.get('color_filters')
-        if color_filters:
-            self.color_filters = color_filters.split(',')
+        color_schema = model_table.meta.get('color_schema')
+        #if color_schema is not None:
+        #    self.color_schema = color_schema.split(',')
         self.fit_xy = model_table.meta.get('fit_xy', False)
 
         # Clear existing terms
@@ -351,8 +354,8 @@ class fotfit(termfit.termfit):
                 if name == 'FILTER':
                     self.base_filter = strvalue
                     continue
-                elif name == 'COLORS':
-                    self.color_filters = strvalue.split(';')
+                elif name == 'SCHEMA':
+                    self.color_schema = strvalue
                     continue
 
                 # Handle per-image PX/PY terms
