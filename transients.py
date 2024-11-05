@@ -238,6 +238,7 @@ def simple_color_model(line, data):
     model=0
     for chunk in line.split(","):
         term,strvalue = chunk.split("=")
+        if term == 'FILTER': continue
         value=np.float64(strvalue)
        # print(term,value)
         if term[0] == 'P':
@@ -301,6 +302,7 @@ for arg in options.files:
     candexp=[]
     candmag=[]
     canddmag=[]
+    candfw=[]
 
     det = open_ecsv_file(arg, verbose=options.verbose) 
     if det is None: 
@@ -454,6 +456,7 @@ for arg in options.files:
             candexp.append(d.meta['EXPTIME'])
             candmag.append(d['MAG_CALIB'])
             canddmag.append(d['MAGERR_CALIB'])
+            candfw.append(d['FWHM_IMAGE'])
             continue
 
         # 3. objekt je jasnejsi nez v katalogu (= kandidat)
@@ -491,7 +494,7 @@ for arg in options.files:
         
             if len(candy)<1: break
 
-            cand2x=[]; cand2y=[]; cand2ra=[]; cand2dec=[]; cand2time=[]; cand2exp=[]; cand2mag=[]; cand2dmag=[];
+            cand2x=[]; cand2y=[]; cand2ra=[]; cand2dec=[]; cand2time=[]; cand2exp=[]; cand2mag=[]; cand2dmag=[]; cand2fw=[]
 
             tree_u = KDTree( np.array(imgwcs.all_world2pix(usno['radeg'][usno['R1']<umaglim], usno['decdeg'][usno['R1']<umaglim],1)).transpose() )
             Y = np.array([candx, candy]).transpose()
@@ -519,15 +522,16 @@ for arg in options.files:
                     cand2exp.append(candexp[i])
                     cand2mag.append(candmag[i])
                     cand2dmag.append(canddmag[i])
+                    cand2fw.append(candfw[i])
 
             print(f'USNO {uphase} left {live} candidates, killed {kill}')
 
-            candx=cand2x; candy=cand2y; candra=cand2ra; canddec=cand2dec; candtime=cand2time; candexp=cand2exp; candmag=cand2mag; canddmag=cand2dmag;
+            candx=cand2x; candy=cand2y; candra=cand2ra; canddec=cand2dec; candtime=cand2time; candexp=cand2exp; candmag=cand2mag; canddmag=cand2dmag; candfw=cand2fw
                    
     if options.regs:
         some_file.close()
-    cand = astropy.table.Table([candra,canddec,candtime,candexp,candmag,canddmag,np.int64(np.ones(len(candra)))], \
-        names=['ALPHA_J2000','DELTA_J2000','CTIME','EXPTIME','MAG_CALIB','MAGERR_CALIB','NUM'])
+    cand = astropy.table.Table([candra,canddec,candtime,candexp,candmag,canddmag,candfw,np.int64(np.ones(len(candra)))], \
+        names=['ALPHA_J2000','DELTA_J2000','CTIME','EXPTIME','MAG_CALIB','MAGERR_CALIB','FWHM_IMAGE','NUM'])
 #    print("file", os.path.splitext(arg)[0], len(cand), "candidates")
 
     if len(candra)>1:
@@ -604,6 +608,8 @@ for oo,i in zip(mags,range(0,len(mags))):
         y = oo["ALPHA_J2000"]
         z = oo["DELTA_J2000"]
 
+        fwhm_mean=np.average(oo["FWHM_IMAGE"])
+
         data = [x,y]
         fitvalues = [oo['ALPHA_J2000'][0],1.0] # [a0,da]
         res = fit.least_squares(movement_residuals, fitvalues, args=[data], ftol=1e-14)
@@ -631,7 +637,7 @@ for oo,i in zip(mags,range(0,len(mags))):
             else:
                 status = " - "
 
-        print(status, f"num:{num_found} mag:{mag0:.2f} magvar:{magvar:.1f}, mean_pos:{a0:.5f},{d0:.5f}, movement: {da*np.cos(d0*np.pi/180.0):.3f},{dd:.3f}, sigma: {sa*3600:.2f},{sd*3600:.2f}")
+        print(status, f"num:{num_found} mag:{mag0:.2f} magvar:{magvar:.1f}, mean_pos:{a0:.5f},{d0:.5f}, movement: {da*np.cos(d0*np.pi/180.0):.3f},{dd:.3f}, sigma: {sa*3600:.2f},{sd*3600:.2f} fwhm_mean: {fwhm_mean}")
 
         newtrans = [np.int64(i),np.int64(num_found),a0,d0,da,dd,dpos,sa*3600,sd*3600,sigma*3600,mag0,magvar]
         transtmp.append(newtrans)
@@ -650,6 +656,8 @@ some_file = open(regfile, "w+")
 some_file.write("# Region file format: DS9 version 4.1\nglobal color=green dashlist=8 3 width=3 font=\"helvetica 10 normal roman\" select=1 highlite=1 dash=0 fixed=0 edit=1 move=1 delete=1 include=1 source=1\nfk5\n")
 for oo in trans:
 #    print(oo)
+    print("any  ra/dec %.7f %.7f num: %.0f"%(np.average(oo["ALPHA_J2000"]), np.average(oo["DELTA_J2000"]),len(mags[oo['INDEX']])))
+    some_file.write("circle(%.7f,%.7f,%.3f\") # color=blue\n"%(np.average(oo["ALPHA_J2000"]), np.average(oo["DELTA_J2000"]),5*idlimit*d.meta['PIXEL']))
     if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 2:
         print("stationary  ra/dec %.7f %.7f num: %.0f"%(np.average(oo["ALPHA_J2000"]), np.average(oo["DELTA_J2000"]),len(mags[oo['INDEX']])))
         some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(np.average(oo["ALPHA_J2000"]), np.average(oo["DELTA_J2000"]),5*idlimit*d.meta['PIXEL']))
