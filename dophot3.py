@@ -38,6 +38,7 @@ from file_utils import try_det, try_img, write_region_file
 from config import parse_arguments
 #from config import load_config
 from data_handling import PhotometryData, make_pairs_to_fit, compute_initial_zeropoints
+from match_stars import process_image_with_dynamic_limits
 
 
 if sys.version_info[0]*1000+sys.version_info[1]<3008:
@@ -71,7 +72,117 @@ def print_image_line(det, flt, Zo, Zoe, target=None, idnum=0):
 
     return
 
-def get_base_filter(det, options, catalog=None):
+def get_catalog_filters(catalog_name):
+    """
+    Get filter information for a catalog without instantiating it.
+
+    Args:
+        catalog_name: Name of the catalog (e.g., 'atlas@localhost', 'makak', etc.)
+
+    Returns:
+        dict: Dictionary of CatalogFilter objects
+    """
+    catalog_info = Catalog.KNOWN_CATALOGS.get(catalog_name)
+    if catalog_info is None:
+        raise ValueError(f"Unknown catalog: {catalog_name}")
+    return catalog_info['filters']
+
+def get_base_filter(det, options, catalog_name):
+    '''
+    Set up or guess the base filter to use for fitting, selecting the closest available filter
+    by wavelength when necessary, and determine the appropriate filter schema.
+
+    Args:
+        det: Detection table with metadata
+        options: Command line options
+        catalog_name: Name of the catalog to use
+
+    Returns:
+        tuple: (base_filter_name, photometric_system, schema_name)
+    '''
+    def get_filter_wavelength(filter_name, filters):
+        """Get effective wavelength for a filter"""
+        filter_info = filters.get(filter_name)
+        if filter_info:
+            return filter_info.effective_wl
+        return None
+
+    def find_closest_filter_by_wavelength(target_wavelength, available_filters):
+        """Find the filter closest in wavelength to the target"""
+        if not available_filters:
+            return None
+
+        closest_filter = None
+        min_diff = float('inf')
+
+        for cat_filter in list(available_filters.values()):
+            if not isinstance(cat_filter, CatalogFilter):
+                logging.warning(f"Skipping invalid filter object: {cat_filter}")
+                continue
+            wavelength = cat_filter.effective_wl
+            if wavelength is not None:
+                diff = abs(wavelength - target_wavelength)
+                if diff < min_diff:
+                    min_diff = diff
+                    closest_filter = cat_filter
+
+        return closest_filter
+
+    def find_compatible_schema(available_filters, filter_schemas, basemag):
+        """Find compatible schema that includes the base filter"""
+        available_filter_set = set(available_filters.keys())
+
+        for schema_name, schema_filters in filter_schemas.items():
+            if basemag not in schema_filters:
+                continue
+            if set(schema_filters).issubset(available_filter_set):
+                logging.info(f"Photometric schema: {schema_name} with base filter {basemag}")
+                return schema_name
+
+        logging.warning(f"No compatible filter schema found that includes base filter {basemag}")
+        return None
+
+    # Get available filters for this catalog
+    available_filters = get_catalog_filters(catalog_name)
+    if not available_filters:
+        logging.warning(f"Catalog does not contain filters. Using Sloan_r + AB")
+        return 'Sloan_r', 'AB', None
+
+    # Map current filter name to catalog filter
+    filter_name = det.meta.get('FILTER', 'Sloan_r')
+
+    if filter_name in available_filters:
+        basemag = available_filters[filter_name]
+    else:
+        # Find closest matching filter by wavelength
+        FILTER_WAVELENGTHS = {
+            'U': 3600, 'B': 4353, 'V': 5477, 'R': 6349, 'I': 8797,
+            'g': 4810, 'r': 6170, 'i': 7520, 'z': 8660, 'y': 9620,
+            'G': 5890, 'BP': 5050, 'RP': 7730,
+            'Sloan_g': 4810, 'Sloan_r': 6170, 'Sloan_i': 7520, 'Sloan_z': 8660,
+            'Johnson_U': 3600, 'Johnson_B': 4353, 'Johnson_V': 5477,
+            'Johnson_R': 6349, 'Johnson_I': 8797, 'N': 6000
+        }
+
+        target_wavelength = FILTER_WAVELENGTHS.get(filter_name)
+        logging.info(f"Filter {filter_name} has wavelength {target_wavelength}")
+        if target_wavelength:
+            closest = find_closest_filter_by_wavelength(target_wavelength, available_filters)
+            if closest:
+                basemag = closest
+
+    # Find compatible schema that includes basemag
+    schema_name = find_compatible_schema(available_filters, options.filter_schemas, basemag.name)
+
+    # Determine photometric system
+    fit_in_johnson = 'AB'
+    if 'Johnson' in basemag.name:
+        fit_in_johnson = 'Johnson'
+
+    return basemag.name, fit_in_johnson, schema_name
+
+
+def old2_get_base_filter(det, options, catalog=None):
     '''
     Set up or guess the base filter to use for fitting, selecting the closest available filter
     by wavelength when necessary, and determine the appropriate filter schema.
@@ -1069,170 +1180,36 @@ def main():
             logging.warning(f"I do not know what to do with {arg}")
             continue
 
-#    some_file = open("det.reg", "w+")
-#    some_file.write("# Region file format: DS9 version 4.1\nglobal color=red dashlist=8 3 width=3"\
-#        " font=\"helvetica 10 normal roman\" select=1 highlite=1 dash=0 fixed=0 edit=1 move=1 delete=1 include=1 source=1\n")
-#    for w_ra, w_dec in zip(det['X_IMAGE'],det['Y_IMAGE']):
-#        some_file.write(f"circle({w_ra:.7f},{w_dec:.7f},3\") # color=red width=3\n")
-#    some_file.close()
+        catalog_name = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
+        det.meta['PHFILTER'], det.meta['PHSYSTEM'], det.meta['PHSCHEMA'] = get_base_filter(det, options, catalog_name)
+        logging.info(f'Reference filter is {det.meta["PHFILTER"]}, '
+                f'Schema: {det.meta["PHSCHEMA"]}, '
+                f'System: {det.meta["PHSYSTEM"]}')
 
-        imgwcs = astropy.wcs.WCS(det.meta)
+        start = time.time()
+
+        cat, matches, imgwcs = process_image_with_dynamic_limits(det, options)
+        if cat is None:
+            logging.warning(f"Failed to process {arg}, skipping")
+            continue
+
+        nearest_ind, nearest_dist, valid_cat_mask = matches
+        logging.info(f"Catalog processing took {time.time()-start:.3f}s")
+
 
         det['ALPHA_J2000'], det['DELTA_J2000'] = imgwcs.all_pix2world( [det['X_IMAGE']], [det['Y_IMAGE']], 1)
 
-        # if options.usewcs is not None:
-        #      fixme from "broken_usewcs.py"
-
-        start = time.time()
-
-        #if options.makak_path: CatalogManager.set_makak_path(options.makak_path)
-        catalog = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
-        enlarge = options.enlarge if options.enlarge is not None else 1.0
-
-        logging.info(f"Catalog: {options.catalog} from command line, {catalog}  to be used.")
-
-        cat = Catalog(
-            ra=det.meta['CTRRA'],
-            dec=det.meta['CTRDEC'],
-            width=enlarge * det.meta['FIELD'],
-            height=enlarge * det.meta['FIELD'],
-            mlim=options.maglim,
-            catalog=catalog
-        )
-
-        if cat is None:
-            logging.error(f"Failed to get {catalog} catalog data")
-            return None
-
-        #catalog_info = Catalog.KNOWN_CATALOGS.get(catalog)
-        #base_filter, photometric_system = get_base_filter(det, options, cat)
-
-        # Epoch for PM correction (Gaia DR2@2015.5)
-        #epoch = ( det.meta['JD'] - 2457204.5 ) / 365.2425 # Epoch for PM correction (Gaia DR2@2015.5)
-        epoch = ( (det.meta['JD'] - 2440587.5) - (cat.meta['astepoch'] - 1970.0)*365.2425  ) / 365.2425
-        logging.info(f"EPOCH_DIFF={epoch}")
-        cat['radeg'] += epoch*cat['pmra']
-        cat['decdeg'] += epoch*cat['pmdec']
-
-        logging.info(f"Catalog search took {time.time()-start:.3f}s")
-        logging.info(f"Catalog: {type(cat)} length: {len(cat)} columns: {cat.columns}")
-
-        # write_region_file(cat, "cat.reg")
-
-        if options.idlimit: idlimit = options.idlimit
-        else:
-            try:
-                idlimit = det.meta['FWHM']
-                logging.info(f"idlimit set to fits header FWHM value of {idlimit} pixels.")
-            except KeyError:
-                idlimit = 2.0/3600
-                logging.info(f"idlimit set to a hard-coded default of {idlimit} pixels.")
-
-        # ===  identification with KDTree  ===
-        Y = np.array([det['X_IMAGE'], det['Y_IMAGE']]).transpose()
-
-        start = time.time()
-        try:
-            Xt = np.array(imgwcs.all_world2pix(cat['radeg'], cat['decdeg'],1))
-        except (ValueError,KeyError):
-            logging.warning(f"Astrometry of {arg} sucks! Skipping.")
-            continue
-
-        # clean up the array from off-image objects
-        cat = cat[np.logical_not(np.any([
-            np.isnan(Xt[0]),
-            np.isnan(Xt[1]),
-            Xt[0]<0,
-            Xt[1]<0,
-            Xt[0]>det.meta['IMGAXIS1'],
-            Xt[1]>det.meta['IMGAXIS2']
-            ], axis=0))]
-
-        Xt = np.array(imgwcs.all_world2pix(cat['radeg'], cat['decdeg'],1))
-        X = Xt.transpose()
-
-        tree = KDTree(X)
-        nearest_ind, nearest_dist = tree.query_radius(Y, r=idlimit, return_distance=True, count_only=False)
-        logging.info(f"Object cross-id took {time.time()-start:.3f}s")
-
-        # identify the target object
-        target.append(None)
-        if det.meta['OBJRA']<-99 or det.meta['OBJDEC']<-99:
-            logging.info("Target was not defined")
-        else:
-            logging.info(f"Target coordinates: {det.meta['OBJRA']:.6f} {det.meta['OBJDEC']:+6f}")
-            Z = np.array(imgwcs.all_world2pix([det.meta['OBJRA']],[det.meta['OBJDEC']],1)).transpose()
-
-            if np.isnan(Z[0][0]) or np.isnan(Z[0][1]):
-                object_ind = None
-                logging.warning("Target transforms to Nan... :(")
-            else:
-                treeZ = KDTree(Z)
-                object_ind, object_dist = treeZ.query_radius(Y, r=idlimit, return_distance=True, count_only=False)
-
-                if object_ind is not None:
-                    mindist = 2*idlimit # this is just a big number
-                    for i, dd, d in zip(object_ind, object_dist, det):
-                        if len(i) > 0 and dd[0] < mindist:
-                            target[imgno] = d
-                            mindist = dd[0]
-#                        if target[imgno] is None:
-#                            logging.info("Target was not found")
-#                        else:
-#                            logging.info(f"Target is object id {target[imgno]['NUMBER']} at distance {mindist:.2f} px")
-
-        # === objects identified ===
-
-        # TODO: handle discrepancy between estimated and fitsheader filter
-#        flt = det.meta['FILTER']
-
-#        if options.tryflt:
-#            fltx = check_filter(nearest_ind, det)
-    #        print("Filter: %s"%(fltx))
-#            flt = fltx
-
-        # crude estimation of an image photometric zeropoint
-#        Zo, Zoe, Zn = median_zeropoint(nearest_ind, det, cat, flt)
-
-#        if Zn == 0:
-#            print(f"Warning: no identified stars in {det.meta['FITSFILE']}, skip image")
-#            continue
-
-#        if options.tryflt:
-#            print_image_line(det, flt, Zo, Zoe, target[imgno], Zn)
-#            sys.exit(0)
-
-        # === fill up fields to be fitted ===
-#        zeropoints=zeropoints+[Zo]
-#        det.meta['IDNUM'] = Zn
-#        metadata.append(det.meta)
-
-# Tohle tady asi nema co delat, mozna do cat2det nebo uplne pryc?
-#        cas = astropy.time.Time(det.meta['JD'], format='jd')
-#        loc = astropy.coordinates.EarthLocation(\
-#            lat=det.meta['LATITUDE']*astropy.units.deg, \
-#            lon=det.meta['LONGITUD']*astropy.units.deg, \
-#            height=det.meta['ALTITUDE']*astropy.units.m)
-#
-#        tmpra, tmpdec = imgwcs.all_pix2world(det.meta['CTRX'], det.meta['CTRY'], 1)
-#        rd = astropy.coordinates.SkyCoord( np.float64(tmpra), np.float64(tmpdec), unit=astropy.units.deg)
-#        rdalt = rd.transform_to(astropy.coordinates.AltAz(obstime=cas, location=loc))
-#        det.meta['AIRMASS'] = airmass(np.pi/2-rdalt.alt.rad)
-
-        det.meta['PHFILTER'], det.meta['PHSYSTEM'], det.meta['PHSCHEMA'] = get_base_filter(det, options, cat)
         logging.info(f'Reference filter is {det.meta['PHFILTER']}, Photometric schema: {det.meta['PHSCHEMA']} Photometric system:{det.meta['PHSYSTEM']}')
 
         # make pairs to be fitted
         det.meta['IMGNO'] = imgno
-        n_matched_stars = make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data)
+        n_matched_stars = make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, None)
         det.meta['IDNUM'] = n_matched_stars
 
         if n_matched_stars == 0:
             logging.warning(f"No matched stars in {det.meta['FITSFILE']}, skipping image")
             continue
 
-        # Store metadata for later use
-#        det.meta['IMGNO'] = imgno
         metadata.append(det.meta)
         alldet.append(det)
         imgno += 1
