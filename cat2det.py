@@ -134,10 +134,35 @@ def fix_time(hdr, verbose=False):
 
     # for stellar physics with high time resolution, BJD is very useful
     ondrejov = EarthLocation(lat=hdr['LATITUDE']*u.deg, lon=hdr['LONGITUD']*u.deg, height=hdr['ALTITUDE']*u.m)
-    with suppress(KeyError): 
+    with suppress(KeyError):
         target = SkyCoord(hdr['ORIRA'], hdr['ORIDEC'], unit=u.deg)
         hdr['BJD'] = hdr['JD'] + time.light_travel_time(target, kind='barycentric', location=ondrejov,
             ephemeris='builtin').to_value('jd',subfmt='float')
+
+def calculate_background_stats(data):
+    """Calculate background sigma using row differences method"""
+    if data is None or len(data) < 2:
+        raise ValueError("Invalid data array for background calculation")
+
+    ndiff = np.zeros(len(data), dtype=np.float64)
+    i, j = 0, 0
+
+    while i < len(data) - 1:
+        diff = abs(data[i].astype(np.float32) - data[i+1].astype(np.float32))
+        median = np.nanmedian(diff)
+        if not np.isnan(median):
+            ndiff[j] = median
+            j += 1
+        i += 1
+
+    if j == 0:
+        raise ValueError("No valid background measurements")
+
+    scale_factor = 1.0489  # scale factor of median of two point's distance to standard deviation
+    sigma = np.nanmedian(ndiff[:j])
+    median = np.nanmedian(data[~np.isnan(data)])
+
+    return scale_factor * sigma, median
 
 def get_limits(det, verbose=False):
     """ compute a detection limit from errorbars
@@ -285,6 +310,10 @@ def main():
         # remove zeros in the error column
         det['MAGERR_AUTO'] = np.sqrt(det['MAGERR_AUTO']*det['MAGERR_AUTO']+0.0005*0.0005)
 
+        img_sigma, img_median = calculate_background_stats(fitsfile[0].data)
+        det.meta['MEDIAN'] = img_median
+        det.meta['BGSIGMA'] = img_sigma
+
         c = fitsfile[0].header
         fitsfile.close()
 
@@ -368,7 +397,7 @@ def main():
         det.meta['FWHM'] = fwhm
 
         remove_junk(det.meta)
-    
+
         output = os.path.splitext(filef)[0] + ".det"
         if options.verbose: print(f"Writing output file {output}")
         det.write(output, format="ascii.ecsv", overwrite=True)
