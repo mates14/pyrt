@@ -177,7 +177,7 @@ class PhotometryData:
     def __repr__(self):
         return f"PhotometryData with columns: {list(self._data.keys())}, current filter: {self._current_filter}, current mask: {self._current_mask}"
 
-def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
+def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None):
     """
     Efficiently create pairs of data to be fitted.
 
@@ -215,7 +215,10 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data):
                 filter_mags[filter_name] = cat_data[filter_name]
 
         magcat = cat_data[det.meta['PHFILTER']]
-        mag_mask = (magcat >= options.brightlim) & (magcat <= options.maglim) if options.brightlim else (magcat <= options.maglim)
+        maglim = options.maglim or det.meta['MAGLIM']
+        mag_mask = magcat <= maglim
+        if options.brightlim:
+            mag_mask &= magcat >= options.brightlim
 
         n_matched_stars = np.sum(mag_mask)
 
