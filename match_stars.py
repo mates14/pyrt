@@ -40,124 +40,165 @@ from data_handling import PhotometryData, make_pairs_to_fit, compute_initial_zer
 def match_stars(det, cat, imgwcs, idlimit=2.0):
     """
     Match detected stars with catalog stars using KDTree.
-    
+
     Args:
         det: Detection table with X_IMAGE, Y_IMAGE
         cat: Catalog table with radeg, decdeg
         imgwcs: WCS object for coordinate transformation
         idlimit: Match radius in pixels (default: 2.0)
-        
+
     Returns:
-        tuple: (nearest_indices, nearest_distances, valid_catalog_mask)
-            - nearest_indices: Array of indices for each detection's matches
-            - nearest_distances: Array of distances for each match
-            - valid_catalog_mask: Boolean mask for valid catalog entries
+        nearest_indices: Indices into original catalog
     """
     # Transform catalog coordinates to pixel space
     try:
         cat_x, cat_y = imgwcs.all_world2pix(cat['radeg'], cat['decdeg'], 1)
     except (ValueError, KeyError):
         logging.warning("Astrometry transformation failed")
-        return None, None, None
-        
-    # Create mask for valid catalog entries (on image)
-    valid_cat_mask = ~np.any([
-        np.isnan(cat_x),
-        np.isnan(cat_y),
-        cat_x < 0,
-        cat_y < 0,
-        cat_x > det.meta['IMGAXIS1'],
-        cat_y > det.meta['IMGAXIS2']
-    ], axis=0)
-    
-    if not np.any(valid_cat_mask):
-        logging.warning("No valid catalog stars on image")
-        return None, None, valid_cat_mask
-    
+        return None, None, None, None
+
     # Create coordinate arrays
     det_coords = np.array([det['X_IMAGE'], det['Y_IMAGE']]).T
-    cat_coords = np.array([cat_x[valid_cat_mask], cat_y[valid_cat_mask]]).T
-    
+    cat_coords = np.array([cat_x, cat_y]).T
+
     # Build and query KDTree
     tree = KDTree(cat_coords)
-    nearest_ind, nearest_dist = tree.query_radius(
-        det_coords, 
+    nearest_ind, _ = tree.query_radius(
+        det_coords,
         r=idlimit,
         return_distance=True,
         count_only=False
     )
-    
-    return nearest_ind, nearest_dist, valid_cat_mask
 
-def estimate_rough_zeropoint(det, matches, cat, valid_cat_mask):
+    return nearest_ind
+
+def find_target(det, imgwcs, idlimit=2.0):
+    """
+    Find the target object in the detection list.
+
+    Args:
+        det: Detection table with target coordinates in meta
+        imgwcs: WCS object for coordinate transformation
+        idlimit: Match radius in pixels
+
+    Returns:
+        object: Matched detection or None if not found
+    """
+    if det.meta['OBJRA'] < -99 or det.meta['OBJDEC'] < -99:
+        logging.info("Target was not defined")
+        return None
+
+    logging.info(f"Target coordinates: {det.meta['OBJRA']:.6f} {det.meta['OBJDEC']:+.6f}")
+
+    try:
+        # Transform target coordinates to pixel space
+        target_x, target_y = imgwcs.all_world2pix(
+            [det.meta['OBJRA']],
+            [det.meta['OBJDEC']],
+            1
+        )
+
+        if np.isnan(target_x[0]) or np.isnan(target_y[0]):
+            logging.warning("Target transforms to NaN")
+            return None
+
+        # Create coordinate arrays
+        target_coords = np.array([[target_x[0], target_y[0]]])
+        det_coords = np.array([det['X_IMAGE'], det['Y_IMAGE']]).T
+
+        # Build and query KDTree
+        tree = KDTree(det_coords)
+        object_ind, object_dist = tree.query_radius(
+            target_coords,
+            r=idlimit,
+            return_distance=True,
+            count_only=False
+        )
+
+        # Find closest match if any
+        if len(object_ind[0]) > 0:
+            mindist = np.inf
+            target_match = None
+            for idx, dist in zip(object_ind[0], object_dist[0]):
+                if dist < mindist:
+                    target_match = det[idx]
+                    mindist = dist
+            if target_match is not None:
+                logging.info(f"Target is object id {target_match['NUMBER']} at distance {mindist:.2f} px")
+                return target_match
+
+    except Exception as e:
+        logging.warning(f"Target search failed: {e}")
+
+    return None
+
+def estimate_rough_zeropoint(det, nearest_ind, cat, valid_cat_mask):
     """
     Estimate initial zeropoint from bright star matches.
-    
+
     Args:
         det: Detection table
         matches: (indices, distances) from KDTree matching
         cat: Catalog table
         valid_cat_mask: Boolean mask for valid catalog entries
-        
+
     Returns:
         float: Estimated zeropoint
     """
-    nearest_ind, nearest_dist, valid_cat_mask = matches
-    
+
     # Get only entries with matches
     valid_matches = [i for i, inds in enumerate(nearest_ind) if len(inds) > 0]
-    
+
     if not valid_matches:
         return 0.0
-        
+
     # Get matched magnitudes
     inst_mags = det['MAG_AUTO'][valid_matches]
     cat_mags = []
-    
+
     # Get catalog indices accounting for the valid_cat_mask
-    valid_cat_indices = np.where(valid_cat_mask)[0]
     for i, inds in enumerate(nearest_ind):
         if len(inds) > 0:
-            # Map back to original catalog index
-            orig_idx = valid_cat_indices[inds[0]]
-            cat_mags.append(cat[det.meta['PHFILTER']][orig_idx])
-    
+            cat_mags.append(cat[det.meta['PHFILTER']][inds[0]])
+
     cat_mags = np.array(cat_mags)
-    
+
     # Use brightest 30% of stars for initial estimate
     bright_limit = np.percentile(inst_mags, 30)
     bright_mask = inst_mags < bright_limit
-    
+
     if np.sum(bright_mask) > 0:
         zp = np.median(cat_mags[bright_mask] - inst_mags[bright_mask])
         logging.info(f"Initial zeropoint estimate: {zp:.3f} using {np.sum(bright_mask)} bright stars")
         return zp
-    
+
     return 0.0
 
-def get_catalog_with_dynamic_limit(det, estimated_zp, options, safety_margin=1.25):
+def get_catalog_with_dynamic_limit(det, estimated_zp, options, safety_margin=2.0):
     """
     Get catalog data with magnitude limit scaled from detection limit.
-    
+
     Args:
         det: Detection table
         estimated_zp: Initial zeropoint estimate
         options: Command line options
         safety_margin: How many magnitudes above detection limit to use
-        
+
     Returns:
         Catalog: New catalog instance with appropriate magnitude limit
     """
     # Calculate magnitude limit based on detection limit
     detection_limit = det.meta['LIMFLX3'] + estimated_zp
     maglim = detection_limit - safety_margin
-    
+
+    det.meta['MAGLIM'] = maglim
+
     logging.info(f"Detection limit: {detection_limit:.2f}, using catalog limit: {maglim:.2f}")
-    
+
     # Get catalog with calculated magnitude limit
     enlarge = options.enlarge if options.enlarge is not None else 1.0
     catalog_name = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
-    
+
     cat = Catalog(
         ra=det.meta['CTRRA'],
         dec=det.meta['CTRDEC'],
@@ -166,25 +207,29 @@ def get_catalog_with_dynamic_limit(det, estimated_zp, options, safety_margin=1.2
         mlim=maglim,
         catalog=catalog_name
     )
-    
+
     return cat
 
 def process_image_with_dynamic_limits(det, options):
     """
     Process a single image with dynamic magnitude limits.
-    
+
     Args:
         det: Detection table
         options: Command line options
-        
+
     Returns:
-        tuple: (catalog, matches, imgwcs) or (None, None, None) on failure
+        tuple: (catalog, matches, imgwcs, target) or (None, None, None, None) on failure
     """
-#    try:
-    if True:
+    try:
         # Set up WCS
         imgwcs = astropy.wcs.WCS(det.meta)
-        
+
+        target_match = find_target(det, imgwcs,
+                                 idlimit=options.idlimit if options.idlimit else 2.0)
+
+        target_match = None
+
         # Initial catalog search with bright stars
         initial_cat = Catalog(
             ra=det.meta['CTRRA'],
@@ -194,25 +239,26 @@ def process_image_with_dynamic_limits(det, options):
             mlim=16.0,  # Use bright stars for initial estimate
             catalog='makak' if options.makak else (options.catalog or 'atlas@localhost')
         )
-        
+
         # Match stars
-        matches = match_stars(det, initial_cat, imgwcs, 
+        matches = match_stars(det, initial_cat, imgwcs,
                             idlimit=options.idlimit if options.idlimit else 2.0)
-        if matches[0] is None:
-            return None, None, None
-            
+        if matches is None:
+            return None, None, None, None
+
         # Estimate zeropoint
-        estimated_zp = estimate_rough_zeropoint(det, matches, initial_cat, matches[2])
-        
+        estimated_zp = estimate_rough_zeropoint(det, matches, initial_cat, None)
+
         # Get catalog with appropriate magnitude limit
         cat = get_catalog_with_dynamic_limit(det, estimated_zp, options)
-        
+
         # Final matching with full catalog
         final_matches = match_stars(det, cat, imgwcs,
                                   idlimit=options.idlimit if options.idlimit else 2.0)
-        
-        return cat, final_matches, imgwcs
-        
-#    except Exception as e:
-#        logging.error(f"Error processing image: {e}")
-#        return None, None, None
+
+        print(final_matches)
+        return cat, final_matches, imgwcs, target_match
+
+    except Exception as e:
+        logging.error(f"Error processing image: {e}")
+        return None, None, None, None
