@@ -179,7 +179,7 @@ def get_limits(det, verbose=False):
     """
     res = opt.least_squares(errormodel, [1, 2.5], args=[(det['MAG_AUTO'],np.log10(det['MAGERR_AUTO'] * np.log(2.5) * 3))] )
     det.meta['LIMFLX3'] = res.x[0]
-    det.meta['LIMFLX10'] = res.x[0]+res.x[1]*np.log10(1.091/10)
+    det.meta['LIMFLX10'] = res.x[0]+res.x[1]*np.log10(1.091/10) # FIXME: this is strange, I do not trust this is actually 10-sigma
 
     try:
         cov = np.linalg.inv(res.jac.T.dot(res.jac))
