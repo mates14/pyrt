@@ -85,8 +85,8 @@ def call_sextractor(file, fwhm, bg=False):
     det = astropy.io.ascii.read(base+".cat", format='sextractor')
     os.system(f'rm {base}.cat {base}.conv {base}.sex {base}.param')
 
-    det.meta['IMAGEW']=astropy.io.fits.getval(file, "IMAGEW", 0)
-    det.meta['IMAGEH']=astropy.io.fits.getval(file, "IMAGEH", 0)
+    det.meta['IMAGEW']=astropy.io.fits.getval(file, "NAXIS1", 0)
+    det.meta['IMAGEH']=astropy.io.fits.getval(file, "NAXIS2", 0)
 
 #    os.system(f'rm {base}.conv {base}.sex {base}.param')
     return det
