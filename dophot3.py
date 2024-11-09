@@ -1188,12 +1188,11 @@ def main():
 
         start = time.time()
 
-        cat, matches, imgwcs = process_image_with_dynamic_limits(det, options)
+        cat, matches, imgwcs, target_match = process_image_with_dynamic_limits(det, options)
         if cat is None:
             logging.warning(f"Failed to process {arg}, skipping")
             continue
 
-        nearest_ind, nearest_dist, valid_cat_mask = matches
         logging.info(f"Catalog processing took {time.time()-start:.3f}s")
 
 
@@ -1203,7 +1202,7 @@ def main():
 
         # make pairs to be fitted
         det.meta['IMGNO'] = imgno
-        n_matched_stars = make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, None)
+        n_matched_stars = make_pairs_to_fit(det, cat, matches, imgwcs, options, data, None)
         det.meta['IDNUM'] = n_matched_stars
 
         if n_matched_stars == 0:
@@ -1212,6 +1211,8 @@ def main():
 
         metadata.append(det.meta)
         alldet.append(det)
+        target.append(target_match)
+
         imgno += 1
 
     data.finalize()
