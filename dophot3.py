@@ -1261,6 +1261,7 @@ def main():
                 os.unlink(newfits)
             os.system(f"cp {fitsbase}.fits {newfits}")
             zpntest.write(newfits)
+            zpntest.write(det.meta)
             imgwcs = astropy.wcs.WCS(zpntest.wcs())
             logging.info(f"Saving a new fits with WCS took {time.time()-start:.3f}s")
     # ASTROMETRY END
