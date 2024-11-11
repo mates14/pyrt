@@ -1198,7 +1198,8 @@ def main():
 
         det['ALPHA_J2000'], det['DELTA_J2000'] = imgwcs.all_pix2world( [det['X_IMAGE']], [det['Y_IMAGE']], 1)
 
-        logging.info(f'Reference filter is {det.meta['PHFILTER']}, Photometric schema: {det.meta['PHSCHEMA']} Photometric system:{det.meta['PHSYSTEM']}')
+        logging.info("Reference filter is %s, Photometric schema: %s, Photometric system: %s"\
+            %(det.meta['PHFILTER'],det.meta['PHSCHEMA'],det.meta['PHSYSTEM']))
 
         # make pairs to be fitted
         det.meta['IMGNO'] = imgno
