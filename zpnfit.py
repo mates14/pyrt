@@ -116,65 +116,111 @@ class zpnfit(termfit.termfit):
                     if i + j > 0)
         return x + dx, y + dy
 
-    def write(self, file):
-        """ Write the fitted WCS solution to a file"""
-        fuj_terms = [
-            "A_ORDER", "A_0_0", "A_0_1", "A_0_2", "A_0_3", "A_0_4", "A_1_0",
-            "A_1_1", "A_1_2", "A_1_3", "A_2_0", "A_2_1", "A_2_2", "A_3_0",
-            "A_3_1", "A_4_0", "B_ORDER", "B_0_0", "B_0_1", "B_0_2", "B_0_3",
-            "B_0_4", "B_1_0", "B_1_1", "B_1_2", "B_1_3", "B_2_0", "B_2_1",
-            "B_2_2", "B_3_0", "B_3_1", "B_4_0", "AP_ORDER", "AP_0_0",
-            "AP_0_1", "AP_0_2", "AP_0_3", "AP_0_4", "AP_1_0", "AP_1_1",
-            "AP_1_2", "AP_1_3", "AP_2_0", "AP_2_1", "AP_2_2", "AP_3_0",
-            "AP_3_1", "AP_4_0", "BP_ORDER", "BP_0_0", "BP_0_1", "BP_0_2",
-            "BP_0_3", "BP_0_4", "BP_1_0", "BP_1_1", "BP_1_2", "BP_1_3",
-            "BP_2_0", "BP_2_1", "BP_2_2", "BP_3_0", "BP_3_1", "BP_4_0" ]
+    def write(self, output, clean_header=True):
+        """Write the fitted WCS solution to a FITS file or dictionary.
 
-        if os.path.isfile(file):
-            logging.info(f"Writing new WCS header into {file}")
+        Parameters
+        ----------
+        output : str or OrderedDict
+            Either a path to a FITS file or an OrderedDict to store the WCS solution
+        clean_header : bool, optional
+            Whether to clean existing WCS-related keywords before writing new ones
+
+        Returns
+        -------
+        OrderedDict
+            The updated header dictionary (only if output was an OrderedDict)
+        """
+        # Terms that should be cleaned up before writing new WCS
+        wcs_terms = [
+            # Basic WCS terms
+            "WCSAXES", "CTYPE1", "CTYPE2", "CUNIT1", "CUNIT2",
+            "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2",
+            "CD1_1", "CD1_2", "CD2_1", "CD2_2",
+            "CDELT1", "CDELT2", "PC1_1", "PC1_2", "PC2_1", "PC2_2",
+            "LONPOLE", "LATPOLE", "EQUINOX", "EPOCH", "RADESYS",
+            # Projection-specific terms
+            "PV1_0", "PV1_1", "PV1_2", "PV1_3", "PV1_4", "PV1_5",
+            "PV2_0", "PV2_1", "PV2_2", "PV2_3", "PV2_4", "PV2_5",
+            "PV2_6", "PV2_7", "PV2_8", "PV2_9", "PV2_10",
+            # SIP terms
+            "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"
+        ]
+
+        # Add SIP coefficient terms
+        for i in range(5):  # Typical max order is 4
+            for j in range(5-i):
+                wcs_terms.extend([f'A_{i}_{j}', f'B_{i}_{j}', f'AP_{i}_{j}', f'BP_{i}_{j}'])
+
+        # Function to write WCS keywords to either a FITS file or dictionary
+        def write_wcs_keywords(target, is_file=True):
+            # Clean existing WCS terms if requested
+            if clean_header:
+                if is_file:
+                    for term in wcs_terms:
+                        try:
+                            fits.delval(target, term, 0)
+                        except (KeyError, OSError):
+                            pass
+                    try:
+                        fits.delval(target, "COMMENT", 0)
+                    except (KeyError, OSError):
+                        pass
+                else:
+                    for term in wcs_terms:
+                        target.pop(term, None)
+
+            # Write basic WCS terms
+            def set_value(key, value):
+                if is_file:
+                    fits.setval(target, key, 0, value=value)
+                else:
+                    target[key] = value
+
+            # Write WCSAXES first as required
+            set_value('WCSAXES', 2)
+            set_value('EQUINOX', 2000.0)
+
+            # Write the solution sigma if available
+            if hasattr(self, 'sigma'):
+                set_value('ASTSIGMA', self.sigma)
+
+            # Write fixed and fitted terms
+            for term, value in zip(self.fixterms + self.fitterms,
+                                 self.fixvalues + self.fitvalues):
+                if term == "PROJ":
+                    proj = self.projections[int(value)]
+                    suffix = "-SIP" if self.sip_order > 0 else ""
+                    set_value('CTYPE1', f"RA---{proj}{suffix}")
+                    set_value('CTYPE2', f"DEC--{proj}{suffix}")
+                    set_value('CUNIT1', "deg")
+                    set_value('CUNIT2', "deg")
+                else:
+                    set_value(term, value)
+
+            # Write SIP coefficients if present
+            if self.sip_order > 0:
+                set_value('A_ORDER', self.sip_order)
+                set_value('B_ORDER', self.sip_order)
+
+                for i in range(self.sip_order + 1):
+                    for j in range(self.sip_order + 1 - i):
+                        if i + j > 0:  # Skip A_0_0 and B_0_0
+                            set_value(f'A_{i}_{j}', self.sip_a[i,j])
+                            set_value(f'B_{i}_{j}', self.sip_b[i,j])
+
+        # Handle different output types
+        if isinstance(output, str):
+            if not os.path.isfile(output):
+                logging.warning(f"{output} does not exist, no WCS header written")
+                return
+            logging.info(f"Writing new WCS header into {output}")
+            write_wcs_keywords(output, is_file=True)
+        elif isinstance(output, collections.OrderedDict):
+            write_wcs_keywords(output, is_file=False)
+            return output
         else:
-            logging.info(f"{file} does not exist, no WCS header written")
-            return
-
-        nic=0
-        for term in fuj_terms:
-#            os.system("fitsheader -d %s %s"%(term, file))
-            try:
-                fits.delval(file, term, 0)
-            except:
-                nic+=1
-
-        try:
-            fits.delval(file, "COMMENT", 0)
-        except:
-            nic+=1
-
-        fits.setval(file, "ASTSIGMA", 0, value=self.sigma)
-
-        for term, value in zip(
-                self.fixterms + self.fitterms,
-                self.fixvalues + self.fitvalues):
-            if term == "PROJ":
-                # And if SIP, change to --SIP?
-                fits.setval(file, 'CTYPE1', 0, value=f"RA---{self.projections[np.int64(value)]:3s}")
-                fits.setval(file, 'CTYPE2', 0, value=f"DEC--{self.projections[np.int64(value)]:3s}")
-            else:
-                fits.setval(file, term, 0, value=value)
-
-        # Add SIP keywords to the FITS header
-        if self.sip_order > 0:
-            fits.setval(file, 'A_ORDER', 0, value=self.sip_order)
-            fits.setval(file, 'B_ORDER', 0, value=self.sip_order)
-
-            for i in range(self.sip_order + 1):
-                for j in range(self.sip_order + 1 - i):
-                    if i + j > 0:  # Skip A_0_0 and B_0_0
-                        fits.setval(file, f'A_{i}_{j}', 0, value=self.sip_a[i,j])
-                        fits.setval(file, f'B_{i}_{j}', 0, value=self.sip_b[i,j])
-
-            # Update CTYPE to include SIP
-            fits.setval(file, 'CTYPE1', 0, value=f"RA---{self.projections[np.int64(self.termval('PROJ'))]:3s}-SIP")
-            fits.setval(file, 'CTYPE2', 0, value=f"DEC--{self.projections[np.int64(self.termval('PROJ'))]:3s}-SIP")
+            raise TypeError("Output must be either a file path (str) or OrderedDict")
 
     def model(self, values, data):
         """astrometric model inverted (fit in image plane)
