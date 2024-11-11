@@ -512,12 +512,12 @@ def write_stars_file(data, ffit, imgwcs, filename="stars"):
     data.use_mask('default')
 
     # Get all required arrays
-    x, y, adif, coord_x, coord_y, color1, color2, color3, color4, img, dy, ra, dec, image_x, image_y = data.get_arrays(
-        'x', 'y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'dy', 'ra', 'dec', 'image_x', 'image_y'
+    x, y, adif, coord_x, coord_y, color1, color2, color3, color4, img, dy, ra, dec, image_x, image_y, cat_x, cat_y = data.get_arrays(
+        'x', 'y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'dy', 'ra', 'dec', 'image_x', 'image_y', 'cat_x', 'cat_y'
     )
 
     # Calculate model magnitudes
-    model_input = (y, adif, coord_x, coord_y, color1, color2, color3, color4, img, x, dy)
+    model_input = (y, adif, coord_x, coord_y, color1, color2, color3, color4, img, x, dy, cat_x, cat_y)
     model_mags = ffit.model(np.array(ffit.fitvalues), model_input)
 
     # Calculate astrometric residuals (if available)
@@ -637,7 +637,7 @@ def perform_photometric_fitting(data, options, metadata):
     ffit.zero = zeropoints
 
     # Perform initial fit with just the zeropoints
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy')
+    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'cat_x', 'cat_y')
     ffit.fit(fdata)
     best_wssrndf = ffit.wssrndf
 
@@ -688,19 +688,19 @@ def perform_photometric_fitting(data, options, metadata):
     data.apply_mask(photo_mask, 'photometry')
     data.use_mask('photometry')
     # 1.
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy')
+    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'cat_x', 'cat_y')
 
     ffit.delin = True
     ffit.fit(fdata)
 
     # Final fit with refined mask
     data.use_mask('default')
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy')
+    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'cat_x', 'cat_y')
     photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
     data.apply_mask(photo_mask, 'photometry')
     data.use_mask('photometry')
     # 1.
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy')
+    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'cat_x', 'cat_y')
     ffit.fit(fdata)
 
     print(f"Final fit variance: {ffit.wssrndf}")
@@ -971,7 +971,7 @@ def write_results(data, ffit, options, alldet, target, zpntest):
         start = time.time()
         fn = os.path.splitext(det.meta['detf'])[0] + ".ecsv"
         det['MAG_CALIB'] = ffit.model(np.array(ffit.fitvalues), (det['MAG_AUTO'], det.meta['AIRMASS'],
-            det['X_IMAGE']/1024-det.meta['CTRX']/1024, det['Y_IMAGE']/1024-det.meta['CTRY']/1024,0,0,0,0, img,0,0))
+            det['X_IMAGE']/1024-det.meta['CTRX']/1024, det['Y_IMAGE']/1024-det.meta['CTRY']/1024,0,0,0,0, img,0,0,0.5,0.5))
         det['MAGERR_CALIB'] = np.sqrt(np.power(det['MAGERR_AUTO'],2)+np.power(zerr[img],2))
 
         det.meta['MAGZERO'] = zero[img]
@@ -1094,7 +1094,7 @@ def write_output_line(det, options, zero, zerr, ffit, target):
     if target is not None:
         tarx = target['X_IMAGE']/1024 - det.meta['CTRX']/1024
         tary = target['Y_IMAGE']/1024 - det.meta['CTRY']/1024
-        data_target = np.array([[target['MAG_AUTO']], [det.meta['AIRMASS']], [tarx], [tary], [0], [0], [0], [0], [det.meta['IMGNO']], [0], [0]])
+        data_target = np.array([[target['MAG_AUTO']], [det.meta['AIRMASS']], [tarx], [tary], [0], [0], [0], [0], [det.meta['IMGNO']], [0], [0], [0.5], [0.5]])
         mo = ffit.model(np.array(ffit.fitvalues), data_target)
 
         out_line = f"{det.meta['FITSFILE']} {det.meta['JD']:.6f} {chartime:.6f} {det.meta['FILTER']} {det.meta['EXPTIME']:3.0f} {det.meta['AIRMASS']:6.3f} {det.meta['IDNUM']:4d} {zero:7.3f} {zerr:6.3f} {det.meta['LIMFLX3']+zero:7.3f} {ffit.wssrndf:6.3f} {mo[0]:7.3f} {target['MAGERR_AUTO']:6.3f} {tarid} {obsid} ok"

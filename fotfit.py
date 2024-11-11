@@ -36,8 +36,6 @@ class fotfit(termfit.termfit):
             self.readmodel(file)
             self.fixall()
 
-        self.fit_xy = fit_xy
-
     def __str__(self):
         output = " img --zeropoint--- ------px------ ------py------ \n"
 
@@ -93,6 +91,10 @@ class fotfit(termfit.termfit):
         :param img: image number
         :return: 2D array of flat field data
         """
+        
+        x_fine = x.astype(float) + 0.5  # Center of pixels
+        y_fine = y.astype(float) + 0.5
+
         # Normalize coordinates
         coord_x = (x - ctrx) / 1024.0
         coord_y = (y - ctry) / 1024.0
@@ -110,8 +112,9 @@ class fotfit(termfit.termfit):
             np.zeros(shape),  # color4
             np.full(shape, img),
             np.zeros(shape),  # y (not used in flat field calculation)
-            np.ones(shape)    # err (set to 1, not used in model calculation)
-        )
+            np.ones(shape), # err (set to 1, not used in model calculation)
+            x_fine, y_fine
+            )
 
         # Use the existing model function to calculate the flat field
         return self.model(self.fitvalues, data)
@@ -124,7 +127,7 @@ class fotfit(termfit.termfit):
 
     def model(self, values, data):
         """Optimized photometric response model"""
-        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err = data
+        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y = data
         values = np.asarray(values)
         img = np.int64(img)
 
@@ -137,6 +140,20 @@ class fotfit(termfit.termfit):
             if term == 'N1': model += (1 + value) * mc
             elif term == 'N2': model += value * mc**2
             elif term == 'N3': model += value * mc**3
+            # Sub-pixel variation terms
+            elif term == 'SX':
+                # Sinusoidal variation in X direction
+                frac_x = cat_x - np.floor(cat_x)
+                model += value * np.sin(np.pi * frac_x)
+            elif term == 'SY':
+                # Sinusoidal variation in Y direction
+                frac_y = cat_y - np.floor(cat_y)
+                model += value * np.sin(np.pi * frac_y)
+            elif term == 'SXY':
+                # Cross-term for X-Y sub-pixel variations
+                frac_x = cat_x - np.floor(cat_x)
+                frac_y = cat_y - np.floor(cat_y)
+                model += value * np.sin(np.pi * frac_x) * np.sin(np.pi * frac_y)
             elif term[0] == 'P':
                 components = {'A': airmass, 'C': color1, 'D': color2, 'E': color3, 'F': color4,
                               'R': radius2, 'X': coord_x, 'Y': coord_y}
@@ -202,12 +219,12 @@ class fotfit(termfit.termfit):
 
     def residuals0(self, values, data):
         """pure residuals to compute sigma and similar things"""
-        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err = data
+        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y = data
         return np.abs(y - self.model(values, data))
 
     def residuals(self, values, data):
         """residuals for fitting with error weighting and delinearization"""
-        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err = data
+        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y = data
         dist = np.abs((y - self.model(values, data))/err)
         if self.delin:
             return self.cauchy_delin(dist)
