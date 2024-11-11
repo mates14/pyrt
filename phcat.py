@@ -125,10 +125,13 @@ def call_iraf(file, det):
             some_file.write(f"{x:.3f} {y:.3f}\n")
     some_file.close()
 
-    # some reasonable defaults
-    ape=fwhm
-    danu=1.5*fwhm
-    anu=2.0*fwhm
+    # now the FWHM is a good idea for large stars, but is should be enlarged
+    # once the stars are too sharp, the sub-sqrt will make the transition
+    # smooth so when comparing various images, there is no sharp edge between
+    # groups
+    ape=np.sqrt(fwhm*fwhm+4)
+    danu=1.5*ape
+    anu=2.0*ape
 
     # D50 Andor gain and rnoise, this stuff needs to be seriously improved
     try: ncombine = astropy.io.fits.getval(file, "NCOMBINE")
@@ -185,6 +188,7 @@ def get_fwhm_from_detections(det, min_good_detections=30):
     # Second try: use 30 brightest objects
     # Sort by magnitude (lower is brighter)
     bright_detections = det2[np.argsort(det['MAG_AUTO'])[:30]]
+
     return np.median(bright_detections['FWHM_IMAGE'])
 
 
