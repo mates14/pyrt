@@ -517,7 +517,7 @@ def write_stars_file(data, ffit, imgwcs, filename="stars"):
     )
 
     # Calculate model magnitudes
-    model_input = (y, adif, coord_x, coord_y, color1, color2, color3, color4, img, x, dy, cat_x, cat_y)
+    model_input = (y, adif, coord_x, coord_y, color1, color2, color3, color4, img, x, dy, image_x, image_y)
     model_mags = ffit.model(np.array(ffit.fitvalues), model_input)
 
     # Calculate astrometric residuals (if available)
@@ -530,10 +530,10 @@ def write_stars_file(data, ffit, imgwcs, filename="stars"):
     # Create a table with all the data
     stars_table = astropy.table.Table([
         x, adif, image_x, image_y, color1, color2, color3, color4,
-        model_mags, dy, ra, dec, astx, asty, ast_residuals, current_mask, current_mask, current_mask
+        model_mags, dy, ra, dec, astx, asty, ast_residuals, current_mask, current_mask, current_mask, cat_x, cat_y
     ], names=[
         'cat_mags', 'airmass', 'image_x', 'image_y', 'color1', 'color2', 'color3', 'color4',
-        'model_mags', 'mag_err', 'ra', 'dec', 'ast_x', 'ast_y', 'ast_residual', 'mask', 'mask2', 'mask3'
+        'model_mags', 'mag_err', 'ra', 'dec', 'ast_x', 'ast_y', 'ast_residual', 'mask', 'mask2', 'mask3', 'cat_x', 'cat_y'
     ])
 
     # Add column descriptions
@@ -555,6 +555,8 @@ def write_stars_file(data, ffit, imgwcs, filename="stars"):
     stars_table['mask'].description = 'Boolean mask (True for included points)'
     stars_table['mask2'].description = 'Boolean mask (True for included points)'
     stars_table['mask3'].description = 'Boolean mask (True for included points)'
+    stars_table['cat_x'].description = 'X coordinate in catalog'
+    stars_table['cat_y'].description = 'Y coordinate in catalog'
 
     # Write the table to a file
     stars_table.write(filename, format='ascii.ecsv', overwrite=True)
@@ -637,7 +639,7 @@ def perform_photometric_fitting(data, options, metadata):
     ffit.zero = zeropoints
 
     # Perform initial fit with just the zeropoints
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'cat_x', 'cat_y')
+    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
     ffit.fit(fdata)
     best_wssrndf = ffit.wssrndf
 
@@ -688,19 +690,19 @@ def perform_photometric_fitting(data, options, metadata):
     data.apply_mask(photo_mask, 'photometry')
     data.use_mask('photometry')
     # 1.
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'cat_x', 'cat_y')
+    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
 
     ffit.delin = True
     ffit.fit(fdata)
 
     # Final fit with refined mask
     data.use_mask('default')
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'cat_x', 'cat_y')
+    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
     photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
     data.apply_mask(photo_mask, 'photometry')
     data.use_mask('photometry')
     # 1.
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'cat_x', 'cat_y')
+    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
     ffit.fit(fdata)
 
     print(f"Final fit variance: {ffit.wssrndf}")
@@ -970,8 +972,17 @@ def write_results(data, ffit, options, alldet, target, zpntest):
 
         start = time.time()
         fn = os.path.splitext(det.meta['detf'])[0] + ".ecsv"
-        det['MAG_CALIB'] = ffit.model(np.array(ffit.fitvalues), (det['MAG_AUTO'], det.meta['AIRMASS'],
-            det['X_IMAGE']/1024-det.meta['CTRX']/1024, det['Y_IMAGE']/1024-det.meta['CTRY']/1024,0,0,0,0, img,0,0,0.5,0.5))
+        det['MAG_CALIB'] = ffit.model( np.array(ffit.fitvalues),
+            (   det['MAG_AUTO'],     # magnitude
+                det.meta['AIRMASS'], # airmass
+                det['X_IMAGE']/1024 - det.meta['CTRX']/1024, # X-coord 
+                det['Y_IMAGE']/1024 - det.meta['CTRY']/1024, # Y-coord
+                0, 0, 0, 0, # colors (zeroes, we output instrumental mag)
+                img,  # image index
+                0, 0, # y and dy (obviously not used in model)
+                det['X_IMAGE'], # x for pixel structure
+                det['Y_IMAGE']) # y for pixel structure
+            )
         det['MAGERR_CALIB'] = np.sqrt(np.power(det['MAGERR_AUTO'],2)+np.power(zerr[img],2))
 
         det.meta['MAGZERO'] = zero[img]
