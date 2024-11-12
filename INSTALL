@@ -1,14 +1,18 @@
 git pull git@github.com:mates14/pyrt main
 
-You need to download atlas catalogue from the Intenet (or ask me if it fails)
-Then compile the provided (modified original) atlas.c, and place the resulting atlas binary to your $PATH
+You will need a working iraf and sextractor to run phcat.py, if you are happy
+with just sextractor, phcat.py -I does just that - it skips the IRAF part and
+saves the sextractor output.
+
+dophot3.py is the main call, if you run into problems, do not hesitate to contact me.
+
+Since the online catalogs are available, this step is not critical, but you may
+still want to download the Atlas catalogue from the Intenet.
+https://archive.stsci.edu/prepds/atlas-refcat2/, "Original Format, Scaled
+Integer Columns".  Once you have it, compile the provided (modified original)
+atlas.c, and place the resulting atlas binary to your $PATH. At present, the
+catalog path is hard coded in the source, so you will need to find the path and
+modify it. I will fix it, I promise. 
 cc -lm atlas.c -o atlas
 install -m 666 atlas /usr/local/bin
 
-At present, the catalog path is hard coded in the source, so you will need to find the path and modify it. 
-I will fix it, I promise. 
-
-You will need a working iraf and sextractor to run phcat.py, if you are happy with just sextractor, 
-phcat.py can be easily modified to do just that. 
-
-It should work then. If you run into problems, do not hesitate to contact me.
