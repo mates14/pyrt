@@ -105,39 +105,52 @@ def call_iraf(file, det):
     base = os.path.splitext(file)[0]
 
     fwhm = get_fwhm_from_detections(det)
-    #fwhm = np.median(det[ det['MAGERR_AUTO'] < 1.091/10 ]['FWHM_IMAGE'])
     if np.isnan(fwhm):
-        fwhm = np.nanmedian(det)
+        fwhm = np.nanmedian(det['FWHM_IMAGE'])
     print(f'FWHM={fwhm}')
 
+    # Create coordinate file with unique identifiers
     some_file = open(base+".coo.1", "w+")
 
     orix, oriy = try_target(file)
-    print(orix,oriy)
-    if orix is not None and oriy is not None and not np.isnan(orix) and not np.isnan(oriy):
-        some_file.write(f"{orix:.3f} {oriy:.3f}\n")
-        target_not_valid = False
-    else:
-        target_not_valid = True
+    print(f'Target coordinates: {orix}, {oriy}')
 
-    for x,y in zip(det['X_IMAGE'],det['Y_IMAGE']):
-        if target_not_valid or np.sqrt((x-orix)*(x-orix)+(y-oriy)*(y-oriy)) > fwhm:
-            some_file.write(f"{x:.3f} {y:.3f}\n")
+    # Create a new table for our coordinates
+    coords = []
+
+    # Handle target if it exists
+    # needs to be changed if it is indeed to be here and if it turns out necessary
+    # if orix is not None and oriy is not None and not np.isnan(orix) and not np.isnan(oriy):
+    # ...
+
+    det_filtered = det
+
+    # Add all other detections
+    for id_num, x, y in zip(det_filtered['NUMBER'], det_filtered['X_IMAGE'], det_filtered['Y_IMAGE']):
+        coords.append((id_num, x, y))
+
+    # Sort by ID to maintain consistency
+    coords.sort()
+
+    # Write coordinates
+    for id_num, x, y in coords:
+        some_file.write(f"{x:.3f} {y:.3f} {id_num:4d}\n")
+
     some_file.close()
 
     # now the FWHM is a good idea for large stars, but is should be enlarged
     # once the stars are too sharp, the sub-sqrt will make the transition
     # smooth so when comparing various images, there is no sharp edge between
     # groups
-    ape=np.sqrt(fwhm*fwhm+4)
-    danu=1.5*ape
-    anu=2.0*ape
+    ape = np.sqrt(fwhm*fwhm+1.5*1.5)
+    danu = 1.5*ape
+    anu = 2.0*ape
 
     # D50 Andor gain and rnoise, this stuff needs to be seriously improved
     try: ncombine = astropy.io.fits.getval(file, "NCOMBINE")
     except: ncombine = 1.0
-    epadu=0.81 * ncombine
-    rnoise=4.63 / np.sqrt(ncombine)
+    epadu = 0.81 * ncombine
+    rnoise = 4.63 / np.sqrt(ncombine)
 
     some_file = open(base+".cl", "w+")
     some_file.write("noao\n")
@@ -145,8 +158,8 @@ def call_iraf(file, det):
     some_file.write("daophot\n")
     some_file.write(f"phot {file} {base}.coo.1 {base}.mag.1")
     some_file.write(f" readnoi={rnoise} epadu={epadu}")
-    some_file.write(f" calgori=centroid cbox={fwhm/2}")
-    #some_file.write(f" calgori=none")
+    #some_file.write(f" calgori=centroid cbox={fwhm/2}")
+    some_file.write(f" calgori=none")
     some_file.write(f" salgori=mode annulus={anu} dannulu={danu}")
     some_file.write(f" apertur={ape} zmag=0 sigma=0 veri- datamax=60000")
     some_file.write("\n\n\n\n")
@@ -156,8 +169,9 @@ def call_iraf(file, det):
     os.system(f'rm {base}.cl')
     os.system(f'rm {base}.coo.1')
 
-
-    mag = astropy.io.ascii.read(base+".mag.1", format='daophot')
+    # Read IRAF output ensuring ID column is treated as integer
+    mag = astropy.io.ascii.read(base+".mag.1", format='daophot',
+                               converters={'ID': [astropy.io.ascii.convert_numpy(np.int32)]})
     #mag['MAG'] = mag['MAG'] - mag.meta['ZMAG']
     os.system(f'rm {base}.mag.1')
     return mag
@@ -167,24 +181,23 @@ def get_fwhm_from_detections(det, min_good_detections=30):
     Calculate FWHM from detections using a two-tier approach:
     1. Try detections with good magnitude errors
     2. If insufficient, fall back to brightest objects
-    
+
     Parameters:
     det: astropy.table.Table - Detection table from sextractor
     min_good_detections: int - Minimum number of detections needed before falling back
-    
+
     Returns:
     float - Median FWHM value
     """
 
-    sel = np.all( [ det['X_IMAGE'] < det.meta['IMAGEW']-32, det['Y_IMAGE'] < det.meta['IMAGEH']-32, det['X_IMAGE'] > 32, det['Y_IMAGE'] > 32 ], axis=0) 
-    #print(sel, det, len(sel), len(det))
+    sel = np.all( [ det['X_IMAGE'] < det.meta['IMAGEW']-32, det['Y_IMAGE'] < det.meta['IMAGEH']-32, det['X_IMAGE'] > 32, det['Y_IMAGE'] > 32 ], axis=0)
     det2 = det [ sel ]
     # First try: all detections with good magnitude errors
     good_detections = det2[det2['MAGERR_AUTO'] < 1.091/10]
-    
+
     if len(good_detections) >= min_good_detections:
         return np.median(good_detections['FWHM_IMAGE'])
-    
+
     # Second try: use 30 brightest objects
     # Sort by magnitude (lower is brighter)
     bright_detections = det2[np.argsort(det['MAG_AUTO'])[:30]]
@@ -206,21 +219,41 @@ def main():
             tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
         else:
             mag = call_iraf(file, det)
-            # merge det+mag
-            det.rename_columns(('MAG_AUTO','MAGERR_AUTO'), ('MAG_SEX','MAGERR_SEX'))
-            det.remove_columns(('X_IMAGE','Y_IMAGE','ERRX2_IMAGE','ERRY2_IMAGE'))
-            mag.rename_columns(('ID','XCENTER','YCENTER','XERR','YERR','MAG','MERR'),\
-                    ('NUMBER','X_IMAGE','Y_IMAGE','ERRX2_IMAGE','ERRY2_IMAGE','MAG_AUTO','MAGERR_AUTO'))
-            mag.remove_columns(('XAIRMASS','IFILTER','XINIT','YINIT','IMAGE','COORDS','LID',\
-                    'XSHIFT','YSHIFT','CERROR','SERROR','ITIME','OTIME','PERROR',\
+
+            # Verify alignment before joining
+            print(f"Sextractor objects: {len(det)}")
+            print(f"IRAF measured objects: {len(mag)}")
+            print(f"Matching IDs: {len(set(det['NUMBER']) & set(mag['ID']))}")
+
+            # Ensure NUMBER/ID columns are of the same type before joining
+            det['NUMBER'] = det['NUMBER'].astype(np.int32)
+            mag.rename_column('ID', 'NUMBER')
+
+            # Remove unnecessary columns
+            mag.remove_columns(('XAIRMASS','IFILTER','XINIT','YINIT','IMAGE','COORDS','LID',
+                    'XSHIFT','YSHIFT','CERROR','SERROR','ITIME','OTIME','PERROR',
                     'CIER','MSKY','STDEV','SSKEW','NSKY','NSREJ','SIER','SUM'
                     ))
-            tbl = astropy.table.join(det, mag, keys='NUMBER')
-            # table.write...
-            tbl = tbl[np.all([tbl['PIER'] == 0,tbl['FLUX'] > 0,tbl['MAGERR_AUTO']<1.091/2],axis=0)]
+
+            # use iraf magnitudes as if they are sextracotr's
+            det.rename_columns( ['MAG_AUTO','MAGERR_AUTO'], ['MAG_SEX', 'MAGERR_SEX'])
+            mag.rename_columns( ['MAG',     'MERR'], ['MAG_AUTO','MAGERR_AUTO'])
+
+            # Join tables and verify the result
+            tbl = astropy.table.join(det, mag, keys='NUMBER', join_type='inner')
+            print(f"Final matched objects: {len(tbl)}")
+
+            # Print statistics about the cuts
+            print("\nQuality cuts statistics:")
+            cuts = [tbl['PIER'] == 0, tbl['FLUX'] > 0, tbl['MAGERR_AUTO'] < 1.091/2]
+            for i, cut in enumerate(cuts):
+                print(f"Cut {i+1}: {np.sum(cut)} objects pass")
+
+            # Apply quality cuts
+            tbl = tbl[np.all(cuts, axis=0)]
+
         tbl.write(base+".cat", format="ascii.ecsv", overwrite=True)
         print(f'OBJECTS={len(tbl)}')
 
-# this way, the variables local to main() are not globally available, avoiding some programming errors
 if __name__ == "__main__":
     main()
