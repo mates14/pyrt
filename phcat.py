@@ -200,7 +200,7 @@ def get_fwhm_from_detections(det, min_good_detections=30):
 
     # Second try: use 30 brightest objects
     # Sort by magnitude (lower is brighter)
-    bright_detections = det2[np.argsort(det['MAG_AUTO'])[:30]]
+    bright_detections = det2[np.argsort(det2['MAG_AUTO'])[:30]]
 
     return np.median(bright_detections['FWHM_IMAGE'])
 
