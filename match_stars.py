@@ -174,7 +174,7 @@ def estimate_rough_zeropoint(det, nearest_ind, cat, valid_cat_mask):
 
     return 0.0
 
-def get_catalog_with_dynamic_limit(det, estimated_zp, options, safety_margin=2.0):
+def get_catalog_with_dynamic_limit(det, estimated_zp, options):
     """
     Get catalog data with magnitude limit scaled from detection limit.
 
@@ -187,9 +187,10 @@ def get_catalog_with_dynamic_limit(det, estimated_zp, options, safety_margin=2.0
     Returns:
         Catalog: New catalog instance with appropriate magnitude limit
     """
+
     # Calculate magnitude limit based on detection limit
     detection_limit = det.meta['LIMFLX3'] + estimated_zp
-    maglim = detection_limit - safety_margin
+    maglim = detection_limit - options.margin
 
     det.meta['MAGLIM'] = maglim
 

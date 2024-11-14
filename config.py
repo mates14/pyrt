@@ -124,7 +124,7 @@ def parse_arguments(args=None):
     parser.add_argument("-B", "--bluelim", help="Do not get stars bler than this g-r", type=float, default=config.get("bluelim"))
     parser.add_argument("-l", "--maglim", help="Do not get stars fainter than this limit", type=float, default=config.get("maglim"))
     parser.add_argument("-L", "--brightlim", help="Do not get any less than this mag from the catalog to compare", type=float)
-    parser.add_argument("-m", "--median", help="Give me just the median of zeropoints, no fitting", action='store_true')
+    parser.add_argument("-m", "--margin", help="Modify the magnitude margin for star selection (default=2.0)", type=float, default=config.get("margin",2.0))
     parser.add_argument("-M", "--model", help="Read model from a file", type=str)
     parser.add_argument("-n", "--nonlin", help="CCD is not linear, apply linear correction on mag", action='store_true')
     parser.add_argument("-p", "--plot", help="Produce plots", action='store_true')
