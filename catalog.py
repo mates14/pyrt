@@ -47,6 +47,10 @@ class CatalogFilters:
         'G': CatalogFilter('G', 5890, 'AB', 'G_err'),
         'BP': CatalogFilter('BP', 5050, 'AB', 'BP_err'),
         'RP': CatalogFilter('RP', 7730, 'AB', 'RP_err'),
+        'Johnson_B': CatalogFilter('Johnson_B', 4353, 'Vega'),
+        'Johnson_V': CatalogFilter('Johnson_V', 5477, 'Vega'),
+        'Johnson_R': CatalogFilter('Johnson_R', 6349, 'Vega'),
+        'Johnson_I': CatalogFilter('Johnson_I', 8797, 'Vega'),
     }
     # ATLAS filters
     ATLAS = {
@@ -507,6 +511,48 @@ class Catalog(astropy.table.Table):
 #                if gaia_name_err in gaia_cat.columns:
 #                    flux_over_error = gaia_cat[gaia_name_err]
 #                    result[our_name] = 2.5 / (flux_over_error * np.log(10))
+
+            # Based on Stetson stars
+            bpg = result['BP'] - result['G']
+            grp = result['G'] - result ['RP']
+
+            # P1D     =        -0.666169 / ± 0.022010 (3.304%)
+            # P2D     =        -0.145798 / ± 0.035219 (24.156%)
+            # P3D     =        -0.517584 / ± 0.018302 (3.536%)
+
+            result['Johnson_B'] = result['BP'] + 0.0085 \
+                +0.666169*grp +0.145798*grp*grp +0.517584*grp*grp*grp
+
+            # P1C     =        -0.368628 / ± 0.014166 (3.843%)
+            # P2C     =        -0.139117 / ± 0.004046 (2.908%)
+            # P1D     =         0.103787 / ± 0.023852 (22.982%)
+            # P2D     =        -0.194751 / ± 0.040714 (20.906%)
+            # P3D     =        -0.156161 / ± 0.021977 (14.073%)
+
+            result['Johnson_V'] = result['G'] + 0.0052 \
+                +0.368628*bpg +0.139117*bpg*bpg  \
+                -0.103787*grp +0.194751*grp*grp +0.156161*grp*grp*grp
+
+            # P1C     =         0.036933 / ± 0.033571 (90.897%)
+            # P2C     =         0.083075 / ± 0.020279 (24.410%)
+            # P3C     =        -0.022532 / ± 0.003502 (15.544%)
+            # P1D     =         0.353593 / ± 0.024744 (6.998%)
+            # P2D     =         0.482768 / ± 0.049077 (10.166%)
+            # P3D     =        -0.728803 / ± 0.031478 (4.319%)
+
+            result['Johnson_R'] = result['G'] + 0.0167 \
+                -0.036933*bpg -0.083075*bpg*bpg +0.022532*bpg*bpg*bpg \
+                -0.353593*grp -0.482768*grp*grp +0.728803*grp*grp*grp
+
+            # P1D     =        -0.253449 / ± 0.024239 (9.564%)
+            # P2D     =         0.113991 / ± 0.011589 (10.167%)
+            # P1C     =         0.395266 / ± 0.021690 (5.488%)
+            # P2C     =        -0.183776 / ± 0.011980 (6.519%)
+            # P3C     =         0.020945 / ± 0.002219 (10.593%)
+
+            result['Johnson_I'] = result['RP'] - 0.0660 \
+                -0.395266*bpg +0.183776*bpg*bpg -0.020945*bpg*bpg*bpg \
+                +0.253449*grp -0.113991*grp*grp
 
             return result
 
