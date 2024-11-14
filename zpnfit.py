@@ -183,7 +183,10 @@ class zpnfit(termfit.termfit):
 
             # Write the solution sigma if available
             if hasattr(self, 'sigma'):
-                set_value('ASTSIGMA', self.sigma)
+                try:
+                    set_value('ASTSIGMA', self.sigma)
+                except: # if it does not work, screw it, it is not mandatory
+                    pass
 
             # Write fixed and fitted terms
             for term, value in zip(self.fixterms + self.fitterms,
