@@ -192,6 +192,10 @@ def get_catalog_with_dynamic_limit(det, estimated_zp, options):
     detection_limit = det.meta['LIMFLX3'] + estimated_zp
     maglim = detection_limit - options.margin
 
+    # configuration option is a pure override
+    if options.maglim is not None:
+        maglim = options.maglim
+
     det.meta['MAGLIM'] = maglim
 
     logging.info(f"Detection limit: {detection_limit:.2f}, using catalog limit: {maglim:.2f}")
@@ -229,27 +233,54 @@ def process_image_with_dynamic_limits(det, options):
         target_match = find_target(det, imgwcs,
                                  idlimit=options.idlimit if options.idlimit else 2.0)
 
+        enlarge = options.enlarge if options.enlarge is not None else 1.0
+
         # Initial catalog search with bright stars
-        initial_cat = Catalog(
+        cat = Catalog(
             ra=det.meta['CTRRA'],
             dec=det.meta['CTRDEC'],
-            width=det.meta['FIELD'],
-            height=det.meta['FIELD'],
-            mlim=16.0,  # Use bright stars for initial estimate
+            width=enlarge*det.meta['FIELD'],
+            height=enlarge*det.meta['FIELD'],
+            # Use bright stars for initial estimate
+            mlim=options.maglim or 16.0,  
             catalog='makak' if options.makak else (options.catalog or 'atlas@localhost')
         )
 
-        # Match stars
-        matches = match_stars(det, initial_cat, imgwcs,
-                            idlimit=options.idlimit if options.idlimit else 2.0)
-        if matches is None:
-            return None, None, None, None
+        if options.maglim is None:
+            # this is for the adaptive magnitude limit
+            # Match stars
+            matches = match_stars(det, cat, imgwcs,
+                                idlimit=options.idlimit if options.idlimit else 2.0)
+            if matches is None:
+                return None, None, None, None
 
-        # Estimate zeropoint
-        estimated_zp = estimate_rough_zeropoint(det, matches, initial_cat, None)
+            # Estimate zeropoint
+            estimated_zp = estimate_rough_zeropoint(det, matches, initial_cat, None)
 
-        # Get catalog with appropriate magnitude limit
-        cat = get_catalog_with_dynamic_limit(det, estimated_zp, options)
+            # Calculate magnitude limit based on detection limit
+            detection_limit = det.meta['LIMFLX3'] + estimated_zp
+            maglim = detection_limit - options.margin
+
+            # configuration option is a pure override
+            if options.maglim is not None:
+                maglim = options.maglim
+
+            det.meta['MAGLIM'] = maglim
+
+            logging.info(f"Detection limit: {detection_limit:.2f}, using catalog limit: {maglim:.2f}")
+
+            # Get catalog with calculated magnitude limit
+            catalog_name = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
+
+            cat = Catalog(
+                ra=det.meta['CTRRA'],
+                dec=det.meta['CTRDEC'],
+                width=enlarge * det.meta['FIELD'],
+                height=enlarge * det.meta['FIELD'],
+                mlim=maglim,
+                catalog=catalog_name
+            )
+
 
         # Final matching with full catalog
         final_matches = match_stars(det, cat, imgwcs,
