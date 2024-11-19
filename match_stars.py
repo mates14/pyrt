@@ -255,7 +255,7 @@ def process_image_with_dynamic_limits(det, options):
                 return None, None, None, None
 
             # Estimate zeropoint
-            estimated_zp = estimate_rough_zeropoint(det, matches, initial_cat, None)
+            estimated_zp = estimate_rough_zeropoint(det, matches, cat, None)
 
             # Calculate magnitude limit based on detection limit
             detection_limit = det.meta['LIMFLX3'] + estimated_zp
