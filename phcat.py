@@ -9,6 +9,8 @@ import astropy.wcs
 import astropy.table
 import astropy.io.fits
 
+from typing import Optional, Tuple
+
 def read_options(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
     parser.add_argument("-a", "--aperture", help="Override an automated aperture choice", type=float)
@@ -204,53 +206,67 @@ def get_fwhm_from_detections(det, min_good_detections=30):
 
     return np.median(bright_detections['FWHM_IMAGE'])
 
+def process_photometry(file: str,
+                      noiraf: bool = False,
+                      aperture: Optional[float] = None,
+                      background: bool = False,
+                      verbose: bool = False) -> astropy.table.Table:
+    """Main photometry processing function that can be called programmatically"""
+
+    det = call_sextractor(file, 2.0)
+    new_fwhm = get_fwhm_from_detections(det)
+    if not np.isnan(new_fwhm):
+        det = call_sextractor(file, new_fwhm, bg=options.background)
+
+    if options.noiraf:
+        tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
+    else:
+        mag = call_iraf(file, det)
+
+        # Verify alignment before joining
+        print(f"Sextractor objects: {len(det)}")
+        print(f"IRAF measured objects: {len(mag)}")
+        print(f"Matching IDs: {len(set(det['NUMBER']) & set(mag['ID']))}")
+
+        # Ensure NUMBER/ID columns are of the same type before joining
+        det['NUMBER'] = det['NUMBER'].astype(np.int32)
+        mag.rename_column('ID', 'NUMBER')
+
+        # Remove unnecessary columns
+        mag.remove_columns(('XAIRMASS','IFILTER','XINIT','YINIT','IMAGE','COORDS','LID',
+                'XSHIFT','YSHIFT','CERROR','SERROR','ITIME','OTIME','PERROR',
+                'CIER','MSKY','STDEV','SSKEW','NSKY','NSREJ','SIER','SUM'
+                ))
+
+        # use iraf magnitudes as if they are sextracotr's
+        det.rename_columns( ['MAG_AUTO','MAGERR_AUTO'], ['MAG_SEX', 'MAGERR_SEX'])
+        mag.rename_columns( ['MAG',     'MERR'], ['MAG_AUTO','MAGERR_AUTO'])
+
+        # Join tables and verify the result
+        tbl = astropy.table.join(det, mag, keys='NUMBER', join_type='inner')
+        print(f"Final matched objects: {len(tbl)}")
+
+        # Print statistics about the cuts
+        print("\nQuality cuts statistics:")
+        cuts = [tbl['PIER'] == 0, tbl['FLUX'] > 0, tbl['MAGERR_AUTO'] < 1.091/2]
+        for i, cut in enumerate(cuts):
+            print(f"Cut {i+1}: {np.sum(cut)} objects pass")
+
+        # Apply quality cuts
+        tbl = tbl[np.all(cuts, axis=0)]
+    return tbl
 
 def main():
-    '''Take over the world'''
+    '''CLI entry point: Take over the world'''
     options = read_options(sys.argv[1:])
     for file in options.files:
         base = os.path.splitext(file)[0]
-        det = call_sextractor(file, 2.0)
-        new_fwhm = get_fwhm_from_detections(det)
-        if not np.isnan(new_fwhm):
-            det = call_sextractor(file, new_fwhm, bg=options.background)
 
-        if options.noiraf:
-            tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
-        else:
-            mag = call_iraf(file, det)
-
-            # Verify alignment before joining
-            print(f"Sextractor objects: {len(det)}")
-            print(f"IRAF measured objects: {len(mag)}")
-            print(f"Matching IDs: {len(set(det['NUMBER']) & set(mag['ID']))}")
-
-            # Ensure NUMBER/ID columns are of the same type before joining
-            det['NUMBER'] = det['NUMBER'].astype(np.int32)
-            mag.rename_column('ID', 'NUMBER')
-
-            # Remove unnecessary columns
-            mag.remove_columns(('XAIRMASS','IFILTER','XINIT','YINIT','IMAGE','COORDS','LID',
-                    'XSHIFT','YSHIFT','CERROR','SERROR','ITIME','OTIME','PERROR',
-                    'CIER','MSKY','STDEV','SSKEW','NSKY','NSREJ','SIER','SUM'
-                    ))
-
-            # use iraf magnitudes as if they are sextracotr's
-            det.rename_columns( ['MAG_AUTO','MAGERR_AUTO'], ['MAG_SEX', 'MAGERR_SEX'])
-            mag.rename_columns( ['MAG',     'MERR'], ['MAG_AUTO','MAGERR_AUTO'])
-
-            # Join tables and verify the result
-            tbl = astropy.table.join(det, mag, keys='NUMBER', join_type='inner')
-            print(f"Final matched objects: {len(tbl)}")
-
-            # Print statistics about the cuts
-            print("\nQuality cuts statistics:")
-            cuts = [tbl['PIER'] == 0, tbl['FLUX'] > 0, tbl['MAGERR_AUTO'] < 1.091/2]
-            for i, cut in enumerate(cuts):
-                print(f"Cut {i+1}: {np.sum(cut)} objects pass")
-
-            # Apply quality cuts
-            tbl = tbl[np.all(cuts, axis=0)]
+        tbl = process_photometry(file,
+                               noiraf=options.noiraf,
+                               aperture=options.aperture,
+                               background=options.background,
+                               verbose=True)
 
         tbl.write(base+".cat", format="ascii.ecsv", overwrite=True)
         print(f'OBJECTS={len(tbl)}')
