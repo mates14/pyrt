@@ -580,21 +580,11 @@ def expand_pseudo_term(term):
             for pp in range(1, pol_order + 1):
                 for rr in range(0, pp + 1):
                     expanded_terms.append(f"P{rr}X{pp-rr}Y")
-        elif term[1] == 'r':
+        elif term[1] in [ 'r', 'c', 'd', 'e', 'f', 'n' ]:
             # Radial polynomial
             pol_order = int(term[2:])
             for pp in range(1, pol_order + 1):
-                expanded_terms.append(f"P{pp}R")
-        elif term[1] == 'c':
-            # Radial polynomial
-            pol_order = int(term[2:])
-            for pp in range(1, pol_order + 1):
-                expanded_terms.append(f"P{pp}C")
-        elif term[1] == 'd':
-            # Radial polynomial
-            pol_order = int(term[2:])
-            for pp in range(1, pol_order + 1):
-                expanded_terms.append(f"P{pp}D")
+                expanded_terms.append(f"P{pp}{term[1].upper()}")
     else:
         # Regular term, no expansion needed
         expanded_terms.append(term)
