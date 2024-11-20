@@ -15,11 +15,12 @@ import scipy.optimize as opt
 import astropy
 import astropy.wcs
 import astropy.table
-from astropy.coordinates import SkyCoord
-from astropy.time import Time
 from astropy.coordinates import SkyCoord, EarthLocation
+from astropy.time import Time
 import astropy.units as u
 from file_utils import try_sex, try_ecsv, try_img
+
+from typing import Optional, Tuple
 
 def delin(number):
     """cauchy delinearization to give outliers less weight and have more robust fitting"""
@@ -294,8 +295,108 @@ def remove_junk(hdr):
         except KeyError:
             pass
 
+def process_detections(det: astropy.table.Table,
+                      fits_path: str,
+                      nonlin: bool = False,
+                      filter_override: Optional[str] = None,
+                      verbose: bool = False) -> astropy.table.Table:
+    """Main detection processing function that can be called programmatically"""
+
+    det.meta['FITSFILE'] = fits_path
+
+    # remove zeros in the error column
+    det['MAGERR_AUTO'] = np.sqrt(det['MAGERR_AUTO']*det['MAGERR_AUTO']+0.0005*0.0005)
+    with astropy.io.fits.open(fits_path) as fitsfile:
+        img_sigma, img_median = calculate_background_stats(fitsfile[0].data)
+        det.meta['MEDIAN'] = img_median
+        det.meta['BGSIGMA'] = img_sigma
+        c = fitsfile[0].header
+
+    # copy most of the sensible keywords from img to det
+    for i,j in c.items():
+        if i in ('NAXIS', 'NAXIS1', 'NAXIS2', 'BITPIX'): continue
+        if len(i)>8: continue
+        if "." in i: continue
+        det.meta[i] = j
+
+    # FIXME: this has been improved somewhere else
+    det.meta['CHIP_ID'] = load_chip_id(c)
+
+    fix_latlon(det.meta, verbose=verbose)
+    fix_time(det.meta, verbose=verbose)
+    get_limits(det, verbose=verbose)
+
+    imgwcs = astropy.wcs.WCS(det.meta)
+
+    fix_filter(det.meta, verbose=verbose, opt_filter=filter_override)
+
+    det.meta['AIRMASS'] = 1.0
+    with suppress(KeyError): det.meta['AIRMASS'] = c['AIRMASS']
+
+    exptime = 0
+    with suppress(KeyError): exptime = c['EXPTIME']
+    with suppress(KeyError): exptime = c['EXPOSURE']
+    det.meta['EXPTIME'] = exptime
+
+    obsid_d = 0
+    obsid_n = 0
+    with suppress(KeyError): obsid_n = c['OBSID']
+    with suppress(KeyError): obsid_d = c['SCRIPREP']
+    det.meta['OBSID'] = f"{obsid_n:0d}.{obsid_d:02d}"
+
+    # RTS2 true target coordinates: ORIRA/ORIDEC
+    # it sounds stupid, but comes from complicated telescope pointing logic
+    det.meta['OBJRA'] = -100
+    with suppress(KeyError): det.meta['OBJRA'] = np.float64(c['ORIRA'])
+    det.meta['OBJDEC'] = -100
+    with suppress(KeyError): det.meta['OBJDEC'] = np.float64(c['ORIDEC'])
+
+    try:
+        tmp = imgwcs.all_world2pix(det.meta['OBJRA'], det.meta['OBJDEC'], 0)
+    except RuntimeError:
+        print("Error: Bad astrometry, cannot continue")
+        return None
+
+    if verbose: print(f"Target is {det.meta['OBJECT']} at ra:{det.meta['OBJRA']} dec:{det.meta['OBJDEC']} -> x:{tmp[0]} y:{tmp[1]}")
+
+    det.meta['CTRX'] = c['NAXIS1']/2
+    det.meta['CTRY'] = c['NAXIS2']/2
+    # NAXIS1/2 are bound to the image - they will not stay in the header
+    det.meta['IMGAXIS1'] = c['NAXIS1']
+    det.meta['IMGAXIS2'] = c['NAXIS2']
+    rd = imgwcs.all_pix2world([[det.meta['CTRX'], det.meta['CTRY']], [0, 0], [det.meta['CTRX'], det.meta['CTRY']+1]], 0)
+
+    det.meta['CTRRA'] = rd[0][0]
+    det.meta['CTRDEC'] = rd[0][1]
+
+    center = SkyCoord(rd[0][0]*astropy.units.deg, rd[0][1]*astropy.units.deg, frame='fk5')
+    corner = SkyCoord(rd[1][0]*astropy.units.deg, rd[1][1]*astropy.units.deg, frame='fk5')
+    pixel = SkyCoord(rd[2][0]*astropy.units.deg, rd[2][1]*astropy.units.deg, frame='fk5').separation(center)
+    field = center.separation(corner)
+    if verbose:
+        print(f"Field size: {field.deg:.2f}°, Pixel size: {pixel.arcsec:.2f}\"")
+
+    det.meta['FIELD'] = field.deg
+    det.meta['PIXEL'] = pixel.arcsec
+
+    try:
+        fwhm = c['FWHM']
+#        if fwhm < 0.5:
+#            fwhm = 2
+        if verbose:
+            print(f"Detected FWHM {fwhm:.1f} pixels ({fwhm*pixel.arcsec:.1f}\")")
+    except KeyError:
+        fwhm = 2
+        if verbose:
+            print(f"Set FWHM {fwhm:.1f} pixels ({fwhm*pixel.arcsec:.1f}\")")
+    det.meta['FWHM'] = fwhm
+
+    remove_junk(det.meta)
+
+    return det
+
 def main():
-    """C-like main() routine"""
+    """CLI entry point: C-like main() routine"""
     options = read_options(sys.argv[1:])
 
     for arg in options.files:
@@ -305,98 +406,10 @@ def main():
         except FileNotFoundError:
             continue
 
-        det.meta['FITSFILE'] = filef
-
-        # remove zeros in the error column
-        det['MAGERR_AUTO'] = np.sqrt(det['MAGERR_AUTO']*det['MAGERR_AUTO']+0.0005*0.0005)
-
-        img_sigma, img_median = calculate_background_stats(fitsfile[0].data)
-        det.meta['MEDIAN'] = img_median
-        det.meta['BGSIGMA'] = img_sigma
-
-        c = fitsfile[0].header
-        fitsfile.close()
-
-        # copy most of the sensible keywords from img to det
-        for i,j in c.items():
-            if i in ('NAXIS', 'NAXIS1', 'NAXIS2', 'BITPIX'): continue
-            if len(i)>8: continue
-            if "." in i: continue
-            det.meta[i] = j
-
-        # FIXME: this has been improved somewhere else
-        det.meta['CHIP_ID'] = load_chip_id(c)
-
-        fix_latlon(det.meta, verbose=options.verbose)
-        fix_time(det.meta, verbose=options.verbose)
-        get_limits(det, verbose=options.verbose)
-
-        imgwcs = astropy.wcs.WCS(det.meta)
-
-        fix_filter(det.meta, verbose=options.verbose, opt_filter=options.filter)
-
-        det.meta['AIRMASS'] = 1.0
-        with suppress(KeyError): det.meta['AIRMASS'] = c['AIRMASS']
-
-        exptime = 0
-        with suppress(KeyError): exptime = c['EXPTIME']
-        with suppress(KeyError): exptime = c['EXPOSURE']
-        det.meta['EXPTIME'] = exptime
-
-        obsid_d = 0
-        obsid_n = 0
-        with suppress(KeyError): obsid_n = c['OBSID']
-        with suppress(KeyError): obsid_d = c['SCRIPREP']
-        det.meta['OBSID'] = f"{obsid_n:0d}.{obsid_d:02d}"
-
-        # RTS2 true target coordinates: ORIRA/ORIDEC
-        # it sounds stupid, but comes from complicated telescope pointing logic
-        det.meta['OBJRA'] = -100
-        with suppress(KeyError): det.meta['OBJRA'] = np.float64(c['ORIRA'])
-        det.meta['OBJDEC'] = -100
-        with suppress(KeyError): det.meta['OBJDEC'] = np.float64(c['ORIDEC'])
-
-        try:
-            tmp = imgwcs.all_world2pix(det.meta['OBJRA'], det.meta['OBJDEC'], 0)
-        except RuntimeError:
-            print("Error: Bad astrometry, cannot continue")
-            continue
-
-        if options.verbose: print(f"Target is {det.meta['OBJECT']} at ra:{det.meta['OBJRA']} dec:{det.meta['OBJDEC']} -> x:{tmp[0]} y:{tmp[1]}")
-
-        det.meta['CTRX'] = c['NAXIS1']/2
-        det.meta['CTRY'] = c['NAXIS2']/2
-        # NAXIS1/2 are bound to the image - they will not stay in the header
-        det.meta['IMGAXIS1'] = c['NAXIS1']
-        det.meta['IMGAXIS2'] = c['NAXIS2']
-        rd = imgwcs.all_pix2world([[det.meta['CTRX'], det.meta['CTRY']], [0, 0], [det.meta['CTRX'], det.meta['CTRY']+1]], 0)
-
-        det.meta['CTRRA'] = rd[0][0]
-        det.meta['CTRDEC'] = rd[0][1]
-
-        center = SkyCoord(rd[0][0]*astropy.units.deg, rd[0][1]*astropy.units.deg, frame='fk5')
-        corner = SkyCoord(rd[1][0]*astropy.units.deg, rd[1][1]*astropy.units.deg, frame='fk5')
-        pixel = SkyCoord(rd[2][0]*astropy.units.deg, rd[2][1]*astropy.units.deg, frame='fk5').separation(center)
-        field = center.separation(corner)
-        if options.verbose:
-            print(f"Field size: {field.deg:.2f}°, Pixel size: {pixel.arcsec:.2f}\"")
-
-        det.meta['FIELD'] = field.deg
-        det.meta['PIXEL'] = pixel.arcsec
-
-        try:
-            fwhm = c['FWHM']
-    #        if fwhm < 0.5:
-    #            fwhm = 2
-            if options.verbose:
-                print(f"Detected FWHM {fwhm:.1f} pixels ({fwhm*pixel.arcsec:.1f}\")")
-        except KeyError:
-            fwhm = 2
-            if options.verbose:
-                print(f"Set FWHM {fwhm:.1f} pixels ({fwhm*pixel.arcsec:.1f}\")")
-        det.meta['FWHM'] = fwhm
-
-        remove_junk(det.meta)
+        det = process_detections(det, filef,
+                               nonlin=options.nonlin,
+                               filter_override=options.filter,
+                               verbose=options.verbose)
 
         output = os.path.splitext(filef)[0] + ".det"
         if options.verbose: print(f"Writing output file {output}")
