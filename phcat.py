@@ -216,9 +216,9 @@ def process_photometry(file: str,
     det = call_sextractor(file, 2.0)
     new_fwhm = get_fwhm_from_detections(det)
     if not np.isnan(new_fwhm):
-        det = call_sextractor(file, new_fwhm, bg=options.background)
+        det = call_sextractor(file, new_fwhm, bg=background)
 
-    if options.noiraf:
+    if noiraf:
         tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
     else:
         mag = call_iraf(file, det)
