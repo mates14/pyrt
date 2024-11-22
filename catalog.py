@@ -11,6 +11,7 @@ import astropy.io.ascii
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from contextlib import suppress
+import logging
 
 @dataclass
 class QueryParams:
@@ -658,8 +659,8 @@ class Catalog(astropy.table.Table):
             ctr = SkyCoord(self._query_params.ra*u.deg, self._query_params.dec*u.deg, frame='fk5')
             corner1 = SkyCoord((self._query_params.ra+self._query_params.width)*u.deg, (self._query_params.dec+self._query_params.height)*u.deg, frame='fk5')
             corner2 = SkyCoord((self._query_params.ra-self._query_params.width)*u.deg, (self._query_params.dec-self._query_params.height)*u.deg, frame='fk5')
-            radius = max(corner1.separation(ctr) / 2, corner2.separation(ctr) / 2)
-            print(f"catalog.makak: fov radius: {radius} {radius}")
+            radius = max(corner1.separation(ctr), corner2.separation(ctr))
+            logging.debug(f"catalog.makak: fov radius: {radius} {radius}")
             
             cat_coords = SkyCoord(cat['radeg']*u.deg, cat['decdeg']*u.deg, frame='fk5')
             within_field = cat_coords.separation(ctr) < radius 
