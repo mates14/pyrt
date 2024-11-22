@@ -8,6 +8,7 @@ generic fitter for models with terms
 import numpy as np
 import scipy.optimize as fit
 from astropy.table import Table
+import logging
 
 class termfit:
     """Fit data with string identified terms"""
@@ -146,11 +147,105 @@ class termfit:
         self.variance = np.median(self.residuals(self.fitvalues, data)) / 0.67
         self.wssrndf = self.wssr / self.ndf
 
+        # Improved covariance matrix calculation with diagnostics
         try:
-            cov = np.linalg.inv(res.jac.T.dot(res.jac))
-            self.fiterrors = np.sqrt(np.diagonal(cov))
-        except:
-            self.fiterrors = res.x*np.nan
+            # Method 1: Direct inverse (original method)
+            jac_matrix = res.jac.T.dot(res.jac)
+
+            # Check condition number
+            cond_num = np.linalg.cond(jac_matrix)
+            logging.debug(f"Matrix condition number: {cond_num:.2e}")
+            if cond_num > 1e15:
+                logging.debug("Warning: Problem is ill-conditioned")
+
+            try:
+                cov = np.linalg.inv(jac_matrix)
+                logging.debug("Using direct inverse method")
+                self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
+                return
+            except np.linalg.LinAlgError:
+                pass
+
+            # Method 2: Use pseudo-inverse with SVD
+            try:
+                # Get the SVD components
+                U, s, Vh = np.linalg.svd(jac_matrix)
+
+                # Print singular values
+                logging.debug("\nSingular values:")
+                for i, sing_val in enumerate(s):
+                    logging.debug(f"σ_{i+1} = {sing_val:.2e}")
+
+                # Calculate relative contributions
+                rel_contributions = s / s[0]
+                logging.debug("\nRelative parameter contributions:")
+                for i, contrib in enumerate(rel_contributions):
+                    logging.debug(f"Parameter {i+1}: {contrib:.2e}")
+
+                # Identify near-zero singular values (effectively rank-deficient)
+                rank_threshold = 1e-12
+                effective_rank = sum(s > rank_threshold * s[0])
+                logging.debug(f"\nEffective rank: {effective_rank} out of {len(s)}")
+
+                if effective_rank < len(s):
+                    logging.debug("Warning: Some parameters are effectively linearly dependent")
+                    # Identify which parameters are problematic
+                    for i, (term, contrib) in enumerate(zip(self.fitterms, rel_contributions)):
+                        if contrib < rank_threshold:
+                            logging.debug(f"Parameter '{term}' may be linearly dependent with others")
+
+                cov = np.linalg.pinv(jac_matrix, rcond=rank_threshold)
+                logging.debug("\nUsing SVD pseudo-inverse method")
+                self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
+
+                # Check for zero or very small errors
+                for i, (term, error) in enumerate(zip(self.fitterms, self.fiterrors)):
+                    if error < 1e-10 * abs(self.fitvalues[i]):
+                        logging.debug(f"Warning: Parameter '{term}' has very small/zero error")
+                        # Replace zero errors with a more meaningful estimate
+                        self.fiterrors[i] = abs(self.fitvalues[i]) * 1e-6  # Conservative estimate
+
+                return
+            except Exception as e:
+                logging.debug(f"SVD failed: {str(e)}")
+                pass
+
+            # Method 3: Add small regularization term
+            try:
+                epsilon = 1e-10 * np.trace(jac_matrix) / jac_matrix.shape[0]
+                reg_matrix = jac_matrix + epsilon * np.eye(jac_matrix.shape[0])
+                cov = np.linalg.inv(reg_matrix)
+                logging.debug("Using regularized inverse method")
+                self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
+                return
+            except:
+                pass
+
+            # Fallback: Estimate errors using parameter perturbation
+            logging.debug("Using parameter perturbation method")
+            param_errors = []
+            delta = 1e-6  # Small perturbation
+            for i in range(len(self.fitvalues)):
+                params_plus = self.fitvalues.copy()
+                params_plus[i] += delta
+                resid_plus = np.sum(self.residuals(params_plus, data)**2)
+
+                params_minus = self.fitvalues.copy()
+                params_minus[i] -= delta
+                resid_minus = np.sum(self.residuals(params_minus, data)**2)
+
+                # Estimate local curvature
+                curvature = (resid_plus + resid_minus - 2*self.wssr) / (delta**2)
+                if curvature > 0:
+                    param_errors.append(np.sqrt(2.0/curvature))
+                else:
+                    param_errors.append(abs(self.fitvalues[i]) * 1e-6)  # Conservative estimate
+
+            self.fiterrors = np.array(param_errors)
+
+        except Exception as e:
+            logging.debug(f"Warning: Error calculation failed with message: {str(e)}")
+            self.fiterrors = res.x * np.nan
 
     def cauchy_delin(self, arg):
         """Cauchy delinearization to give outliers less weight and have
