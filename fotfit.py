@@ -148,14 +148,14 @@ class fotfit(termfit.termfit):
         val2 = np.concatenate((values[0:len(self.fitterms)], np.array(self.fixvalues)))
 
         # Variables to collect rational function parameters
-        rational_a = rational_b = rational_c = 0
+        rational_s = rational_o = rational_c = 0
 
         for term, value in zip(self.fitterms + self.fixterms, val2):
-            if term == 'RA':  # Rational function parameter a
-                rational_a = value
-            elif term == 'RB':  # Rational function parameter b
-                rational_b = value
-            elif term == 'RC':  # Rational function parameter c
+            if term == 'RS':  # Rational function parameter scale
+                rational_s = value
+            elif term == 'RO':  # Rational function parameter offset
+                rational_o = value
+            elif term == 'RC':  # Rational function parameter curvature
                 rational_c = value
             elif term == 'SX':
                 # Sinusoidal variation in X direction
@@ -212,10 +212,14 @@ class fotfit(termfit.termfit):
             foo = np.sqrt(radius2 / ew)
             model += ea * (np.exp(foo) / (foo + 1) - 1)
 
-        if any([rational_a, rational_b, rational_c]):
-            x = mct
-            rational_correction = (rational_a + rational_b * x) / (1 + rational_c * x)
-            model += rational_correction
+        if any([rational_s, rational_o, rational_c]):
+            x = -mct - rational_o  # Center the effect
+            denom = 1 + rational_c * x * x  # Square term for stability
+            rational = rational_s * x / (denom + 1e-10)  # Small epsilon to prevent division by zero
+            model += rational
+            #x = -mct
+            #rational_correction = (rational_a + rational_b * x) / (1 + rational_c * x)
+            #model += rational_correction
 
         if self.fit_xy:
             N = (len(values) - len(self.fitterms)) // 3
