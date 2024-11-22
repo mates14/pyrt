@@ -167,13 +167,21 @@ class Catalog(astropy.table.Table):
             }
         },
         MAKAK: {
-            'description': 'Pre-filtered wide-field catalog',
-            'filters': CatalogFilters.ATLAS,  # Using ATLAS filter definitions
-            'epoch': 2015.5,  # Default epoch, could be overridden from FITS metadata
+            'description': 'Pre-filtered Gaia bright stars catalog',
+            'filters': CatalogFilters.GAIA,
+            'epoch': 2016.0,
             'local': True,
             'service': 'local',
-            'filepath': '/home/mates/test/catalog.fits'  # Default path, could be configurable
-        },
+            'filepath': '/home/mates/gaia_bright_stars.fits'
+        }
+#        MAKAK: {
+#            'description': 'Pre-filtered wide-field catalog',
+#            'filters': CatalogFilters.ATLAS,  # Using ATLAS filter definitions
+#            'epoch': 2015.5,  # Default epoch, could be overridden from FITS metadata
+#            'local': True,
+#            'service': 'local',
+#            'filepath': '/home/mates/test/catalog.fits'  # Default path, could be configurable
+#        },
         USNOB: {
         'description': 'USNO-B1.0 Catalog',
         'filters': CatalogFilters.USNOB,
