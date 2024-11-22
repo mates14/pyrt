@@ -173,7 +173,7 @@ class Catalog(astropy.table.Table):
             'local': True,
             'service': 'local',
             'filepath': '/home/mates/gaia_bright_stars.fits'
-        }
+        },
 #        MAKAK: {
 #            'description': 'Pre-filtered wide-field catalog',
 #            'filters': CatalogFilters.ATLAS,  # Using ATLAS filter definitions
