@@ -13,7 +13,7 @@ import numpy as np
 import astropy
 import astropy.io.fits
 import astropy.wcs
-import astropy.table
+from astropy.table import Table
 import astropy.units as u
 from astropy.time import Time
 from astropy.coordinates import SkyCoord, AltAz, EarthLocation
@@ -26,17 +26,12 @@ import warnings
 from astropy.wcs import FITSFixedWarning
 warnings.simplefilter('ignore', category=FITSFixedWarning)
 
-from sklearn.neighbors import KDTree
-
-import zpnfit
 import fotfit
-#from catalogs import get_atlas, get_catalog
 from catalog import Catalog, CatalogFilter
 from cat2det import remove_junk
 from refit_astrometry import refit_astrometry
 from file_utils import try_det, try_img, write_region_file
 from config import parse_arguments
-#from config import load_config
 from data_handling import PhotometryData, make_pairs_to_fit, compute_initial_zeropoints
 from match_stars import process_image_with_dynamic_limits
 
@@ -181,319 +176,6 @@ def get_base_filter(det, options, catalog_name):
 
     return basemag.name, fit_in_johnson, schema_name
 
-
-def old2_get_base_filter(det, options, catalog=None):
-    '''
-    Set up or guess the base filter to use for fitting, selecting the closest available filter
-    by wavelength when necessary, and determine the appropriate filter schema.
-
-    Args:
-        det: Detection table with metadata
-        options: Command line options
-        catalog_info: Optional catalog information from Catalog
-
-    Returns:
-        tuple: (base_filter_name, photometric_system, schema_name)
-    '''
-    def get_available_filters(catalog_info):
-        """Get available filters from catalog info"""
-        if catalog_info is None:
-            return set()
-        return set(catalog_info.get('filters', {}).keys())
-
-    def get_filter_wavelength(filter_name, catalog_info):
-        """Get effective wavelength for a filter"""
-        if catalog_info and 'filters' in catalog_info:
-            filter_info = catalog_info['filters'].get(filter_name)
-            if filter_info:
-                return filter_info.effective_wl
-        return None
-
-    def find_closest_filter_by_wavelength(target_wavelength, available_filters): #, catalog):
-        """Find the filter closest in wavelength to the target"""
-        if not available_filters: # or not catalog or 'filters' not in catalog_info:
-            return None
-
-        closest_filter = None
-        min_diff = float('inf')
-
-        for cat_filter in list(available_filters.values()):
-            if not isinstance(cat_filter, CatalogFilter):
-                logging.warning(f"Skipping invalid filter object: {cat_filter}")
-                continue
-            wavelength = cat_filter.effective_wl
-#            wavelength = get_filter_wavelength(filter_name, catalog_info)
-            if wavelength is not None:
-                diff = abs(wavelength - target_wavelength)
-                if diff < min_diff:
-                    min_diff = diff
-                    closest_filter = cat_filter
-
-        logging.info(f"Closest filter is {closest_filter}")
-        return closest_filter
-
-    def find_compatible_schema(available_filters, filter_schemas, basemag):
-        """
-        Find the first schema where all its filters are available in the catalog
-        and which includes the base filter.
-
-        Args:
-            available_filters: Set or dict of available filters from the catalog
-            filter_schemas: OrderedDict of filter schema definitions with ordered lists of filters
-            basemag: The base filter that must be present in the schema
-
-        Returns:
-            str or None: schema_name if found, None if not found
-        """
-        available_filter_set = set(available_filters.keys()) if isinstance(available_filters, dict) else set(available_filters)
-
-        for schema_name, schema_filters in filter_schemas.items():
-            # Check if basemag is in this schema's filter list
-            if basemag not in schema_filters:
-                continue
-
-            # Convert schema_filters list to set only for comparison
-            if set(schema_filters).issubset(available_filter_set):
-                logging.info(f"Photometric schema: {schema_name} with base filter {basemag}")
-                return schema_name
-
-        logging.warning(f"No compatible filter schema found that includes base filter {basemag}")
-        return None
-
-    # Define filter wavelengths (in Angstroms)
-    FILTER_WAVELENGTHS = {
-        'U': 3600,
-        'B': 4353,
-        'V': 5477,
-        'R': 6349,
-        'I': 8797,
-        'g': 4810,
-        'r': 6170,
-        'i': 7520,
-        'z': 8660,
-        'y': 9620,
-        'G': 5890,
-        'BP': 5050,
-        'RP': 7730,
-        'Sloan_g': 4810,
-        'Sloan_r': 6170,
-        'Sloan_i': 7520,
-        'Sloan_z': 8660,
-        'Johnson_U': 3600,
-        'Johnson_B': 4353,
-        'Johnson_V': 5477,
-        'Johnson_R': 6349,
-        'Johnson_I': 8797,
-        'N':6000
-    }
-
-    # Get available filters from the catalog
-    available_filters = catalog.filters
-    if not available_filters:
-        # Fallback to Sloan r if no catalog info available
-        logging.warning(f"Catalog does not contain <available_filters>. Using Sloan_r + AB")
-        return 'Sloan_r', 'AB'
-
-    filter_name = det.meta.get('FILTER', 'Sloan_r')
-
-    if filter_name in available_filters:
-        basemag = available_filters[filter_name]
-    else:
-        # Find closest matching filter by wavelength
-        target_wavelength = FILTER_WAVELENGTHS.get(filter_name)
-        logging.info(f"Filter {filter_name} has wavelength {target_wavelength}")
-        if target_wavelength:
-            closest = find_closest_filter_by_wavelength(target_wavelength, available_filters)
-            if closest:
-                basemag = closest
-
-    # Find compatible schema that includes basemag
-    schema_name = find_compatible_schema(available_filters, options.filter_schemas, basemag.name)
-
-    # This is relatively unimportant, the important part is to populate the
-    # necessary 5 filters in a sensible way
-    fit_in_johnson = 'AB'
-    if 'Johnson' in basemag.name:
-        fit_in_johnson = 'Johnson'
-
-    return basemag.name, fit_in_johnson, schema_name
-
-def old_get_base_filter(det, options, catalog_info=None):
-    '''
-    Set up or guess the base filter to use for fitting.
-
-    Args:
-        det: Detection table with metadata
-        options: Command line options
-        catalog_info: Optional catalog information from Catalog
-
-    Returns:
-        tuple: (base_filter_name, photometric_system)
-    '''
-    # Define known filter mappings
-    FILTER_MAPPINGS = {
-        # Standard names
-        'Sloan_g': 'Sloan_g',
-        'Sloan_r': 'Sloan_r',
-        'Sloan_i': 'Sloan_i',
-        'Sloan_z': 'Sloan_z',
-        'Johnson_B': 'Johnson_B',
-        'Johnson_V': 'Johnson_V',
-        'Johnson_R': 'Johnson_R',
-        'Johnson_I': 'Johnson_I',
-        # Alternative names
-        'g-SLOAN': 'Sloan_g',
-        'r-SLOAN': 'Sloan_r',
-        'i-SLOAN': 'Sloan_i',
-        'z-SLOAN': 'Sloan_z',
-        'g': 'Sloan_g',
-        'r': 'Sloan_r',
-        'i': 'Sloan_i',
-        'z': 'Sloan_z',
-        'B': 'Johnson_B',
-        'V': 'Johnson_V',
-        'R': 'Johnson_R',
-        'I': 'Johnson_I',
-        # Add Gaia mappings
-        'G': 'G',
-        'BP': 'BP',
-        'RP': 'RP',
-        # Add PanSTARRS mappings
-        'gMeanPSFMag': 'Sloan_g',
-        'rMeanPSFMag': 'Sloan_r',
-        'iMeanPSFMag': 'Sloan_i',
-        'zMeanPSFMag': 'Sloan_z',
-        'yMeanPSFMag': 'y',
-        # what's in USNO-B
-        'R1': 'Johnson_R',
-        'R2': 'Johnson_R',
-        'B1': 'Johnson_B',
-        'B2': 'Johnson_B'
-    }
-
-    # Define filter systems
-    JOHNSON_FILTERS = {
-        'Johnson_B', 'Johnson_V', 'Johnson_R', 'Johnson_I',
-        'B', 'V', 'R', 'I'
-    }
-
-    def get_available_filters(catalog_info):
-        """Get available filters from catalog info"""
-        if catalog_info is None:
-            # Default to ATLAS filters if no catalog specified
-            return set(FILTER_MAPPINGS.values())
-        return set(catalog_info['filters'].keys())
-
-    def map_filter_name(filter_name, available_filters):
-        """Map filter name to standardized name if available"""
-        mapped_name = FILTER_MAPPINGS.get(filter_name, filter_name)
-        if mapped_name in available_filters:
-            return mapped_name
-        return None
-
-    # Get available filters
-    available_filters = get_available_filters(catalog_info)
-
-    # Start with defaults
-    fit_in_johnson = 'AB'
-    basemag = 'Sloan_r'
-
-    # Handle Johnson preference
-    if options.johnson and 'Johnson_V' in available_filters:
-        basemag = 'Johnson_V'
-        fit_in_johnson = 'Johnson'
-
-    # Handle explicit base magnitude
-    if options.basemag is not None:
-        mapped_filter = map_filter_name(options.basemag, available_filters)
-        if mapped_filter is not None:
-            basemag = mapped_filter
-            if mapped_filter in JOHNSON_FILTERS:
-                fit_in_johnson = 'Johnson'
-        else:
-            logging.warning(f"Requested filter {options.basemag} not available in catalog. Using {basemag}")
-
-    # Handle automatic filter detection
-    elif options.guessbase:
-        filter_name = det.meta.get('FILTER')
-        if filter_name:
-            mapped_filter = map_filter_name(filter_name, available_filters)
-            if mapped_filter is not None:
-                basemag = mapped_filter
-                if mapped_filter in JOHNSON_FILTERS:
-                    fit_in_johnson = 'Johnson'
-
-    # Handle case where selected filter is not available
-    if basemag not in available_filters:
-        # Try to find best alternative
-        if fit_in_johnson == 'Johnson':
-            alternatives = JOHNSON_FILTERS & available_filters
-            if alternatives:
-                basemag = next(iter(alternatives))
-            else:
-                # Fall back to Sloan if no Johnson filters available
-                basemag = 'Sloan_r' if 'Sloan_r' in available_filters else next(iter(available_filters))
-                fit_in_johnson = 'AB'
-        else:
-            # Try to find closest Sloan filter
-            sloan_order = ['Sloan_r', 'Sloan_g', 'Sloan_i', 'Sloan_z']
-            for alt in sloan_order:
-                if alt in available_filters:
-                    basemag = alt
-                    break
-            else:
-                # Last resort: use first available filter
-                basemag = next(iter(available_filters))
-
-    logging.info(f"basemag={basemag} fit_in_johnson={fit_in_johnson} (available filters: {sorted(available_filters)})")
-    return basemag, fit_in_johnson
-
-def x_get_base_filter(det, options):
-    '''set up or guess the base filter to use for fitting'''
-
-    johnson_filters = ['Johnson_B', 'Johnson_V', 'Johnson_R', 'Johnson_I', 'B', 'V', 'R', 'I']
-
-    fit_in_johnson = 'AB'
-    basemag = 'Sloan_r'
-
-    if options.johnson:
-        basemag = 'Johnson_V'
-        fit_in_johnson = 'Johnson'
-
-    if options.guessbase:
-        if det.meta['FILTER'] == 'Sloan_g': basemag = 'Sloan_g'
-        if det.meta['FILTER'] == 'Sloan_r': basemag = 'Sloan_r'
-        if det.meta['FILTER'] == 'Sloan_i': basemag = 'Sloan_i'
-        if det.meta['FILTER'] == 'Sloan_z': basemag = 'Sloan_z'
-        if det.meta['FILTER'] == 'g-SLOAN': basemag = 'Sloan_g'
-        if det.meta['FILTER'] == 'r-SLOAN': basemag = 'Sloan_r'
-        if det.meta['FILTER'] == 'i-SLOAN': basemag = 'Sloan_i'
-        if det.meta['FILTER'] == 'z-SLOAN': basemag = 'Sloan_z'
-        if det.meta['FILTER'] == 'Johnson_B': basemag = 'Johnson_B'
-        if det.meta['FILTER'] == 'Johnson_V': basemag = 'Johnson_V'
-        if det.meta['FILTER'] == 'Johnson_R': basemag = 'Johnson_R'
-        if det.meta['FILTER'] == 'Johnson_I': basemag = 'Johnson_I'
-        if det.meta['FILTER'] == 'g': basemag = 'Sloan_g'
-        if det.meta['FILTER'] == 'r': basemag = 'Sloan_r'
-        if det.meta['FILTER'] == 'i': basemag = 'Sloan_i'
-        if det.meta['FILTER'] == 'z': basemag = 'Sloan_z'
-        if det.meta['FILTER'] == 'B': basemag = 'Johnson_B'
-        if det.meta['FILTER'] == 'V': basemag = 'Johnson_V'
-        if det.meta['FILTER'] == 'R': basemag = 'Johnson_R'
-        if det.meta['FILTER'] == 'I': basemag = 'Johnson_I'
-
-        if basemag in johnson_filters:
-            fit_in_johnson = 'Johnson'
-
-    if options.basemag is not None:
-        if options.basemag in johnson_filters:
-            fit_in_johnson = 'Johnson'
-        basemag = options.basemag
-
-    logging.info(f"basemag={basemag} fit_in_johnson={fit_in_johnson}")
-    return basemag, fit_in_johnson
-
-
 def write_stars_file(data, ffit, imgwcs, filename="stars"):
     """
     Write star data to a file for visualization purposes.
@@ -528,7 +210,7 @@ def write_stars_file(data, ffit, imgwcs, filename="stars"):
         ast_residuals = np.zeros_like(x)  # If astrometric data is not available
 
     # Create a table with all the data
-    stars_table = astropy.table.Table([
+    stars_table = Table([
         x, adif, image_x, image_y, color1, color2, color3, color4,
         model_mags, dy, ra, dec, astx, asty, ast_residuals, current_mask, current_mask, current_mask, cat_x, cat_y
     ], names=[
@@ -594,18 +276,16 @@ def expand_pseudo_term(term):
 def perform_photometric_fitting(data, options, metadata):
     """
     Perform photometric fitting on the data using forward stepwise regression,
-    including an initial step to select the best catalog filter.
+    with proper handling of initial values from loaded models.
 
     Args:
     data (PhotometryData): Object containing all photometry data.
     options (argparse.Namespace): Command line options.
-    zeropoints (list): Initial zeropoints for each image.
+    metadata (list): Metadata for the images being processed.
 
     Returns:
     fotfit.fotfit: The fitted photometry model.
     """
-
-#    fits_filter, photometric_system = get_base_filter(det, options)
     data.set_current_filter(metadata[0]['PHFILTER'])
     photometric_system = metadata[0]['PHSYSTEM']
 
@@ -623,27 +303,40 @@ def perform_photometric_fitting(data, options, metadata):
     # Compute colors and apply color limits
     data.compute_colors_and_apply_limits(metadata[0]['PHSCHEMA'], options)
 
+    # Initialize fitting object
     ffit = fotfit.fotfit(fit_xy=options.fit_xy)
 
     # Set initial zeropoints and use the best filter
     ffit.zero = zeropoints
 
+    # Create a dictionary to store initial values from loaded model
+    initial_values = {}
+    if options.model:
+        load_model_from_file(ffit, options.model)
+        # Store initial values from the loaded model
+        for term, value in zip(ffit.fixterms + ffit.fitterms,
+                             ffit.fixvalues + ffit.fitvalues):
+            initial_values[term] = value
+        print(f"Loaded initial values from model for terms: {list(initial_values.keys())}")
+
     # Perform initial fit with just the zeropoints
     fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
-    ffit.fit(fdata)
-    best_wssrndf = ffit.wssrndf
 
+    # Set up terms for stepwise regression
     all_terms = []
     if options.terms:
         for term in parse_terms(options.terms):
             all_terms.extend(expand_pseudo_term(term))
 
-    # Parse the terms from options.terms
-#    all_terms = parse_terms(options.terms) if options.terms else []
-
     selected_terms = []
     remaining_terms = all_terms.copy()
 
+    # Initial fit with just zeropoints
+    ffit.fixall()  # Reset all terms
+    ffit.fit(fdata)
+    best_wssrndf = ffit.wssrndf
+
+    # Perform forward stepwise regression
     while remaining_terms:
         best_term = None
         best_improvement = 0
@@ -651,30 +344,35 @@ def perform_photometric_fitting(data, options, metadata):
 
         # Try each remaining term in parallel
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            future_to_term = {executor.submit(try_term, ffit, term, selected_terms, fdata, options): term for term in remaining_terms}
+            future_to_term = {executor.submit(try_term, ffit, term, selected_terms, fdata,
+                    options, initial_values.get(term, 1e-6)  # Use initial value from model if available
+                    ): term for term in remaining_terms}
+
             for future in concurrent.futures.as_completed(future_to_term):
                 term = future_to_term[future]
                 try:
                     new_wssrndf, new_mask = future.result()
                     improvement = best_wssrndf - new_wssrndf
-                    if improvement > best_improvement:
-                        best_improvement = improvement
-                        best_term = term
-                        best_mask = new_mask
+                    if improvement > 0:
+                        if best_improvement < improvement:
+                            best_improvement = improvement
+                            best_term = term
+                            best_mask = new_mask
                 except Exception as exc:
                     print(f'{term} generated an exception: {exc}')
 
-        if best_improvement > 0:
-            selected_terms.append(best_term)
-            remaining_terms.remove(best_term)
-            best_wssrndf -= best_improvement
-            print(f"Added term {best_term}. New wssrndf: {best_wssrndf}")
-        else:
-            break  # No more terms improve the fit
+        if best_term is None:
+            break
+
+        selected_terms.append(best_term)
+        remaining_terms.remove(best_term)
+        best_wssrndf -= best_improvement
+        print(f"Added term {best_term} (initial value: {initial_values.get(best_term, 1e-6)}). New wssrndf: {best_wssrndf}")
 
     # Final fit with all selected terms
-    setup_photometric_model(ffit, options, trying=",".join(selected_terms))
+    setup_terms(ffit, selected_terms, initial_values)
     ffit.fit(fdata)
+
     # Apply photometric mask and refit
     photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
     data.apply_mask(photo_mask, 'photometry')
@@ -682,6 +380,7 @@ def perform_photometric_fitting(data, options, metadata):
     # 1.
     fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
 
+    # Final delinearized fit
     ffit.delin = True
     ffit.fit(fdata)
 
@@ -703,7 +402,30 @@ def perform_photometric_fitting(data, options, metadata):
 
     return ffit
 
-def try_term(ffit, term, selected_terms, fdata, options):
+def setup_terms(ffit, terms, initial_values=None):
+    """
+    Set up terms in the fitting object with optional initial values.
+
+    Args:
+    ffit (fotfit.fotfit): The fitting object
+    terms (list): List of terms to set up
+    initial_values (dict): Dictionary of initial values for terms
+    """
+    ffit.fixall()  # Reset all terms
+
+    if not terms:
+        return
+
+    # Use initial values from model when available
+    if initial_values:
+        values = [initial_values.get(term, 1e-6) for term in terms]
+    else:
+        values = [1e-6] * len(terms)
+
+    # Add all terms as fitting terms
+    ffit.fitterm(terms, values=values)
+
+def try_term(ffit, term, current_terms, fdata, options, initial_value):
     """
     Try fitting with a new term added to the currently selected terms, including outlier removal.
     Each thread works with its own copy of the data and mask.
@@ -714,12 +436,18 @@ def try_term(ffit, term, selected_terms, fdata, options):
     selected_terms (list): List of currently selected terms.
     fdata (tuple): The fitting data.
     options (argparse.Namespace): Command line options.
+    initial_value (float): Initial value for the new term
 
     Returns:
     tuple: (wssrndf, mask) The fit quality and the mask identifying good points
     """
     new_ffit = deepcopy(ffit)
-    setup_photometric_model(new_ffit, options, trying=",".join(selected_terms + [term]))
+
+    # Create dictionary of initial values for all terms
+    term_values = {t: 1e-6 for t in current_terms}
+    term_values[term] = initial_value
+
+    setup_terms(new_ffit, current_terms + [term], term_values)
 
     # Make a copy of the input data for this thread
     thread_data = tuple(np.copy(arr) for arr in fdata)
@@ -818,12 +546,12 @@ def load_model_from_file(ffit, model_file):
         #f"/home/mates/pyrt/model/{model_file}-{ffit.det.meta['FILTER']}.mod"
     ]
     for path in model_paths:
-        try:
+#        try:
             ffit.readmodel(path)
             print(f"Model imported from {path}")
             return
-        except:
-            pass
+#        except:
+#            pass
     print(f"Cannot open model {model_file}")
 
 def setup_fitting_terms(ffit, terms, verbose, fit_xy):
@@ -886,7 +614,7 @@ def setup_radial_polynomial(ffit, term, verbose):
     if verbose:
         print(polytxt)
 
-def update_det_file(fitsimgf: str, options): #  -> Tuple[Optional[astropy.table.Table], str]:
+def update_det_file(fitsimgf: str, options): #  -> Tuple[Optional[Table], str]:
     """Update the .det file using cat2det.py."""
     cmd = ["cat2det.py"]
     if options.verbose:
@@ -965,7 +693,7 @@ def write_results(data, ffit, options, alldet, target, zpntest):
         det['MAG_CALIB'] = ffit.model( np.array(ffit.fitvalues),
             (   det['MAG_AUTO'],     # magnitude
                 det.meta['AIRMASS'], # airmass
-                det['X_IMAGE']/1024 - det.meta['CTRX']/1024, # X-coord 
+                det['X_IMAGE']/1024 - det.meta['CTRX']/1024, # X-coord
                 det['Y_IMAGE']/1024 - det.meta['CTRY']/1024, # Y-coord
                 0, 0, 0, 0, # colors (zeroes, we output instrumental mag)
                 img,  # image index
@@ -1016,18 +744,6 @@ def mesh_create_flat_field_data(det, ffit):
                      ctrx=det.meta['CTRX'],
                      ctry=det.meta['CTRY'],
                      img=det.meta['IMGNO'])
-
-def old_create_flat_field_data(det, ffit):
-    """
-    Create the flat field data array.
-
-    :param det: Detection table containing metadata
-    :param ffit: Fitting object containing the flat field model
-    :return: numpy array of flat field data
-    """
-    logging.info("Generating the flat-field array")
-    return np.fromfunction(ffit.old_flat, [det.meta['IMGAXIS2'], det.meta['IMGAXIS1']],
-        ctrx=det.meta['CTRX'], ctry=det.meta['CTRY'], img=det.meta['IMGNO'])
 
 def save_weight_image(det, ffData, options, zpntest):
     """
