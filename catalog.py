@@ -11,6 +11,7 @@ import astropy.io.ascii
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from contextlib import suppress
+import logging
 
 @dataclass
 class QueryParams:
@@ -641,19 +642,28 @@ class Catalog(astropy.table.Table):
 
     def _get_makak_data(self):
         """Get data from pre-filtered MAKAK catalog"""
-        try:
+#        try:
+        if True:
             config = self.KNOWN_CATALOGS[self.MAKAK]
 
             # Read the pre-filtered catalog
             cat = astropy.table.Table.read(config['filepath'])
 
+            # Convert coordinates to degrees if they have units
+            if hasattr(cat['radeg'], 'unit'):
+                cat['radeg'] = cat['radeg'].value
+            if hasattr(cat['decdeg'], 'unit'):
+                cat['decdeg'] = cat['decdeg'].value
+
             # Filter by field of view
             ctr = SkyCoord(self._query_params.ra*u.deg, self._query_params.dec*u.deg, frame='fk5')
-            corner = SkyCoord((self._query_params.ra+self._query_params.width)*u.deg, (self._query_params.dec+self._query_params.height)*u.deg, frame='fk5')
-            radius = corner.separation(ctr) / 2
-
+            corner1 = SkyCoord((self._query_params.ra+self._query_params.width)*u.deg, (self._query_params.dec+self._query_params.height)*u.deg, frame='fk5')
+            corner2 = SkyCoord((self._query_params.ra-self._query_params.width)*u.deg, (self._query_params.dec-self._query_params.height)*u.deg, frame='fk5')
+            radius = max(corner1.separation(ctr), corner2.separation(ctr))
+            logging.debug(f"catalog.makak: fov radius: {radius} {radius}")
+            
             cat_coords = SkyCoord(cat['radeg']*u.deg, cat['decdeg']*u.deg, frame='fk5')
-            within_field = cat_coords.separation(ctr) < radius
+            within_field = cat_coords.separation(ctr) < radius 
             cat = cat[within_field]
 
             if len(cat) == 0:
@@ -665,10 +675,15 @@ class Catalog(astropy.table.Table):
             if 'pmdec' not in cat.columns:
                 cat['pmdec'] = np.zeros(len(cat), dtype=np.float64)
 
+            # Strip units from all columns to ensure compatibility
+            for col in cat.colnames:
+                if hasattr(cat[col], 'unit'):
+                    cat[col] = cat[col].value
+
             return cat
 
-        except Exception as e:
-            raise ValueError(f"MAKAK catalog access failed: {str(e)}")
+#        except Exception as e:
+#            raise ValueError(f"MAKAK catalog access failed: {str(e)}")
 
     @classmethod
     def from_file(cls, filename):
