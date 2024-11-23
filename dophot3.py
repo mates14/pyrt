@@ -795,7 +795,7 @@ def setup_photometric_model(ffit, options, trying=None):
         load_model_from_file(ffit, options.model)
 
     ffit.fixall()  # Fix all terms initially
-    ffit.fixterm(["N1"], values=[0])
+    #ffit.fixterm(["N1"], values=[0])
 
     # Set up fitting terms
     if trying is None:
@@ -814,8 +814,8 @@ def load_model_from_file(ffit, model_file):
     """
     model_paths = [
         model_file,
-        f"/home/mates/pyrt/model/{model_file}.mod",
-        f"/home/mates/pyrt/model/{model_file}-{ffit.det.meta['FILTER']}.mod"
+        f"/home/mates/pyrt/model/{model_file}.mod"
+        #f"/home/mates/pyrt/model/{model_file}-{ffit.det.meta['FILTER']}.mod"
     ]
     for path in model_paths:
         try:
