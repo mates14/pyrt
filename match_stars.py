@@ -215,6 +215,42 @@ def get_catalog_with_dynamic_limit(det, estimated_zp, options):
 
     return cat
 
+def estimate_magnitude_limit(field_size_deg, desired_stars, galactic_lat):
+    """
+    Estimate the magnitude limit needed to get desired number of stars
+    using a simplified Bahcall-Soneira model.
+
+    Args:
+        field_size_deg (float): Field size in degrees
+        desired_stars (int): Desired number of stars in the field
+        galactic_lat (float): Absolute galactic latitude in degrees
+
+    Returns:
+        float: Estimated magnitude limit to get the desired number of stars
+    """
+    # Convert field size to square degrees
+    area_sq_deg = field_size_deg * field_size_deg
+
+    # Adjust constant based on galactic latitude
+    abs_lat = abs(galactic_lat)
+    if abs_lat < 20:
+        # Near galactic plane - more stars
+        C = 3.5
+    elif abs_lat < 40:
+        # Mid latitudes
+        C = 3.8
+    else:
+        # High latitude fields
+        C = 4.0
+
+    # Using the formula N ≈ 10^(0.6m - C) * area
+    # Solve for m given N:
+    # log10(N/area) = 0.6m - C
+    # m = (log10(N/area) + C) / 0.6
+    mag_limit = (np.log10(desired_stars / area_sq_deg) + C) / 0.6
+
+    return mag_limit
+
 def process_image_with_dynamic_limits(det, options):
     """
     Process a single image with dynamic magnitude limits.
@@ -235,6 +271,16 @@ def process_image_with_dynamic_limits(det, options):
 
         enlarge = options.enlarge if options.enlarge is not None else 1.0
 
+        field_size = enlarge * det.meta['FIELD']
+
+        # If we have galactic coordinates, use them
+        galactic_lat = abs(det.meta.get('GLAT', 45.0))  # default to mid-latitude if not available
+
+        # Get star count estimate and recommended magnitude limit
+        recommended_mag = estimate_magnitude_limit(field_size, 2000, galactic_lat)
+
+        logging.info(f"Field size: {field_size:.2f} deg, using initial magnitude limit: {recommended_mag:.1f}")
+
         # Initial catalog search with bright stars
         cat = Catalog(
             ra=det.meta['CTRRA'],
@@ -242,7 +288,7 @@ def process_image_with_dynamic_limits(det, options):
             width=enlarge*det.meta['FIELD'],
             height=enlarge*det.meta['FIELD'],
             # Use bright stars for initial estimate
-            mlim=options.maglim or 16.0,  
+            mlim=options.maglim or recommended_mag,
             catalog='makak' if options.makak else (options.catalog or 'atlas@localhost')
         )
 
