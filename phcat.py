@@ -102,6 +102,31 @@ def try_target(file):
     except:
         return None,None
 
+def run_iraf(cmdfile: str) -> bool:
+    """Run IRAF command on the given base filename."""
+
+    for cmd_possible in ['cl', 'irafcl']:
+        path = shutil.which(cmd_possible)
+        if path:
+            cmd = cmd_possible
+
+    if not cmd:
+        raise RuntimeError("Neither 'cl' nor 'irafcl' found in system PATH")
+    
+    try:
+        result = subprocess.run(
+            [cmd],
+            input=cmdfile+"\n",  # Sending input file through stdin
+            text=True,
+            capture_output=True,
+            check=True
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"IRAF command failed: {e}")
+        print(f"Error output: {e.stderr}")
+        return False
+
 def call_iraf(file, det):
     """call iraf/digiphot/daophot/phot on a file"""
     base = os.path.splitext(file)[0]
@@ -167,7 +192,8 @@ def call_iraf(file, det):
     some_file.write("\n\n\n\n")
     some_file.write("logout\n")
     some_file.close()
-    os.system(f"irafcl < {base}.cl > /dev/null")
+    if not run_iraf(f"{base}.cl"):
+        return None
     os.system(f'rm {base}.cl')
     os.system(f'rm {base}.coo.1')
 
