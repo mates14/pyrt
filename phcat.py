@@ -2,6 +2,8 @@
 
 import os
 import sys
+import shutil
+import subprocess
 import argparse
 import numpy as np
 
@@ -110,6 +112,8 @@ def run_iraf(cmdfile: str) -> bool:
         if path:
             cmd = cmd_possible
 
+    print("IRAF cmd="+cmd)
+
     if not cmd:
         raise RuntimeError("Neither 'cl' nor 'irafcl' found in system PATH")
     
@@ -179,22 +183,18 @@ def call_iraf(file, det):
     epadu = 0.81 * ncombine
     rnoise = 4.63 / np.sqrt(ncombine)
 
-    some_file = open(base+".cl", "w+")
-    some_file.write("noao\n")
-    some_file.write("digiphot\n")
-    some_file.write("daophot\n")
-    some_file.write(f"phot {file} {base}.coo.1 {base}.mag.1")
-    some_file.write(f" readnoi={rnoise} epadu={epadu}")
-    #some_file.write(f" calgori=centroid cbox={fwhm/2}")
-    some_file.write(f" calgori=none")
-    some_file.write(f" salgori=mode annulus={anu} dannulu={danu}")
-    some_file.write(f" apertur={ape} zmag=0 sigma=0 veri- datamax=60000")
-    some_file.write("\n\n\n\n")
-    some_file.write("logout\n")
-    some_file.close()
-    if not run_iraf(f"{base}.cl"):
+    script = f"""noao
+digiphot
+daophot
+phot {file} {base}.coo.1 {base}.mag.1 readnoi={rnoise} epadu={epadu} calgori=none salgori=mode annulus={anu} dannulu={danu} apertur={ape} zmag=0 sigma=0 veri- datamax=60000
+
+
+
+logout
+"""
+
+    if not run_iraf(script):
         return None
-    os.system(f'rm {base}.cl')
     os.system(f'rm {base}.coo.1')
 
     # Read IRAF output ensuring ID column is treated as integer
