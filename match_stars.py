@@ -279,7 +279,7 @@ def process_image_with_dynamic_limits(det, options):
         # Get star count estimate and recommended magnitude limit
         recommended_mag = estimate_magnitude_limit(field_size, 2000, galactic_lat)
 
-        logging.info(f"Field size: {field_size:.2f} deg, using initial magnitude limit: {recommended_mag:.1f}")
+        logging.info(f"Field size: {field_size:.2f} deg, using initial magnitude limit: {options.maglim or recommended_mag:.1f}")
 
         # Initial catalog search with bright stars
         cat = Catalog(
@@ -328,6 +328,7 @@ def process_image_with_dynamic_limits(det, options):
             )
 
 
+        logging.info(f"Matching {len(det)} objects from file with {len(cat)} objects from the catalog")
         # Final matching with full catalog
         final_matches = match_stars(det, cat, imgwcs,
                                   idlimit=options.idlimit if options.idlimit else 2.0)
