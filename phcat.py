@@ -116,7 +116,7 @@ def run_iraf(cmdfile: str) -> bool:
 
     if not cmd:
         raise RuntimeError("Neither 'cl' nor 'irafcl' found in system PATH")
-    
+
     try:
         result = subprocess.run(
             [cmd],
@@ -140,34 +140,13 @@ def call_iraf(file, det):
         fwhm = np.nanmedian(det['FWHM_IMAGE'])
     print(f'FWHM={fwhm}')
 
-    # Create coordinate file with unique identifiers
-    some_file = open(base+".coo.1", "w+")
+    # Create coordinate file with sorted coordinates
+    coords = [(num, x, y) for num, x, y in zip(det['NUMBER'], det['X_IMAGE'], det['Y_IMAGE'])]
+    coords.sort()  # Sort by ID for consistency
 
-    orix, oriy = try_target(file)
-    print(f'Target coordinates: {orix}, {oriy}')
-
-    # Create a new table for our coordinates
-    coords = []
-
-    # Handle target if it exists
-    # needs to be changed if it is indeed to be here and if it turns out necessary
-    # if orix is not None and oriy is not None and not np.isnan(orix) and not np.isnan(oriy):
-    # ...
-
-    det_filtered = det
-
-    # Add all other detections
-    for id_num, x, y in zip(det_filtered['NUMBER'], det_filtered['X_IMAGE'], det_filtered['Y_IMAGE']):
-        coords.append((id_num, x, y))
-
-    # Sort by ID to maintain consistency
-    coords.sort()
-
-    # Write coordinates
-    for id_num, x, y in coords:
-        some_file.write(f"{x:.3f} {y:.3f} {id_num:4d}\n")
-
-    some_file.close()
+    with open(base + ".coo.1", "w+") as coord_file:
+        for id_num, x, y in coords:
+            coord_file.write(f"{x:.3f} {y:.3f} {id_num:4d}\n")
 
     # now the FWHM is a good idea for large stars, but is should be enlarged
     # once the stars are too sharp, the sub-sqrt will make the transition
@@ -244,6 +223,46 @@ def process_photometry(file: str,
     if not np.isnan(new_fwhm):
         det = call_sextractor(file, new_fwhm, bg=background)
 
+    # Get target coordinates and prepare to track its ID
+    orix, oriy = try_target(file)
+    target_sextractor_id = None
+
+    # If we have valid target coordinates, add them to detections
+    if orix is not None and oriy is not None and not np.isnan(orix) and not np.isnan(oriy):
+        # Check if target is far enough from all detections
+        is_unique = True
+        for x, y in zip(det['X_IMAGE'], det['Y_IMAGE']):
+            distance = np.sqrt((x - orix)**2 + (y - oriy)**2)
+            if distance <= new_fwhm:
+                is_unique = False
+                break
+
+        if is_unique:
+            # Create a new row as a dictionary with all required fields
+            target_dict = {
+                'NUMBER': len(det) + 1,  # New sequential number at the end
+                'X_IMAGE': orix,
+                'Y_IMAGE': oriy,
+                'ALPHA_J2000': 0,  # or calculate from WCS if needed
+                'DELTA_J2000': 0,  # or calculate from WCS if needed
+                'MAG_AUTO': 99,  # placeholder
+                'MAGERR_AUTO': 99,  # placeholder
+                'FWHM_IMAGE': new_fwhm,  # use median FWHM
+                'ELLIPTICITY': 0,
+                'FLAGS': 0,
+                'ERRX2_IMAGE': 0,
+                'ERRY2_IMAGE': 0
+            }
+
+            # Create a single-row table from the dictionary
+            target_row = astropy.table.Table([target_dict])
+
+            # Remember the sextractor ID we assigned to target
+            target_sextractor_id = target_dict['NUMBER']
+
+            # Add target row to the end of detections
+            det = astropy.table.vstack([det, target_row])
+
     if noiraf:
         tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
     else:
@@ -252,7 +271,6 @@ def process_photometry(file: str,
         # Verify alignment before joining
         print(f"Sextractor objects: {len(det)}")
         print(f"IRAF measured objects: {len(mag)}")
-        print(f"Matching IDs: {len(set(det['NUMBER']) & set(mag['ID']))}")
 
         # Ensure NUMBER/ID columns are of the same type before joining
         det['NUMBER'] = det['NUMBER'].astype(np.int32)
@@ -264,7 +282,7 @@ def process_photometry(file: str,
                 'CIER','MSKY','STDEV','SSKEW','NSKY','NSREJ','SIER','SUM'
                 ))
 
-        # use iraf magnitudes as if they are sextracotr's
+        # use iraf magnitudes as if they are sextractor's
         det.rename_columns( ['MAG_AUTO','MAGERR_AUTO'], ['MAG_SEX', 'MAGERR_SEX'])
         mag.rename_columns( ['MAG',     'MERR'], ['MAG_AUTO','MAGERR_AUTO'])
 
@@ -278,8 +296,15 @@ def process_photometry(file: str,
         for i, cut in enumerate(cuts):
             print(f"Cut {i+1}: {np.sum(cut)} objects pass")
 
-        # Apply quality cuts
-        tbl = tbl[np.all(cuts, axis=0)]
+        # Apply quality cuts, but keep target regardless of cuts
+        if target_sextractor_id is not None and target_sextractor_id in tbl['NUMBER']:
+            target_row = tbl[tbl['NUMBER'] == target_sextractor_id]
+            target_row['NUMBER'] = 0  # Now safe to change to -1 for final output
+            tbl_filtered = tbl[np.all(cuts, axis=0)]
+            tbl = astropy.table.vstack([target_row, tbl_filtered])
+        else:
+            tbl = tbl[np.all(cuts, axis=0)]
+
     return tbl
 
 def main():
