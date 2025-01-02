@@ -34,6 +34,7 @@ from file_utils import try_det, try_img, write_region_file
 from config import parse_arguments
 from data_handling import PhotometryData, make_pairs_to_fit, compute_initial_zeropoints
 from match_stars import process_image_with_dynamic_limits
+from stepwise_regression import perform_stepwise_regression, parse_terms, expand_pseudo_term
 
 
 if sys.version_info[0]*1000+sys.version_info[1]<3008:
@@ -243,36 +244,6 @@ def write_stars_file(data, ffit, imgwcs, filename="stars"):
     # Write the table to a file
     stars_table.write(filename, format='ascii.ecsv', overwrite=True)
 
-def expand_pseudo_term(term):
-    """
-    Expands pseudo-terms like '.p3' or '.r2' into their constituent terms.
-
-    Args:
-        term (str): The term to expand (e.g., '.p3' or '.r2')
-
-    Returns:
-        list: List of expanded terms
-    """
-    expanded_terms = []
-
-    if term[0] == '.':
-        if term[1] == 'p':
-            # Surface polynomial
-            pol_order = int(term[2:])
-            for pp in range(1, pol_order + 1):
-                for rr in range(0, pp + 1):
-                    expanded_terms.append(f"P{rr}X{pp-rr}Y")
-        elif term[1] in [ 'r', 'c', 'd', 'e', 'f', 'n' ]:
-            # Radial polynomial
-            pol_order = int(term[2:])
-            for pp in range(1, pol_order + 1):
-                expanded_terms.append(f"P{pp}{term[1].upper()}")
-    else:
-        # Regular term, no expansion needed
-        expanded_terms.append(term)
-
-    return expanded_terms
-
 def perform_photometric_fitting(data, options, metadata):
     """
     Perform photometric fitting on the data using forward stepwise regression,
@@ -328,61 +299,10 @@ def perform_photometric_fitting(data, options, metadata):
         for term in parse_terms(options.terms):
             all_terms.extend(expand_pseudo_term(term))
 
-    selected_terms = []
-    remaining_terms = all_terms.copy()
-
-    # Initial fit with just zeropoints
-    ffit.fixall()  # Reset all terms
-    ffit.fit(fdata)
-    best_wssrndf = ffit.wssrndf
-
-    # Perform forward stepwise regression
-    while remaining_terms:
-        best_term = None
-        best_improvement = 0
-        best_mask = None
-
-        # Try each remaining term in parallel
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            future_to_term = {executor.submit(try_term, ffit, term, selected_terms, fdata,
-                    options, initial_values.get(term, 1e-6)  # Use initial value from model if available
-                    ): term for term in remaining_terms}
-
-            for future in concurrent.futures.as_completed(future_to_term):
-                term = future_to_term[future]
-                try:
-                    new_wssrndf, new_mask = future.result()
-                    improvement = best_wssrndf - new_wssrndf
-                    if improvement > 0:
-                        if best_improvement < improvement:
-                            best_improvement = improvement
-                            best_term = term
-                            best_mask = new_mask
-                except Exception as exc:
-                    print(f'{term} generated an exception: {exc}')
-
-        if best_term is None:
-            break
-
-        selected_terms.append(best_term)
-        remaining_terms.remove(best_term)
-        best_wssrndf -= best_improvement
-        print(f"Added term {best_term} (initial value: {initial_values.get(best_term, 1e-6)}). New wssrndf: {best_wssrndf}")
-
-    # Final fit with all selected terms
-    setup_terms(ffit, selected_terms, initial_values)
-    ffit.fit(fdata)
-
-    # Apply photometric mask and refit
-    photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
-    data.apply_mask(photo_mask, 'photometry')
-    data.use_mask('photometry')
-    # 1.
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
-
-    # Final delinearized fit
-    ffit.delin = True
-    ffit.fit(fdata)
+    # Perform bidirectional stepwise regression
+    selected_terms, final_wssrndf = perform_stepwise_regression(
+        data, ffit, all_terms, options, metadata
+    )
 
     # Final fit with refined mask
     data.use_mask('default')
@@ -401,113 +321,6 @@ def perform_photometric_fitting(data, options, metadata):
     print(f"Selected terms: {selected_terms}")
 
     return ffit
-
-def setup_terms(ffit, terms, initial_values=None):
-    """
-    Set up terms in the fitting object with optional initial values.
-
-    Args:
-    ffit (fotfit.fotfit): The fitting object
-    terms (list): List of terms to set up
-    initial_values (dict): Dictionary of initial values for terms
-    """
-    ffit.fixall()  # Reset all terms
-
-    if not terms:
-        return
-
-    # Use initial values from model when available
-    if initial_values:
-        values = [initial_values.get(term, 1e-6) for term in terms]
-    else:
-        values = [1e-6] * len(terms)
-
-    # Add all terms as fitting terms
-    ffit.fitterm(terms, values=values)
-
-def try_term(ffit, term, current_terms, fdata, options, initial_value):
-    """
-    Try fitting with a new term added to the currently selected terms, including outlier removal.
-    Each thread works with its own copy of the data and mask.
-
-    Args:
-    ffit (fotfit.fotfit): The current fitting object.
-    term (str): The new term to try.
-    selected_terms (list): List of currently selected terms.
-    fdata (tuple): The fitting data.
-    options (argparse.Namespace): Command line options.
-    initial_value (float): Initial value for the new term
-
-    Returns:
-    tuple: (wssrndf, mask) The fit quality and the mask identifying good points
-    """
-    new_ffit = deepcopy(ffit)
-
-    # Create dictionary of initial values for all terms
-    term_values = {t: 1e-6 for t in current_terms}
-    term_values[term] = initial_value
-
-    setup_terms(new_ffit, current_terms + [term], term_values)
-
-    # Make a copy of the input data for this thread
-    thread_data = tuple(np.copy(arr) for arr in fdata)
-
-    # Iterative fitting with outlier removal
-    max_iterations = 3  # Limit iterations to prevent infinite loops
-    current_mask = np.ones(len(thread_data[0]), dtype=bool)
-    prev_wssrndf = float('inf')
-
-    for iteration in range(max_iterations):
-        # Apply current mask to data
-        masked_data = tuple(arr[current_mask] for arr in thread_data)
-
-        # Perform the fit
-        new_ffit.fit(masked_data)
-
-        # Calculate residuals on all points
-        residuals = new_ffit.residuals(new_ffit.fitvalues, thread_data)
-
-        # Create new mask for points within 5-sigma
-        new_mask = np.abs(residuals) < 5 * new_ffit.wssrndf
-
-        # Check for convergence
-        if np.array_equal(new_mask, current_mask) or new_ffit.wssrndf >= prev_wssrndf:
-            break
-
-        current_mask = new_mask
-        prev_wssrndf = new_ffit.wssrndf
-
-    return new_ffit.wssrndf, current_mask
-
-def simple_try_term(ffit, term, selected_terms, fdata, options):
-    """
-    Try fitting with a new term added to the currently selected terms.
-
-    Args:
-    ffit (fotfit.fotfit): The current fitting object.
-    term (str): The new term to try.
-    selected_terms (list): List of currently selected terms.
-    fdata (tuple): The fitting data.
-
-    Returns:
-    float: The new wssrndf after fitting with the added term.
-    """
-    new_ffit = deepcopy(ffit)
-    setup_photometric_model(new_ffit, options, trying=",".join(selected_terms + [term]))
-    new_ffit.fit(fdata)
-    return new_ffit.wssrndf
-
-def parse_terms(terms_string):
-    """
-    Parse the terms string into a list of individual terms.
-
-    Args:
-    terms_string (str): Comma-separated string of terms.
-
-    Returns:
-    list: List of individual terms.
-    """
-    return [term.strip() for term in terms_string.split(',') if term.strip()]
 
 def setup_photometric_model(ffit, options, trying=None):
     """
