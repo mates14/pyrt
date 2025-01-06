@@ -315,9 +315,6 @@ def perform_photometric_fitting(data, options, metadata):
     ffit.fit(fdata)
 
     print(f"Final fit variance: {ffit.wssrndf}")
-
-
-    print(f"Final fit variance: {ffit.wssrndf}")
     print(f"Selected terms: {selected_terms}")
 
     return ffit
@@ -453,8 +450,41 @@ def should_update_det_file(det, fitsimg, detf, fitsimgf, options):
         return os.path.getmtime(fitsimgf) > os.path.getmtime(detf)
     return False
 
-def process_input_file(arg, options):
+def apply_spatial_correction(det, model_string):
+    """
+    Apply model correction using the same approach as mesh_flat
+    """
+    ffit = fotfit.fotfit(fit_xy=False)
+    ffit.from_oneline(model_string)
 
+    # Add original zeropoint to fitvalues
+    #ffit.fitvalues = np.concatenate([ffit.fitvalues, [det.meta['MAGZERO']]])
+    ffit.fitvalues = np.concatenate([ffit.fitvalues, [0.0]])
+
+    data = (
+        np.zeros_like(det['MAG_AUTO']),  # mc
+        det.meta.get('AIRMASS', 1.0),    # airmass
+        (det['X_IMAGE'] - det.meta['CTRX'])/1024,  # normalized X
+        (det['Y_IMAGE'] - det.meta['CTRY'])/1024,  # normalized Y
+        np.zeros_like(det['MAG_AUTO']),  # color1
+        np.zeros_like(det['MAG_AUTO']),  # color2
+        np.zeros_like(det['MAG_AUTO']),  # color3
+        np.zeros_like(det['MAG_AUTO']),  # color4
+        det.meta.get('IMGNO', 0),
+        np.zeros_like(det['MAG_AUTO']),  # y
+        np.ones_like(det['MAG_AUTO']),   # err
+        det['X_IMAGE'],                  # raw X
+        det['Y_IMAGE']                   # raw Y
+    )
+
+    correction = ffit.model(ffit.fitvalues, data)
+    logging.info(f"Correction stats - min: {np.min(correction):.3f}, max: {np.max(correction):.3f}, mean: {np.mean(correction):.3f}")
+    det['MAG_AUTO'] += correction
+
+    return det
+
+def process_input_file(arg, options):
+    """Modified to handle spatial detrending"""
     detf, det = try_det(arg, options.verbose)
     if det is None: detf, det = try_det(os.path.splitext(arg)[0] + ".det", options.verbose)
     if det is None: detf, det = try_det(arg + ".det", options.verbose)
@@ -479,8 +509,12 @@ def process_input_file(arg, options):
     # 4. have det, no fitsimg: just run, writing results into fits will be disabled
     if fitsimgf is not None: det.meta['filename'] = fitsimgf
     det.meta['detf'] = detf
-    logging.info(f"DetF={detf}, ImgF={fitsimgf}")
+    # Apply spatial correction if requested
+    if options.remove_spatial and 'RESPONSE' in det.meta:
+        det = apply_spatial_correction(det, det.meta['RESPONSE'])
+        logging.info("Applied spatial correction from existing model")
 
+    logging.info(f"DetF={detf}, ImgF={fitsimgf}")
     return det
 
 def setup_logging(verbose):
@@ -502,8 +536,9 @@ def write_results(data, ffit, options, alldet, target, zpntest):
         logging.info(f"Writing to astrometrized image took {time.time()-start:.3f}s")
 
         start = time.time()
+        # Only update RESPONSE if we're not using spatial correction
         fn = os.path.splitext(det.meta['detf'])[0] + ".ecsv"
-        det['MAG_CALIB'] = ffit.model( np.array(ffit.fitvalues),
+        det['MAG_CALIB'] = ffit.model(np.array(ffit.fitvalues),
             (   det['MAG_AUTO'],     # magnitude
                 det.meta['AIRMASS'], # airmass
                 det['X_IMAGE']/1024 - det.meta['CTRX']/1024, # X-coord
@@ -520,6 +555,7 @@ def write_results(data, ffit, options, alldet, target, zpntest):
         det.meta['DMAGZERO'] = zerr[img]
         det.meta['MAGLIMIT'] = det.meta['LIMFLX3']+zero[img]
         det.meta['WSSRNDF'] = ffit.wssrndf
+
         det.meta['RESPONSE'] = ffit.oneline()
 
         if (zerr[img] < 0.2) or (options.reject is None):
@@ -801,7 +837,8 @@ def main():
         write_stars_file(data, ffit, imgwcs)
         logging.info(f"Saving the stars file took {time.time()-start:.3f}s")
 
-    write_results(data, ffit, options, alldet, target, zpntest)
+    if not options.remove_spatial:
+        write_results(data, ffit, options, alldet, target, zpntest)
 
 # this way, the variables local to main() are not globally available, avoiding some programming errors
 if __name__ == "__main__":
