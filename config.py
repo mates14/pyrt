@@ -135,6 +135,7 @@ def parse_arguments(args=None):
     parser.add_argument("-n", "--nonlin", help="CCD is not linear, apply linear correction on mag", action='store_true')
     parser.add_argument("-p", "--plot", help="Produce plots", action='store_true')
     parser.add_argument("-r", "--reject", help="No outputs for Reduced Chi^2 > value", type=float)
+    parser.add_argument("--remove-spatial", help="Remove spatial terms and concentrate to color response fit", action='store_true')
     parser.add_argument("--select-best", action='store_true', default=config.get('select_best', None), help="Try to select the best filter for photometric fitting")
     parser.add_argument("-s", "--stars", action='store_true', default=config.get('stars', 'False'), help="Output fitted numbers to a file")
     parser.add_argument("-S", "--sip", help="Order of SIP refinement for the astrometric solution (0=disable)", type=int)
