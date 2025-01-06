@@ -136,7 +136,7 @@ class termfit:
         """fit data to the defined model"""
         self.delin=False
         res = fit.least_squares(self.residuals, self.fitvalues,\
-            args=[data], ftol=1e-14)
+            args=[data], ftol=1e-15)
         self.fitvalues = []
         for x in res.x:
             self.fitvalues += [ x ]
@@ -154,13 +154,13 @@ class termfit:
 
             # Check condition number
             cond_num = np.linalg.cond(jac_matrix)
-            logging.debug(f"Matrix condition number: {cond_num:.2e}")
-            if cond_num > 1e15:
-                logging.debug("Warning: Problem is ill-conditioned")
+#            logging.debug(f"Matrix condition number: {cond_num:.2e}")
+#            if cond_num > 1e15:
+#                logging.debug("Warning: Problem is ill-conditioned")
 
             try:
                 cov = np.linalg.inv(jac_matrix)
-                logging.debug("Using direct inverse method")
+#                logging.debug("Using direct inverse method")
                 self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
                 return
             except np.linalg.LinAlgError:
@@ -172,36 +172,36 @@ class termfit:
                 U, s, Vh = np.linalg.svd(jac_matrix)
 
                 # Print singular values
-                logging.debug("\nSingular values:")
-                for i, sing_val in enumerate(s):
-                    logging.debug(f"σ_{i+1} = {sing_val:.2e}")
+#                logging.debug("\nSingular values:")
+#                for i, sing_val in enumerate(s):
+#                    logging.debug(f"σ_{i+1} = {sing_val:.2e}")
 
                 # Calculate relative contributions
                 rel_contributions = s / s[0]
-                logging.debug("\nRelative parameter contributions:")
-                for i, contrib in enumerate(rel_contributions):
-                    logging.debug(f"Parameter {i+1}: {contrib:.2e}")
+#                logging.debug("\nRelative parameter contributions:")
+#                for i, contrib in enumerate(rel_contributions):
+#                    logging.debug(f"Parameter {i+1}: {contrib:.2e}")
 
                 # Identify near-zero singular values (effectively rank-deficient)
                 rank_threshold = 1e-12
                 effective_rank = sum(s > rank_threshold * s[0])
-                logging.debug(f"\nEffective rank: {effective_rank} out of {len(s)}")
+#                logging.debug(f"\nEffective rank: {effective_rank} out of {len(s)}")
 
-                if effective_rank < len(s):
-                    logging.debug("Warning: Some parameters are effectively linearly dependent")
+#                if effective_rank < len(s):
+#                    logging.debug("Warning: Some parameters are effectively linearly dependent")
                     # Identify which parameters are problematic
-                    for i, (term, contrib) in enumerate(zip(self.fitterms, rel_contributions)):
-                        if contrib < rank_threshold:
-                            logging.debug(f"Parameter '{term}' may be linearly dependent with others")
+#                    for i, (term, contrib) in enumerate(zip(self.fitterms, rel_contributions)):
+#                        if contrib < rank_threshold:
+#                            logging.debug(f"Parameter '{term}' may be linearly dependent with others")
 
                 cov = np.linalg.pinv(jac_matrix, rcond=rank_threshold)
-                logging.debug("\nUsing SVD pseudo-inverse method")
+#                logging.debug("\nUsing SVD pseudo-inverse method")
                 self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
 
                 # Check for zero or very small errors
                 for i, (term, error) in enumerate(zip(self.fitterms, self.fiterrors)):
                     if error < 1e-10 * abs(self.fitvalues[i]):
-                        logging.debug(f"Warning: Parameter '{term}' has very small/zero error")
+#                        logging.debug(f"Warning: Parameter '{term}' has very small/zero error")
                         # Replace zero errors with a more meaningful estimate
                         self.fiterrors[i] = abs(self.fitvalues[i]) * 1e-6  # Conservative estimate
 
@@ -215,14 +215,14 @@ class termfit:
                 epsilon = 1e-10 * np.trace(jac_matrix) / jac_matrix.shape[0]
                 reg_matrix = jac_matrix + epsilon * np.eye(jac_matrix.shape[0])
                 cov = np.linalg.inv(reg_matrix)
-                logging.debug("Using regularized inverse method")
+#                logging.debug("Using regularized inverse method")
                 self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
                 return
             except:
                 pass
 
             # Fallback: Estimate errors using parameter perturbation
-            logging.debug("Using parameter perturbation method")
+#            logging.debug("Using parameter perturbation method")
             param_errors = []
             delta = 1e-6  # Small perturbation
             for i in range(len(self.fitvalues)):
@@ -301,3 +301,18 @@ class termfit:
         self.sigma = rmodel.meta['sigma']
         self.variance = rmodel.meta['variance']
         self.wssrndf = rmodel.meta['wssrndf']
+
+    def removeterm(self, term):
+        """Remove a term from fitting terms or fixed terms"""
+        # Remove from fitterms if present
+        if term in self.fitterms:
+            idx = self.fitterms.index(term)
+            self.fitterms.pop(idx)
+            self.fitvalues.pop(idx)
+            if hasattr(self, 'fiterrors'):
+                self.fiterrors.pop(idx)
+        # Remove from fixterms if present
+        elif term in self.fixterms:
+            idx = self.fixterms.index(term)
+            self.fixterms.pop(idx)
+            self.fixvalues.pop(idx)
