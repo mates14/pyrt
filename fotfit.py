@@ -7,6 +7,7 @@ Photometric response fitter
 
 import numpy as np
 import termfit
+from astropy.table import Table
 
 # wishlist :)
 #from scipy.interpolate import RegularGridInterpolator
@@ -269,14 +270,17 @@ class fotfit(termfit.termfit):
                              self.fixvalues + self.fitvalues):
             output.append(f"{term}={value}")
 
-        # For fit_xy mode, explicitly include per-image PX/PY terms
+        # If fit_xy is True, handle the px/py arrays
         if self.fit_xy:
             N = (len(self.fitvalues) - len(self.fitterms)) // 3
             px = self.fitvalues[len(self.fitterms) + N:len(self.fitterms) + 2*N]
             py = self.fitvalues[len(self.fitterms) + 2*N:len(self.fitterms) + 3*N]
-            for i, (px_val, py_val) in enumerate(zip(px, py)):
-                output.append(f"PX{i}={px_val}")
-                output.append(f"PY{i}={py_val}")
+
+            # Include only the PX/PY values for the current image
+            # But need to know which image we're writing for...
+            # current_img = det.meta.get('IMGNO', 0)  # This is tricky - how to get current image?
+            output.append(f"P1X={px[0]}")
+            output.append(f"P1Y={py[0]}")
 
         return ",".join(output)
 
@@ -359,9 +363,9 @@ class fotfit(termfit.termfit):
                 self.fiterrors.append(param['err'])
 
         # Read statistics
-        self.sigma = model_table.meta['sigma']
-        self.variance = model_table.meta['variance']
-        self.wssrndf = model_table.meta['wssrndf']
+        #self.sigma = model_table.meta['sigma']
+        #self.variance = model_table.meta['variance']
+        #self.wssrndf = model_table.meta['wssrndf']
 
     def from_oneline(self, line):
         """
@@ -399,16 +403,6 @@ class fotfit(termfit.termfit):
                     self.color_schema = strvalue
                     continue
 
-                # Handle per-image PX/PY terms
-                if name.startswith('PX') and len(name) > 2:
-                    img_num = int(name[2:])
-                    img_px[img_num] = value
-                    continue
-                elif name.startswith('PY') and len(name) > 2:
-                    img_num = int(name[2:])
-                    img_py[img_num] = value
-                    continue
-
                 # Add regular term
                 self.fixterms.append(name)
                 self.fixvalues.append(value)
@@ -416,24 +410,6 @@ class fotfit(termfit.termfit):
             except ValueError as e:
                 print(f"Warning: Could not parse term '{term}': {e}")
                 continue
-
-        # Handle fit_xy mode if per-image PX/PY terms were found
-        if img_px or img_py:
-            self.fit_xy = True
-            max_img = max(max(img_px.keys(), default=-1),
-                         max(img_py.keys(), default=-1))
-
-            # Fill in any missing image numbers with zeros
-            for i in range(max_img + 1):
-                if i not in img_px:
-                    img_px[i] = 0.0
-                if i not in img_py:
-                    img_py[i] = 0.0
-
-            # Add sorted PX/PY values to fixvalues
-            for i in range(max_img + 1):
-                self.fixterms.extend([f'PX{i}', f'PY{i}'])
-                self.fixvalues.extend([img_px[i], img_py[i]])
 
         return self
 
