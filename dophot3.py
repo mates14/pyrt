@@ -36,6 +36,7 @@ from data_handling import PhotometryData, make_pairs_to_fit, compute_initial_zer
 from match_stars import process_image_with_dynamic_limits
 from stepwise_regression import perform_stepwise_regression, parse_terms, expand_pseudo_term
 
+from plotting import create_residual_plots
 
 if sys.version_info[0]*1000+sys.version_info[1]<3008:
     print(f"Error: python3.8 or higher is required (this is python {sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]})")
@@ -836,6 +837,12 @@ def main():
         start = time.time()
         write_stars_file(data, ffit, imgwcs)
         logging.info(f"Saving the stars file took {time.time()-start:.3f}s")
+
+    if options.plot:
+        start = time.time()
+        base_filename = os.path.splitext(det.meta['detf'])[0]
+        create_residual_plots(data, base_filename, ffit, zpntest, 'photometry')
+        logging.info(f"Generating plots took {time.time()-start:.3f}s")
 
     if not options.remove_spatial:
         write_results(data, ffit, options, alldet, target, zpntest)
