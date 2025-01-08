@@ -8,6 +8,7 @@ FITS/WCS/ZPN fitter
 import os
 import numpy as np
 #import scipy.optimize as fit
+import scipy
 #from astropy.table import Table
 from astropy.io import fits
 import astropy.wcs
@@ -92,18 +93,46 @@ class zpnfit(termfit.termfit):
                 hdr[term] = value
 
         for term, value in zip(self.fitterms, self.fitvalues):
-            hdr[term] = value
+            if not term.startswith(('A_', 'B_')):  # Defer SIP coefficients
+                hdr[term] = value
+
+        if self.sip_order > 0:
+            hdr['CTYPE1'] = hdr['CTYPE1'] + '-SIP'
+            hdr['CTYPE2'] = hdr['CTYPE2'] + '-SIP'
+            hdr['A_ORDER'] = self.sip_order
+            hdr['B_ORDER'] = self.sip_order
+
+            for i in range(self.sip_order + 1):
+                for j in range(self.sip_order + 1 - i):
+                    if i + j > 0:  # Skip 0,0
+                        hdr[f'A_{i}_{j}'] = self.sip_a[i,j]
+                        hdr[f'B_{i}_{j}'] = self.sip_b[i,j]
 
         return hdr
 
     def add_sip_terms(self, order):
+        """Add SIP terms with better initialization and scaling"""
         self.sip_order = order
         self.sip_a = np.zeros((order + 1, order + 1))
         self.sip_b = np.zeros((order + 1, order + 1))
+
+        # Start with reasonable scales for different orders
+        scales = {
+            1: 1e-7,  # First order terms around 1e-6
+            2: 1e-10, # Second order terms around 1e-9
+            3: 1e-13, # Third order terms around 1e-12
+            4: 1e-16  # Fourth order terms around 1e-15
+        }
+
         for i in range(order + 1):
             for j in range(order + 1 - i):
                 if i + j > 0:  # Skip A_0_0 and B_0_0
-                    self.fitterm([f'A_{i}_{j}', f'B_{i}_{j}'], [0, 0])
+                    scale = 1e-18  # Scale based on total order
+#                    scale = scales.get(i + j, 1e-18)  # Scale based on total order
+                    # Initialize with small random values around the expected scale
+                    a_init = 0 # np.random.normal(0, scale)
+                    b_init = 0 # np.random.normal(0, scale)
+                    self.fitterm([f'A_{i}_{j}', f'B_{i}_{j}'], [a_init, b_init])
 
     def apply_sip(self, x, y):
         dx = np.sum(self.sip_a[i,j] * x**i * y**j
@@ -199,7 +228,8 @@ class zpnfit(termfit.termfit):
                     set_value('CUNIT1', "deg")
                     set_value('CUNIT2', "deg")
                 else:
-                    set_value(term, value)
+                    if not term.startswith(('A_', 'B_')):  # Defer SIP coefficients
+                        set_value(term, value)
 
             # Write SIP coefficients if present
             if self.sip_order > 0:
@@ -363,18 +393,28 @@ class zpnfit(termfit.termfit):
         x = 1.0/D * (   CD2_2 * x1 - CD1_2 * y1)
         y = 1.0/D * ( - CD2_1 * x1 + CD1_1 * y1)
 
-        # Apply SIP distortion
-        if self.sip_order > 0:
-            dx = np.sum(self.sip_a[i,j] * x**i * y**j
-                        for i in range(self.sip_order + 1)
-                        for j in range(self.sip_order + 1 - i)
-                        if i + j > 0)
-            dy = np.sum(self.sip_b[i,j] * x**i * y**j
-                        for i in range(self.sip_order + 1)
-                        for j in range(self.sip_order + 1 - i)
-                        if i + j > 0)
-            x = x + dx
-            y = y + dy
+        # Apply SIP distortion with proper normalization
+        if True:
+            if self.sip_order > 0:
+                # Normalize coordinates to [-1,1] range for numerical stability
+                x_center = (np.max(x) + np.min(x)) / 2
+                y_center = (np.max(y) + np.min(y)) / 2
+                x_scale = (np.max(x) - np.min(x)) / 2
+                y_scale = (np.max(y) - np.min(y)) / 2
+
+                x_norm = (x - x_center) / x_scale
+                y_norm = (y - y_center) / y_scale
+
+                dx = np.sum(self.sip_a[i,j] * x_norm**i * y_norm**j * (x_scale**i * y_scale**j)
+                            for i in range(self.sip_order + 1)
+                            for j in range(self.sip_order + 1 - i)
+                            if i + j > 0)
+                dy = np.sum(self.sip_b[i,j] * x_norm**i * y_norm**j * (x_scale**i * y_scale**j)
+                            for i in range(self.sip_order + 1)
+                            for j in range(self.sip_order + 1 - i)
+                            if i + j > 0)
+                x = x + dx
+                y = y + dy
 
         return CRPIX1 + x, CRPIX2 + y
 
