@@ -38,7 +38,7 @@ def get_healpix_query(nside, ipix):
         parallax, parallax_over_error,
         ruwe
     FROM gaiadr3.gaia_source
-    WHERE phot_g_mean_mag < 8.0
+    WHERE phot_g_mean_mag < 10.0
         AND ruwe < 1.4
         AND visibility_periods_used >= 8
         AND phot_g_mean_mag IS NOT NULL
@@ -162,7 +162,7 @@ def fetch_bright_stars():
     # Add metadata
     output.meta['CATNAME'] = 'GAIA_BRIGHT'
     output.meta['RELEASE'] = 'DR3'
-    output.meta['MAGLIMIT'] = 8.0
+    output.meta['MAGLIMIT'] = 10.0
     output.meta['EPOCH'] = 2016.0
     output.meta['DATE'] = time.strftime('%Y-%m-%d', time.gmtime())
     output.meta['NCATS'] = len(output)
