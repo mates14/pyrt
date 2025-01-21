@@ -651,6 +651,9 @@ def save_flat_image(det, ffData, zpntest):
 def write_output_line(det, options, zero, zerr, ffit, target):
     tarid = det.meta.get('TARGET', 0)
     obsid = det.meta.get('OBSID', 0)
+    if options.makak:
+        tarid = det.meta.get('BGSIGMA', 0)
+        obsid = det.meta.get('CCD_TEMP', 0)
 
     chartime = det.meta['JD'] + det.meta['EXPTIME'] / 2
     if options.date == 'char':
