@@ -175,38 +175,30 @@ class Catalog(astropy.table.Table):
             'service': 'local',
             'filepath': '/home/mates/gaia_bright_stars.fits'
         },
-#        MAKAK: {
-#            'description': 'Pre-filtered wide-field catalog',
-#            'filters': CatalogFilters.ATLAS,  # Using ATLAS filter definitions
-#            'epoch': 2015.5,  # Default epoch, could be overridden from FITS metadata
-#            'local': True,
-#            'service': 'local',
-#            'filepath': '/home/mates/test/catalog.fits'  # Default path, could be configurable
-#        },
         USNOB: {
-        'description': 'USNO-B1.0 Catalog',
-        'filters': CatalogFilters.USNOB,
-        'epoch': 2000.0,
-        'local': False,
-        'service': 'VizieR',
-        'catalog_id': 'I/284/out',
-        'column_mapping': {
-            'RAJ2000': 'radeg',
-            'DEJ2000': 'decdeg',
-            'B1mag': 'B1',
-            'R1mag': 'R1',
-            'B2mag': 'B2',
-            'R2mag': 'R2',
-            'Imag': 'I',
-            'e_B1mag': 'B1_err',
-            'e_R1mag': 'R1_err',
-            'e_B2mag': 'B2_err',
-            'e_R2mag': 'R2_err',
-            'e_Imag': 'I_err',
-            'pmRA': 'pmra',
-            'pmDE': 'pmdec'
+            'description': 'USNO-B1.0 Catalog',
+            'filters': CatalogFilters.USNOB,
+            'epoch': 2000.0,
+            'local': False,
+            'service': 'VizieR',
+            'catalog_id': 'I/284/out',
+            'column_mapping': {
+                'RAJ2000': 'radeg',
+                'DEJ2000': 'decdeg',
+                'B1mag': 'B1',
+                'R1mag': 'R1',
+                'B2mag': 'B2',
+                'R2mag': 'R2',
+                'Imag': 'I',
+                'e_B1mag': 'B1_err',
+                'e_R1mag': 'R1_err',
+                'e_B2mag': 'B2_err',
+                'e_R2mag': 'R2_err',
+                'e_Imag': 'I_err',
+                'pmRA': 'pmra',
+                'pmDE': 'pmdec'
+            }
         }
-    }
     }
 
     def __init__(self, *args, **kwargs):
@@ -258,11 +250,10 @@ class Catalog(astropy.table.Table):
     @property
     def catalog_name(self) -> str:
         """Get catalog name"""
-        return self.meta.get('catalog_props', {}).get('catalog_name')
+        return str(self.meta.get('catalog_props', {}).get('catalog_name'))
 
     def _fetch_catalog_data(self):
         """Fetch data from the specified catalog source"""
-        #print(self._catalog_name," in ",self.KNOWN_CATALOGS.keys())
         if self._catalog_name not in self.KNOWN_CATALOGS.keys():
             raise ValueError(f"Unknown catalog: {self._catalog_name}")
 
@@ -304,39 +295,34 @@ class Catalog(astropy.table.Table):
             if self._query_params.mlim <= magspl:
                 continue
 
-            # print(f"get_atlas: mlim:{mlim} > magspl:{magspl}")
-
             directory = os.path.join(self._query_params.atlas_dir, dirname)
-        #    try:
-            if True:
-                new_data = self._get_atlas_split(directory)
-                if new_data is None:
-                    continue
+            new_data = self._get_atlas_split(directory)
+            if new_data is None:
+                continue
 
-                result = new_data if result is None else astropy.table.vstack([result, new_data])
-
-#            except Exception as e:
-#                warnings.warn(f"get_atlas: Failed to get data from {directory}: {e}")
+            result = new_data if result is None else astropy.table.vstack([result, new_data])
 
         if result is not None and len(result) > 0:
             self._add_transformed_magnitudes(result)
 
-        # print(f"get_atlas: returning {len(result)} records")
         return result
 
     def _get_atlas_split(self, directory):
         """Get data from one magnitude split of ATLAS catalog"""
-        atlas_ecsv_tmp = f"atlas{os.getpid()}.ecsv"
-        try:
-            cmd =   f'atlas {self._query_params.ra} {self._query_params.dec} '\
-                    f'-rect {self._query_params.width},{self._query_params.height} '\
-                    f'-dir {directory} -mlim {self._query_params.mlim:.2f} -ecsv '\
-                    f'> {atlas_ecsv_tmp}'
-            os.system(cmd)
-            return astropy.table.Table.read(atlas_ecsv_tmp, format='ascii.ecsv')
-        finally:
-            with suppress(FileNotFoundError):
-                os.remove(atlas_ecsv_tmp)
+        with tempfile.NamedTemporaryFile(suffix=".ecsv", delete=False) as tmp:
+            try:
+                cmd =   f'atlas {self._query_params.ra} {self._query_params.dec} '\
+                        f'-rect {self._query_params.width},{self._query_params.height} '\
+                        f'-dir {directory} -mlim {self._query_params.mlim:.2f} -ecsv '
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+                with open(tmp.name, "w") as f:
+                    f.write(result.stdout)
+
+                return astropy.table.Table.read(tmp.name, format="ascii.ecsv")
+
+            finally:
+                os.unlink(tmp.name)
 
     @staticmethod
     def _add_transformed_magnitudes(cat):
@@ -355,110 +341,99 @@ class Catalog(astropy.table.Table):
 
     def _get_atlas_vizier(self):
         """Get ATLAS RefCat2 data from VizieR with updated column mapping"""
- #       try:
-        if True:
-            from astroquery.vizier import Vizier
-            # Configure Vizier with correct column names
-            column_mapping = self.KNOWN_CATALOGS[self.ATLAS_VIZIER]['column_mapping']
-            vizier = Vizier(
-                columns=list(column_mapping.keys()),
-                column_filters={
-                    "rmag": f"<{self._query_params.mlim}"  # Magnitude limit in r-band
-                },
-                row_limit=-1
-            )
+        from astroquery.vizier import Vizier
+        # Configure Vizier with correct column names
+        column_mapping = self.KNOWN_CATALOGS[self.ATLAS_VIZIER]['column_mapping']
+        vizier = Vizier(
+            columns=list(column_mapping.keys()),
+            column_filters={
+                "rmag": f"<{self._query_params.mlim}"  # Magnitude limit in r-band
+            },
+            row_limit=-1
+        )
 
-            # Create coordinate object
-            coords = SkyCoord(ra=self._query_params.ra*u.deg, dec=self._query_params.dec*u.deg, frame='icrs')
+        # Create coordinate object
+        coords = SkyCoord(
+            ra=self._query_params.ra*u.deg,
+            dec=self._query_params.dec*u.deg,
+            frame='icrs'
+        )
 
-            # Query VizieR
-            result = vizier.query_region(
-                coords,
-                width=self._query_params.width * u.deg,
-                height=self._query_params.height * u.deg,
-                catalog=self.KNOWN_CATALOGS[self.ATLAS_VIZIER]['catalog_id']
-            )
+        # Query VizieR
+        result = vizier.query_region(
+            coords,
+            width=self._query_params.width * u.deg,
+            height=self._query_params.height * u.deg,
+            catalog=self.KNOWN_CATALOGS[self.ATLAS_VIZIER]['catalog_id']
+        )
 
-            if not result or len(result) == 0:
-                return None
+        if not result or len(result) == 0:
+            return None
 
-            atlas = result[0]
+        atlas = result[0]
 
-            # Create output catalog
-            cat = astropy.table.Table(result)
+        # Create output catalog
+        cat = astropy.table.Table(result)
 
-            # Initialize all columns from the mapping with zeros
-            our_columns = set(column_mapping.values())  # Use set to remove any duplicates
-            for col in our_columns:
-                cat[col] = np.zeros(len(atlas), dtype=np.float64)
+        # Initialize all columns from the mapping with zeros
+        our_columns = set(column_mapping.values())  # Use set to remove any duplicates
+        for col in our_columns:
+            cat[col] = np.zeros(len(atlas), dtype=np.float64)
 
-            # Map columns according to our mapping
-            for vizier_name, our_name in column_mapping.items():
-                if vizier_name in atlas.columns:
-                    # Convert proper motions from mas/yr to deg/yr if needed
-                    if vizier_name in ['pmRA', 'pmDE']:
-                        cat[our_name] = atlas[vizier_name] / (3.6e6)
-                    else:
-                        cat[our_name] = atlas[vizier_name]
+        # Map columns according to our mapping
+        for vizier_name, our_name in column_mapping.items():
+            if vizier_name in atlas.columns:
+                # Convert proper motions from mas/yr to deg/yr if needed
+                if vizier_name in ['pmRA', 'pmDE']:
+                    cat[our_name] = atlas[vizier_name] / (3.6e6)
+                else:
+                    cat[our_name] = atlas[vizier_name]
 
-            # Add computed Johnson magnitudes
-            self._add_transformed_magnitudes(cat)
+        # Add computed Johnson magnitudes
+        self._add_transformed_magnitudes(cat)
 
-            return cat
-            if result is not None and len(result) > 0:
-                self._add_transformed_magnitudes(result)
+        return cat
 
-            print(f"get_atlas: returning {len(result)} records")
-            return result
-
-
-#        except Exception as e:
-#            warnings.warn(f"VizieR ATLAS query failed: {e}")
-#            return None
 
     def _get_panstarrs_data(self):
         """Get PanSTARRS DR2 data"""
-#        try:
-        if True:
-            from astroquery.mast import Catalogs
+        from astroquery.mast import Catalogs
 
-            config = self.KNOWN_CATALOGS[self.PANSTARRS]
-            radius = np.sqrt(self._query_params.width**2 + self._query_params.height**2) / 2
-            coords = SkyCoord(ra=self._query_params.ra*u.deg, dec=self._query_params.dec*u.deg, frame='icrs')
+        config = self.KNOWN_CATALOGS[self.PANSTARRS]
+        radius = np.sqrt(self._query_params.width**2 + self._query_params.height**2) / 2
+        coords = SkyCoord(ra=self._query_params.ra*u.deg, dec=self._query_params.dec*u.deg, frame='icrs')
 
-            constraints = {
-                'nDetections.gt': 4,
-                'rMeanPSFMag.lt': self._query_params.mlim,
-                'qualityFlag.lt': 128
-            }
+        constraints = {
+            'nDetections.gt': 4,
+            'rMeanPSFMag.lt': self._query_params.mlim,
+            'qualityFlag.lt': 128
+        }
 
-            ps1 = Catalogs.query_region(
-                coords,
-                catalog=config['catalog_id'],
-                radius=radius * u.deg,
-                data_release="dr2",
-                table=config['table'],
-                **constraints
-            )
+        ps1 = Catalogs.query_region(
+            coords,
+            catalog=config['catalog_id'],
+            radius=radius * u.deg,
+            data_release="dr2",
+            table=config['table'],
+            **constraints
+        )
 
-            if len(ps1) == 0:
-                return None
+        if len(ps1) == 0:
+            return None
 
-            result = astropy.table.Table()
+        result = astropy.table.Table()
 
-            # Map columns according to configuration
-            for ps1_name, our_name in config['column_mapping'].items():
-                if ps1_name in ps1.columns:
-                    result[our_name] = ps1[ps1_name].astype(np.float64)
+        # Map columns according to configuration
+        for ps1_name, our_name in config['column_mapping'].items():
+            if ps1_name in ps1.columns:
+                result[our_name] = ps1[ps1_name].astype(np.float64)
 
-            # Add proper motion columns (not provided by PanSTARRS)
-            result['pmra'] = np.zeros(len(ps1), dtype=np.float64)
-            result['pmdec'] = np.zeros(len(ps1), dtype=np.float64)
+        # Add proper motion columns (not provided by PanSTARRS)
+        result['pmra'] = np.zeros(len(ps1), dtype=np.float64)
+        result['pmdec'] = np.zeros(len(ps1), dtype=np.float64)
 
-            return result
+        return result
 
-#        except Exception as e:
-#            raise ValueError(f"PanSTARRS query failed: {str(e)}")
 
     def _get_gaia_data(self):
         """Get Gaia DR3 data"""
@@ -466,9 +441,6 @@ class Catalog(astropy.table.Table):
             from astroquery.gaia import Gaia
 
             config = self.KNOWN_CATALOGS[self.GAIA]
-                #-- Convert null proper motions to 0
-                #COALESCE(pmra, 0.0) as pmra,
-                #COALESCE(pmdec, 0.0) as pmdec,
             query = f"""
             SELECT
                 source_id, ra, dec, pmra, pmdec,
@@ -479,7 +451,7 @@ class Catalog(astropy.table.Table):
             WHERE 1=CONTAINS(
                 POINT('ICRS', ra, dec),
                 BOX('ICRS', {self._query_params.ra}, {self._query_params.dec},
-                    {self._query_params.width}, {self._query_params.height}))
+                    {2*self._query_params.width}, {2*self._query_params.height}))
                 AND phot_g_mean_mag < {self._query_params.mlim}
                 AND ruwe < 1.4
                 AND visibility_periods_used >= 8
@@ -595,12 +567,13 @@ class Catalog(astropy.table.Table):
             # Query VizieR
             result = vizier.query_region(
                 coords,
-                width=self._query_params.width * u.deg,
-                height=self._query_params.height * u.deg,
+                width=2*self._query_params.width * u.deg,
+                height=2*self._query_params.height * u.deg,
                 catalog=config['catalog_id']
             )
 
             if not result or len(result) == 0:
+                print("No USNO-B data found")
                 return None
 
             usnob = result[0]
@@ -642,57 +615,67 @@ class Catalog(astropy.table.Table):
 
     def _get_makak_data(self):
         """Get data from pre-filtered MAKAK catalog"""
-#        try:
-        if True:
-            config = self.KNOWN_CATALOGS[self.MAKAK]
+        config = self.KNOWN_CATALOGS[self.MAKAK]
 
-            # Read the pre-filtered catalog
-            cat = astropy.table.Table.read(config['filepath'])
+        # Read the pre-filtered catalog
+        cat = astropy.table.Table.read(config['filepath'])
 
-            # Convert coordinates to degrees if they have units
-            if hasattr(cat['radeg'], 'unit'):
-                cat['radeg'] = cat['radeg'].value
-            if hasattr(cat['decdeg'], 'unit'):
-                cat['decdeg'] = cat['decdeg'].value
+        # Convert coordinates to degrees if they have units
+        if hasattr(cat['radeg'], 'unit'):
+            cat['radeg'] = cat['radeg'].value
+        if hasattr(cat['decdeg'], 'unit'):
+            cat['decdeg'] = cat['decdeg'].value
 
-            # Filter by field of view
-            ctr = SkyCoord(self._query_params.ra*u.deg, self._query_params.dec*u.deg, frame='fk5')
-            corner1 = SkyCoord((self._query_params.ra+self._query_params.width)*u.deg, (self._query_params.dec+self._query_params.height)*u.deg, frame='fk5')
-            corner2 = SkyCoord((self._query_params.ra-self._query_params.width)*u.deg, (self._query_params.dec-self._query_params.height)*u.deg, frame='fk5')
-            radius = max(corner1.separation(ctr), corner2.separation(ctr))
-            logging.debug(f"catalog.makak: fov radius: {radius} {radius}")
-            
-            cat_coords = SkyCoord(cat['radeg']*u.deg, cat['decdeg']*u.deg, frame='fk5')
-            within_field = cat_coords.separation(ctr) < radius 
-            cat = cat[within_field]
+        # Filter by field of view
+        ctr = SkyCoord(self._query_params.ra*u.deg, self._query_params.dec*u.deg, frame='fk5')
+        corner1 = SkyCoord((self._query_params.ra+self._query_params.width)*u.deg, (self._query_params.dec+self._query_params.height)*u.deg, frame='fk5')
+        corner2 = SkyCoord((self._query_params.ra-self._query_params.width)*u.deg, (self._query_params.dec-self._query_params.height)*u.deg, frame='fk5')
+        radius = max(corner1.separation(ctr), corner2.separation(ctr))
+        logging.debug(f"catalog.makak: fov radius: {radius} {radius}")
 
-            if len(cat) == 0:
-                return None
+        cat_coords = SkyCoord(cat['radeg']*u.deg, cat['decdeg']*u.deg, frame='fk5')
+        within_field = cat_coords.separation(ctr) < radius
+        cat = cat[within_field]
 
-            # Ensure proper motion columns exist
-            if 'pmra' not in cat.columns:
-                cat['pmra'] = np.zeros(len(cat), dtype=np.float64)
-            if 'pmdec' not in cat.columns:
-                cat['pmdec'] = np.zeros(len(cat), dtype=np.float64)
+        if len(cat) == 0:
+            return None
 
-            # Strip units from all columns to ensure compatibility
-            for col in cat.colnames:
-                if hasattr(cat[col], 'unit'):
-                    cat[col] = cat[col].value
+        # Ensure proper motion columns exist
+        if 'pmra' not in cat.columns:
+            cat['pmra'] = np.zeros(len(cat), dtype=np.float64)
+        if 'pmdec' not in cat.columns:
+            cat['pmdec'] = np.zeros(len(cat), dtype=np.float64)
 
-            return cat
+        # Strip units from all columns to ensure compatibility
+        for col in cat.colnames:
+            if hasattr(cat[col], 'unit'):
+                cat[col] = cat[col].value
 
-#        except Exception as e:
-#            raise ValueError(f"MAKAK catalog access failed: {str(e)}")
+        return cat
 
     @classmethod
     def from_file(cls, filename):
-        """Create catalog instance from a local file."""
+        """Create catalog instance from a local file with proper metadata handling"""
         try:
             data = astropy.table.Table.read(filename)
-            obj = cls(data.as_array(), meta=data.meta)
-            obj.meta['catalog'] = 'local'
+
+            # Initialize catalog with data
+            obj = cls(data.as_array())
+
+            # Copy existing metadata
+            obj.meta.update(data.meta)
+
+            # Initialize catalog properties if not present
+            if 'catalog_props' not in obj.meta:
+                obj.meta['catalog_props'] = {
+                    'catalog_name': 'local',
+                    'description': f'Local catalog from {filename}',
+                    'epoch': None,
+                    'filters': {}
+                }
+
             return obj
+
         except Exception as e:
             raise ValueError(f"Failed to read catalog from {filename}: {str(e)}")
 
@@ -819,32 +802,6 @@ class Catalog(astropy.table.Table):
 
         except Exception as e:
             raise ValueError(f"Transformation failed: {str(e)}")
-
-    @classmethod
-    def from_file(cls, filename):
-        """Create catalog instance from a local file with proper metadata handling"""
-        try:
-            data = astropy.table.Table.read(filename)
-
-            # Initialize catalog with data
-            obj = cls(data.as_array())
-
-            # Copy existing metadata
-            obj.meta.update(data.meta)
-
-            # Initialize catalog properties if not present
-            if 'catalog_props' not in obj.meta:
-                obj.meta['catalog_props'] = {
-                    'catalog_name': 'local',
-                    'description': f'Local catalog from {filename}',
-                    'epoch': None,
-                    'filters': {}
-                }
-
-            return obj
-
-        except Exception as e:
-            raise ValueError(f"Failed to read catalog from {filename}: {str(e)}")
 
 def add_catalog_argument(parser):
     """Add catalog selection argument to argument parser"""
