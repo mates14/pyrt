@@ -824,3 +824,172 @@ def add_catalog_argument(parser: Any) -> None:
         default="ATLAS",
         help="Catalog to use for photometric reference"
     )
+
+    def get_transient_candidates(
+        self, det: astropy.table.Table, idlimit: float = 5.0
+    ) -> astropy.table.Table:
+        """Identify transient candidates by comparing detections against catalog sources using KDTree for efficient spatial matching.
+
+        Args:
+            det (astropy.table.Table): Table of detected objects with X_IMAGE, Y_IMAGE columns
+            idlimit (float): Identification radius limit in pixels (default: 5.0)
+
+        Returns:
+            astropy.table.Table: Table of transient candidates (detections without catalog matches)
+        """
+        try:
+            # Input validation
+            self._validate_detection_table(det)
+
+            # Transform catalog coordinates to pixel space based on detection WCS
+            cat_xy = self._transform_catalog_to_pixel(det)
+            if len(cat_xy) < 1:
+                warnings.warn("No valid catalog sources in the field")
+                return det
+
+            # Create detection array
+            det_xy = np.array([det["X_IMAGE"], det["Y_IMAGE"]]).T
+
+            # Build KDTree for catalog sources
+            tree = KDTree(cat_xy)
+
+            # Find all neighbors within idlimit radius
+            indices, distances = tree.query_radius(
+                det_xy, r=idlimit, return_distance=True
+            )
+            # distances are useless as in transients they are all equal to idlimit
+            # Create mask for detections with no neighbors within limit
+            transient_mask = np.array([len(idx) == 0 for idx in indices])
+
+            # Create output table
+            transients = det[transient_mask].copy()
+
+            return transients
+
+        except Exception as e:
+            raise ValueError(f"Transient detection failed: {str(e)}") from e
+
+    def compute_magnitude_difference(
+        self, det_without_transients: astropy.table.Table, filter: str
+    ) -> astropy.table.Table:
+        """Compute magnitude differences between detections and catalog sources.
+
+        Args:
+            det_without_transients (astropy.table.Table):
+            Table of detected objects with X_IMAGE, Y_IMAGE, MAG_CALIB and MAGERR_AUTO columns and with WCS
+            filter (str): Filter name for magnitude comparison
+
+        Returns:
+            astropy.table.Table: Table of detections with magnitude differences
+        """
+        if filter not in self.filters:
+            raise ValueError(f"Filter '{filter}' not available in the catalog.")
+        try:
+
+            # Input validation
+            self._validate_detection_table(det_without_transients)
+
+            # Transform catalog coordinates to pixel space based on detection WCS
+            cat_xy = self._transform_catalog_to_pixel(det_without_transients)
+
+            # Create detection array
+            det_xy = np.array(
+                [det_without_transients["X_IMAGE"], det_without_transients["Y_IMAGE"]]
+            ).T
+
+            # Build KDTree for catalog sources
+            tree = KDTree(cat_xy)
+
+            # Find nearest neighbor for each detection
+            dist, idx = tree.query(det_xy, k=1)
+            # Compute magnitude differences
+            if filter in self.filters:
+                cat_mag = (self[filter][idx]).flatten()
+                det_mag = np.array(det_without_transients["MAG_CALIB"])
+                det_without_transients["mag_diff"] = det_mag - cat_mag
+                try:
+                    cat_err = self[self.filters[filter].error_name][idx]
+                    det_without_transients["mag_diff_err"] = np.sqrt(
+                        cat_err ** 2
+                        + np.array(det_without_transients["MAGERR_CALIB"]) ** 2
+                    )
+                except Exception:
+                    pass
+
+            # Update metadata
+            det_without_transients.meta.update(
+                {"reference_catalog": self.catalog_name, "matching_time": time.time()}
+            )
+
+            return det_without_transients
+
+        except Exception as e:
+            raise ValueError(
+                f"Magnitude difference computation failed: {str(e)}"
+            ) from e
+
+    def _validate_detection_table(self, det: astropy.table.Table) -> None:
+        """Validate detection table has required columns and metadata."""
+        required_columns = {"X_IMAGE", "Y_IMAGE"}
+        if missing_columns := required_columns - set(det.colnames):
+            raise ValueError(
+                f"Detection table missing required columns: {missing_columns}"
+            )
+
+        required_meta = {"IMAGEW", "IMAGEH"}
+        if missing_meta := required_meta - set(det.meta.keys()):
+            raise ValueError(
+                f"Detection table missing required metadata: {missing_meta}"
+            )
+
+    def _transform_catalog_to_pixel(self, det: astropy.table.Table) -> np.ndarray:
+        """Transform catalog coordinates to pixel coordinates."""
+        try:
+            # Get WCS from detection metadata
+            imgwcs = astropy.wcs.WCS(det.meta)
+            # Transform coordinates
+            cat_x, cat_y = imgwcs.all_world2pix(self["radeg"], self["decdeg"], 1)
+
+            # Filter out invalid transformations and sources outside image
+            valid_mask = (
+                ~np.isnan(cat_x)
+                & ~np.isnan(cat_y)
+                & (cat_x >= 0)
+                & (cat_x < det.meta["IMAGEW"])
+                & (cat_y >= 0)
+                & (cat_y < det.meta["IMAGEH"])
+            )
+
+            return np.column_stack([cat_x[valid_mask], cat_y[valid_mask]])
+        except Exception as e:
+            raise ValueError(f"Coordinate transformation failed: {str(e)}") from e
+
+    def match_with_external_catalog(
+        self, other_cat: "Catalog", max_separation: float = 1.0
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Match sources with another catalog using sky coordinates.
+
+        Args:
+            other_cat (Catalog): Another catalog instance to match against
+            max_separation (float): Maximum separation in arcseconds
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: Indices of matching sources in both catalogs
+        """
+        import astropy.units as u
+        from astropy.coordinates import SkyCoord
+
+        # Create SkyCoord objects
+        cat1_coords = SkyCoord(ra=self["radeg"] * u.deg, dec=self["decdeg"] * u.deg)
+        cat2_coords = SkyCoord(
+            ra=other_cat["radeg"] * u.deg, dec=other_cat["decdeg"] * u.deg
+        )
+
+        # Perform coordinate matching
+        idx1, idx2, sep, _ = cat1_coords.search_around_sky(
+            cat2_coords, max_separation * u.arcsec
+        )
+
+        return idx1, idx2
+
+
