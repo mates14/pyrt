@@ -5,6 +5,8 @@ from typing import List, Dict, Optional, Tuple, Any
 import numpy as np
 import warnings
 import os
+import subprocess
+import tempfile
 import sys
 import astropy.table
 import astropy.io.ascii
@@ -12,6 +14,8 @@ from astropy.coordinates import SkyCoord
 import astropy.units as u
 from contextlib import suppress
 import logging
+import subprocess
+import tempfile
 
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional, Tuple, Type, TypeVar, cast
