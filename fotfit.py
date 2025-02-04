@@ -250,7 +250,7 @@ class fotfit(termfit.termfit):
     def residuals(self, values, data):
         """residuals for fitting with error weighting and delinearization"""
         mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y = data
-        dist = np.abs((y - self.model(values, data))/err)
+        dist = np.abs((y - self.model(values, data))/err/err/err)
         if self.delin:
             return self.cauchy_delin(dist)
         else:
