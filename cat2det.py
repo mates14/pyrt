@@ -214,6 +214,7 @@ def open_files(arg, verbose=False):
     if img is None: imgf, img = try_img(os.path.splitext(arg)[0] + ".fits", verbose)
     if det is None: detf, det = try_sex(arg + ".xat", verbose)
     if det is None: detf, det = try_sex(os.path.splitext(arg)[0] + ".cat", verbose)
+    if det is None: detf, det = try_ecsv(os.path.splitext(arg)[0] + ".cat", verbose)
 
     if det is None: # os.system does not raise an exception if it fails
         #cmd = f"sscat-noradec {arg}"
@@ -379,17 +380,18 @@ def process_detections(det: astropy.table.Table,
     det.meta['FIELD'] = field.deg
     det.meta['PIXEL'] = pixel.arcsec
 
-    try:
-        fwhm = c['FWHM']
-#        if fwhm < 0.5:
-#            fwhm = 2
-        if verbose:
-            print(f"Detected FWHM {fwhm:.1f} pixels ({fwhm*pixel.arcsec:.1f}\")")
-    except KeyError:
-        fwhm = 2
-        if verbose:
-            print(f"Set FWHM {fwhm:.1f} pixels ({fwhm*pixel.arcsec:.1f}\")")
-    det.meta['FWHM'] = fwhm
+    try:  # Normally we should have a FWHM value from phcat in the photometry file
+        fwhm = det.meta['FWHM']
+    except: # if not try some alternatives
+        try:
+            fwhm = c['FWHM']
+            if verbose:
+                print(f"Detected FWHM {fwhm:.1f} pixels ({fwhm*pixel.arcsec:.1f}\")")
+        except KeyError:
+            fwhm = 2
+            if verbose:
+                print(f"Set FWHM {fwhm:.1f} pixels ({fwhm*pixel.arcsec:.1f}\")")
+        det.meta['FWHM'] = fwhm
 
     remove_junk(det.meta)
 
