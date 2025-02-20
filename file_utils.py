@@ -1,5 +1,6 @@
 import os
 import astropy.io.fits
+import astropy.wcs
 import logging
 from contextlib import suppress
 from astropy.table import Table
@@ -55,7 +56,7 @@ def try_det(arg, verbose=False):
 import astropy.table
 
 def write_region_file(catalog: Table, filename: str,
-                      color: str = "red", shape: str = "circle", 
+                      color: str = "red", shape: str = "circle",
                       radius: float = 3.0, coord_system: str = "fk5") -> None:
     """
     Write a DS9 region file based on the provided catalog.

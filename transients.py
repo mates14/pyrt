@@ -690,13 +690,13 @@ some_file.write(f"plot [{mintime-t0:.3f}:{maxtime-t0:.3f}] \\\n")
 
 j=0;
 for oo in trans:
-    if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 2:
+    if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 3:
         some_file.write(f"\"-\" u ($1+$3/2.):2:($3/2.0):4 w xye pt 7 t \"a:{oo['ALPHA_J2000']:.5f} d:{oo['DELTA_J2000']:.5f} v={oo['MAG_VAR']:.1f} s={oo['SIGMA']:.2f} p={oo['DPOS']/d.meta['PIXEL']:.2f}\",\\\n")
         j+=1
 some_file.write("\n")
 
 for oo in trans:
-    if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 2:
+    if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 3:
         for mag in mags[oo['INDEX']]:
             some_file.write("%ld %.3f %d %.3f\n"%(\
                 mag['CTIME']-t0,\
