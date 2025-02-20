@@ -181,7 +181,7 @@ logout
                                converters={'ID': [astropy.io.ascii.convert_numpy(np.int32)]})
     #mag['MAG'] = mag['MAG'] - mag.meta['ZMAG']
     os.system(f'rm {base}.mag.1')
-    return mag
+    return mag, fwhm,ape
 
 def get_fwhm_from_detections(det, min_good_detections=30):
     """
@@ -266,7 +266,10 @@ def process_photometry(file: str,
     if noiraf:
         tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
     else:
-        mag = call_iraf(file, det, aperture)
+        mag, fwhm, ape = call_iraf(file, det)
+
+        det.meta['FWHM'] = fwhm
+        det.meta['APERTURE'] = ape
 
         # Verify alignment before joining
         print(f"Sextractor objects: {len(det)}")

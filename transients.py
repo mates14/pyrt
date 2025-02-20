@@ -443,7 +443,7 @@ for arg in options.files:
 #            print("!",bestmag,magdet,errdet)
 #            print("!",i)
             if options.regs and (not options.usno) and d['MAG_CALIB'] < options.maglim:
-                some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(d["X_IMAGE"], d["Y_IMAGE"],5*idlimit*d.meta['PIXEL']))
+                some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
     
             if d['X_IMAGE'] < frame or d['Y_IMAGE']<frame or d['X_IMAGE'] > d.meta['IMGAXIS1']-frame or d['Y_IMAGE']>d.meta['IMGAXIS2']-frame:
                 continue
@@ -511,7 +511,7 @@ for arg in options.files:
     #                print("index",i,"killed by USNO")
                 else:
                     if options.regs and d['MAG_CALIB'] < options.maglim:
-                        some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(candx[i], candy[i],5*idlimit*d.meta['PIXEL']))
+                        some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(candx[i], candy[i],1.5*idlimit*d.meta['PIXEL']))
                     live+=1
     #                print("index",i,"stays alive",)
                     cand2x.append(candx[i])

@@ -22,6 +22,14 @@ def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry')
         'x', 'y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'dy', 'ra', 'dec', 'image_x', 'image_y', 'cat_x', 'cat_y'
     )
 
+    # Calculate astrometric residuals (if available)
+    try:
+        imgwcs = astropy.wcs.WCS(afit.wcs())
+        astx, asty = imgwcs.all_world2pix( ra, dec, 1)
+        ast_residuals = np.sqrt((astx - coord_x)**2 + (asty - coord_y)**2)
+    except (KeyError,AttributeError):
+        ast_residuals = np.zeros_like(x)  # If astrometric data is not available
+
     # Calculate model magnitudes
     model_input = (y, adif, coord_x, coord_y, color1, color2, color3, color4, img, x, dy, image_x, image_y)
     model_mags = ffit.model(np.array(ffit.fitvalues), model_input)
@@ -59,40 +67,40 @@ def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry')
     # Color mapping for points based on errors
     error_colors = plt.cm.hsv(np.log10(dy))
 
-#    if plot_type == 'photometry':
-    # Magnitude residuals, up higher values, should me "measured brighter"
-    residuals = x - model_mags
-    # I'd like to have 10-sigma here
-    sigma = ffit.sigma
-    ylim = (-sigma*7, sigma*7)
+    if plot_type == 'photometry':
+        # Magnitude residuals, up higher values, should me "measured brighter"
+        residuals = x - model_mags
+        # I'd like to have 10-sigma here
+        sigma = ffit.sigma
+        ylim = (-sigma*7, sigma*7)
 
-    for idx, (label, param) in enumerate(params):
-        ax = fig.add_subplot(gs[idx // 2 + 1, idx % 2 ])
+        for idx, (label, param) in enumerate(params):
+            ax = fig.add_subplot(gs[idx // 2 + 1, idx % 2 ])
 
-        # Plot masked points in gray
-        ax.scatter(param[~current_mask], residuals[~current_mask],
-              c='gray', alpha=0.3, s=2)
+            # Plot masked points in gray
+            ax.scatter(param[~current_mask], residuals[~current_mask],
+                      c='gray', alpha=0.3, s=2)
 
-        # Plot unmasked points with color coding
-        sc = ax.scatter(param[current_mask], residuals[current_mask],
-                  c=dy[current_mask], cmap='hsv', s=2)
+            # Plot unmasked points with color coding
+            sc = ax.scatter(param[current_mask], residuals[current_mask],
+                          c=dy[current_mask], cmap='hsv', s=2)
 
-        ax.set_ylabel('Magnitude Residuals')
-        ax.set_xlabel(label)
-        ax.set_ylim(ylim)
-        ax.grid(True, alpha=0.2)
+            ax.set_ylabel('Magnitude Residuals')
+            ax.set_xlabel(label)
+            ax.set_ylim(ylim)
+            ax.grid(True, alpha=0.2)
 
 #    else:  # astrometry
-    # Calculate astrometric residuals (if available)
-    try:
-        imgwcs = astropy.wcs.WCS(afit.wcs())
-        astx, asty = imgwcs.all_world2pix( ra, dec, 1)
-        ast_residuals = np.sqrt((astx - coord_x)**2 + (asty - coord_y)**2)
 
+        try:
+            dx = image_x - astx
+            dy = image_y - asty
+            sigma = afit.sigma
+        except:
+            dx=np.zeros_like(image_x)
+            dy=np.zeros_like(image_x)
+            sigma=0.1
 
-        dx = image_x - astx
-        dy = image_y - asty
-        sigma = afit.sigma
         ylim = (-sigma*7, sigma*7)
 
         for idx, (label, param) in enumerate(aparams):

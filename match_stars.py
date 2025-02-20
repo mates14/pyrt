@@ -262,7 +262,7 @@ def process_image_with_dynamic_limits(det, options):
     Returns:
         tuple: (catalog, matches, imgwcs, target) or (None, None, None, None) on failure
     """
-    try:
+    if True:
         # Set up WCS
         imgwcs = astropy.wcs.WCS(det.meta)
 
@@ -334,7 +334,3 @@ def process_image_with_dynamic_limits(det, options):
                                   idlimit=options.idlimit if options.idlimit else 2.0)
 
         return cat, final_matches, imgwcs, target_match
-
-    except Exception as e:
-        logging.error(f"Error processing image: {e}")
-        return None, None, None, None
