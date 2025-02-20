@@ -223,6 +223,8 @@ def process_photometry(file: str,
     if not np.isnan(new_fwhm):
         det = call_sextractor(file, new_fwhm, bg=background)
 
+    print("W/H:",det.meta['IMAGEW'],det.meta['IMAGEH'])
+
     # Get target coordinates and prepare to track its ID
     orix, oriy = try_target(file)
     target_sextractor_id = None

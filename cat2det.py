@@ -214,7 +214,8 @@ def open_files(arg, verbose=False):
     if img is None: imgf, img = try_img(os.path.splitext(arg)[0] + ".fits", verbose)
     if det is None: detf, det = try_sex(arg + ".xat", verbose)
     if det is None: detf, det = try_sex(os.path.splitext(arg)[0] + ".cat", verbose)
-    if det is None: detf, det = try_ecsv(os.path.splitext(arg)[0] + ".cat", verbose)
+    if det is None:
+        detf, det = try_ecsv(os.path.splitext(arg)[0] + ".cat", verbose)
 
     if det is None: # os.system does not raise an exception if it fails
         #cmd = f"sscat-noradec {arg}"
@@ -407,6 +408,9 @@ def main():
             det,filef,fitsfile = open_files(arg, verbose=options.verbose)
         except FileNotFoundError:
             continue
+
+        if det is not None and 'keywords' in det.meta:
+            del det.meta['keywords']
 
         det = process_detections(det, filef,
                                nonlin=options.nonlin,

@@ -30,7 +30,7 @@ def try_ecsv(arg, verbose=False):
     """Try to open arg as a sextractor file, exit cleanly if it does not happen"""
     try:
         det = astropy.io.ascii.read(arg, format='ecsv')
-        det.meta=None # certainly contains interesting info, but breaks the code
+    #    det.meta=None # certainly contains interesting info, but breaks the code
         logging.info(f"Argument {arg} is an ascii/ecsv catalog")
         return arg, det
     except (FileNotFoundError,OSError,UnicodeDecodeError):
