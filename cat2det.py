@@ -214,6 +214,7 @@ def open_files(arg, verbose=False):
     if img is None: imgf, img = try_img(os.path.splitext(arg)[0] + ".fits", verbose)
     if det is None: detf, det = try_sex(arg + ".xat", verbose)
     if det is None: detf, det = try_sex(os.path.splitext(arg)[0] + ".cat", verbose)
+    if det is None: detf, det = try_ecsv(os.path.splitext(arg)[0] + ".cat", verbose)
 
     if det is None: # os.system does not raise an exception if it fails
         #cmd = f"sscat-noradec {arg}"
