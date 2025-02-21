@@ -552,9 +552,11 @@ def write_results(data, ffit, options, alldet, target, zpntest):
             )
         det['MAGERR_CALIB'] = np.sqrt(np.power(det['MAGERR_AUTO'],2)+np.power(zerr[img],2))
 
+        # our zeropoint is a magnitude that 10000 counts are, motivation:
+        # solving nonlinearity introduced poor fix for this value during fit
         det.meta['MAGZERO'] = zero[img]
         det.meta['DMAGZERO'] = zerr[img]
-        det.meta['MAGLIMIT'] = det.meta['LIMFLX3']+zero[img]
+        det.meta['MAGLIMIT'] = det.meta['LIMFLX3']+zero[img]+10  # +10 because the nature of our zeropoint
         det.meta['WSSRNDF'] = ffit.wssrndf
 
         det.meta['RESPONSE'] = ffit.oneline()
