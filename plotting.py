@@ -125,11 +125,11 @@ def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry')
             ax.set_ylim(ylim)
             ax.grid(True, alpha=0.2)
 
-    except KeyError:
-        ast_residuals = np.zeros_like(x)  # If astrometric data is not available
-    except AttributeError:
-        # If astrometric data is not available
-        ast_residuals = np.zeros_like(x)
+#    except KeyError:
+#        ast_residuals = np.zeros_like(x)  # If astrometric data is not available
+#    except AttributeError:
+#        # If astrometric data is not available
+#        ast_residuals = np.zeros_like(x)
 
     plt.tight_layout()
 
