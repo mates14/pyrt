@@ -159,7 +159,9 @@ def call_iraf(file, det, aperture=None):
     # D50 Andor gain and rnoise, this stuff needs to be seriously improved
     try: ncombine = astropy.io.fits.getval(file, "NCOMBINE")
     except: ncombine = 1.0
-    epadu = 0.81 * ncombine
+    try: epadu = astropy.io.fits.getval(file, "GAIN")
+    except: epadu = 0.81 * ncombine
+    
     rnoise = 4.63 / np.sqrt(ncombine)
 
     script = f"""noao
