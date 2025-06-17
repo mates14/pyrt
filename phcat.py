@@ -163,6 +163,7 @@ def call_iraf(file, det, aperture=None):
     except: epadu = 0.81 * ncombine
     
     rnoise = 4.63 / np.sqrt(ncombine)
+    print(f"ape={ape} anu={anu} danu={danu}")
 
     script = f"""noao
 digiphot
@@ -270,7 +271,7 @@ def process_photometry(file: str,
     if noiraf:
         tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
     else:
-        mag, fwhm, ape = call_iraf(file, det)
+        mag, fwhm, ape = call_iraf(file, det, aperture=aperture)
 
         det.meta['FWHM'] = fwhm
         det.meta['APERTURE'] = ape
