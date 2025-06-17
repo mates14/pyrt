@@ -294,26 +294,72 @@ def perform_photometric_fitting(data, options, metadata):
     # Perform initial fit with just the zeropoints
     fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
 
-    # Set up terms for stepwise regression
-    all_terms = []
-    if options.terms:
-        for term in parse_terms(options.terms):
-            all_terms.extend(expand_pseudo_term(term))
+    # Decision point: stepwise regression vs direct fitting
+    if options.no_stepwise:
+        # Direct fitting - fast path
+        print("Stepwise regression disabled - fitting terms directly")
 
-    # Perform bidirectional stepwise regression
-    selected_terms, final_wssrndf = perform_stepwise_regression(
-        data, ffit, all_terms, options, metadata
-    )
+        if options.terms:
+            # Parse and expand terms
+            direct_terms = []
+            for term in parse_terms(options.terms):
+                direct_terms.extend(expand_pseudo_term(term))
 
-    # Final fit with refined mask
-    data.use_mask('default')
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
-    photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
-    data.apply_mask(photo_mask, 'photometry')
-    data.use_mask('photometry')
-    # 1.
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
-    ffit.fit(fdata)
+            print(f"Fitting terms directly: {direct_terms}")
+
+            # Set up fitting object
+            ffit.fixall()
+
+            # Use initial values if available
+            if initial_values:
+                values = [initial_values.get(term, 1e-6) for term in direct_terms]
+            else:
+                values = [1e-6] * len(direct_terms)
+
+            ffit.fitterm(direct_terms, values=values)
+            selected_terms = direct_terms
+        else:
+            # No terms specified - just fit zeropoints
+            print("No terms specified - fitting zeropoints only")
+            selected_terms = []
+
+        # Single fit with outlier rejection
+        ffit.fit(fdata)
+
+        # Apply 5-sigma clipping and refit
+        residuals = ffit.residuals(ffit.fitvalues, fdata)
+        photo_mask = residuals < 5 * ffit.wssrndf
+        data.apply_mask(photo_mask, 'photometry')
+        data.use_mask('photometry')
+
+        fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2',
+                               'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
+        ffit.fit(fdata)
+
+    else:
+        # Stepwise regression - existing logic
+        print("Using stepwise regression")
+
+        # Set up terms for stepwise regression
+        all_terms = []
+        if options.terms:
+            for term in parse_terms(options.terms):
+                all_terms.extend(expand_pseudo_term(term))
+
+        # Perform bidirectional stepwise regression
+        selected_terms, final_wssrndf = perform_stepwise_regression(
+            data, ffit, all_terms, options, metadata
+        )
+
+        # Final fit with refined mask
+        data.use_mask('default')
+        fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
+        photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
+        data.apply_mask(photo_mask, 'photometry')
+        data.use_mask('photometry')
+        # 1.
+        fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
+        ffit.fit(fdata)
 
     print(f"Final fit variance: {ffit.wssrndf}")
     print(f"Selected terms: {selected_terms}")
