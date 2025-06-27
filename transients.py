@@ -332,12 +332,15 @@ for arg in options.files:
 
     if options.early:
         t0 = try_grbt0(det.meta['TARGET'])
-        if det.meta['CTIME']+det.meta['EXPTIME']/2-t0 > 43200:
+        if det.meta['JD']+det.meta['EXPTIME']/2.0/86400.0-t0 > 0.5:
             continue
 
-    if det.meta['CTIME'] < mintime: mintime = det.meta['CTIME']
-    if det.meta['CTIME']+det.meta['EXPTIME'] > maxtime: maxtime = det.meta['CTIME']+det.meta['EXPTIME']
-    imgtimes.append(det.meta['CTIME']+det.meta['EXPTIME']/2)
+    #if det.meta['CTIME'] < mintime: mintime = det.meta['CTIME']
+    #if det.meta['CTIME']+det.meta['EXPTIME'] > maxtime: maxtime = det.meta['CTIME']+det.meta['EXPTIME']
+    #imgtimes.append(det.meta['CTIME']+det.meta['EXPTIME']/2)
+    if det.meta['JD'] < mintime: mintime = det.meta['JD']
+    if det.meta['JD']+det.meta['EXPTIME']/86400.0 > maxtime: maxtime = det.meta['JD']+det.meta['EXPTIME']/86400.0
+    imgtimes.append(det.meta['JD']+det.meta['EXPTIME']/2.0/86400.0)
 
     # 2000.0 = 2451544.5
     # 2015.5 = 2457204.5 # reference epoch of Gaia DR2
@@ -461,7 +464,7 @@ for arg in options.files:
             candy.append(d["Y_IMAGE"])
             candra.append(d['ALPHA_J2000'])
             canddec.append(d['DELTA_J2000'])
-            candtime.append(d.meta['CTIME'])
+            candtime.append(d.meta['JD'])
             candexp.append(d.meta['EXPTIME'])
             candmag.append(d['MAG_CALIB'])
             canddmag.append(d['MAGERR_CALIB'])
@@ -573,7 +576,7 @@ for arg in options.files:
     if options.regs:
         some_file.close()
     cand = astropy.table.Table([candra,canddec,candtime,candexp,candmag,canddmag,candfw,np.int64(np.ones(len(candra)))], \
-        names=['ALPHA_J2000','DELTA_J2000','CTIME','EXPTIME','MAG_CALIB','MAGERR_CALIB','FWHM_IMAGE','NUM'])
+        names=['ALPHA_J2000','DELTA_J2000','JD','EXPTIME','MAG_CALIB','MAGERR_CALIB','FWHM_IMAGE','NUM'])
 #    print("file", os.path.splitext(arg)[0], len(cand), "candidates")
 
     if len(candra)>1:
@@ -637,6 +640,7 @@ def movement_residuals(fitvalues, data):
     t,pos = data
     return a0 + da*t - pos
 
+print("!!!! would mean all good, [PMV]=rejected by Movement (rMs or Pixel) > 3 sigma /  Variability < 2 sigma, [pmv]=less strict rejection")
 transtmp = []
 for oo,i in zip(mags,range(0,len(mags))):
         # full rejection if less than min_found
@@ -644,9 +648,10 @@ for oo,i in zip(mags,range(0,len(mags))):
         if num_found < options.min_found: continue
 
         status = list("!!!!") # start with good (movement in pixels, movement significant, magvar > 3)
-        t0=np.min(old['CTIME'])/2+np.max(old['CTIME'])/2
-        dt=np.max(old['CTIME'])-np.min(old['CTIME'])
-        x = oo['CTIME']-t0
+        nstat = 10.0 # (2 points for each property)
+        t0=np.min(old['JD'])/2+np.max(old['JD'])/2
+        dt=np.max(old['JD'])-np.min(old['JD'])
+        x = oo['JD']-t0
         y = oo["ALPHA_J2000"]
         z = oo["DELTA_J2000"]
 
@@ -668,35 +673,59 @@ for oo,i in zip(mags,range(0,len(mags))):
         sigma = np.sqrt(sd*sd+sa*sa*np.cos(d0*np.pi/180.0)*np.cos(d0*np.pi/180.0))
         if dpos > d.meta['PIXEL']: # PIXEL is in arcsec, so "is the movement more than a pixel during the sequence?"
             status[0] = "p"
+            nstat /= dpos
         if dpos > 2*d.meta['PIXEL']: # PIXEL is in arcsec, so "is the movement more than a pixel during the sequence?"
             status[0] = "P"
+            nstat /= dpos
         if dpos > 2*sigma: # is the movement significant?
             status[1] = "m"
+#            nstat -= 1
         if dpos > 3*sigma: # is the movement significant?
             status[1] = "M"
-        cov = np.linalg.inv(res.jac.T.dot(res.jac))
-        fiterrors = np.sqrt(np.diagonal(cov))
+#            nstat -= 2
+        try:
+            cov = np.linalg.inv(res.jac.T.dot(res.jac))
+            fiterrors = np.sqrt(np.diagonal(cov))
+        except:
+            cov=None
+            fiterrors=None
 
         mag0 = np.sum(oo['MAG_CALIB']*oo['MAGERR_CALIB'])/np.sum(oo['MAGERR_CALIB'])
         magvar = np.sqrt(np.average(np.power( (oo['MAG_CALIB']-mag0)/oo['MAGERR_CALIB'] ,2)))
-        if magvar < 3: status[2]="v"
-        if magvar < 2: status[2]="V"
+        if magvar < 3: 
+            status[2]="v"
+            nstat *= magvar**2
+        if magvar < 2: 
+            status[2]="V"
+            nstat *= magvar**2
+
+        variability=0
+        for mag1,mag2,err1,err2 in zip(oo['MAG_CALIB'][:-1],oo['MAG_CALIB'][1:],oo['MAGERR_CALIB'][:-1],oo['MAGERR_CALIB'][1:]):
+#            print (f"mag={mag1},{mag2},{err1},{err2}")
+            variability += abs(mag1-mag2)/np.sqrt(err1*err1+err2*err2)
+
+#        print(f"variability={variability}")
 
 # det.meta['FWHM'] musi byt nahrazeny prumerem snimku nebo lepe to udelat uplne jinak
 #        if fwhm_mean < det.meta['FWHM']/2 or fwhm_mean > det.meta['FWHM']*2:
 #            status[3]="F"
 #        if fwhm_mean < det.meta['FWHM']/1.5 or fwhm_mean > det.meta['FWHM']*1.5:
 #            status[3]="f"
+        variability = variability * num_found/(num_found-1) / magvar
+        nstat /= variability**2
 
-        print("".join(status), f"num:{num_found} mag:{mag0:.2f} magvar:{magvar:.1f}, mean_pos:{a0:.5f},{d0:.5f}, movement: {da*np.cos(d0*np.pi/180.0):.3f},{dd:.3f}, sigma: {sa*3600:.2f},{sd*3600:.2f} fwhm_mean: {fwhm_mean}")
-
-        newtrans = [np.int64(i),np.int64(num_found),a0,d0,da,dd,dpos,sa*3600,sd*3600,sigma*3600,mag0,magvar]
+        print("".join(status), f"num:{num_found} mag:{mag0:.2f} magvar:{magvar:.1f}/{variability:.1f}, mean_pos:{a0:.5f},{d0:.5f}, movement: {da*np.cos(d0*np.pi/180.0):.3f},{dd:.3f}, sigma: {sa*3600:.2f},{sd*3600:.2f} fwhm_mean: {fwhm_mean}")
+        newtrans = [np.int64(i),np.int64(num_found),a0,d0,da,dd,dpos,sa*3600,sd*3600,sigma*3600,mag0,magvar,nstat]
         transtmp.append(newtrans)
 
 trans=astropy.table.Table(np.array(transtmp),\
-        names=['INDEX','NUM','ALPHA_J2000','DELTA_J2000','ALPHA_MOV','DELTA_MOV','DPOS','ALPHA_SIG','DELTA_SIG','SIGMA','MAG_CALIB','MAG_VAR'],\
-        dtype=['int64','int64','float64','float64','float32','float32','float32','float32','float32','float32','float32','float32'])
+        names=['INDEX','NUM','ALPHA_J2000','DELTA_J2000','ALPHA_MOV','DELTA_MOV','DPOS','ALPHA_SIG','DELTA_SIG','SIGMA','MAG_CALIB','MAG_VAR','NSTAT'],\
+        dtype=['int64','int64','float64','float64','float32','float32','float32','float32','float32','float32','float32','float32','float32'])
+print("*** TRANS START ***")
+trans.write("transients.ecsv", format='ascii.ecsv', overwrite=True)
 print(trans)
+print("*** TRANS END ***")
+
 
 print("In total",len(old),"positions considered.")
 
@@ -706,7 +735,7 @@ regfile = "transients.reg"
 some_file = open(regfile, "w+")
 some_file.write("# Region file format: DS9 version 4.1\nglobal color=green dashlist=8 3 width=3 font=\"helvetica 10 normal roman\" select=1 highlite=1 dash=0 fixed=0 edit=1 move=1 delete=1 include=1 source=1\nfk5\n")
 for oo in trans:
-#    print(oo)
+#    printfloat32)
     print("any  ra/dec %.7f %.7f num: %.0f"%(np.average(oo["ALPHA_J2000"]), np.average(oo["DELTA_J2000"]),len(mags[oo['INDEX']])))
     some_file.write("circle(%.7f,%.7f,%.3f\") # color=blue\n"%(np.average(oo["ALPHA_J2000"]), np.average(oo["DELTA_J2000"]),5*idlimit*d.meta['PIXEL']))
     if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 2:
@@ -718,10 +747,16 @@ for oo in trans:
 some_file.close()
 
 # GNUPLOT LIGHTCURVE
-t0 = try_grbt0(d.meta['TARGET'])
+try:
+    t0 = try_grbt0(d.meta['TARGET'])
+except:
+    t0=0
 some_file = open("transients.gp", "w+")
 some_file.write("set yrange reverse\n")
-some_file.write(f"set title \"{try_tarname(d.meta['TARGET'])}\"\n")
+try:
+    some_file.write(f"set title \"{try_tarname(d.meta['TARGET'])}\"\n")
+except:
+    some_file.write(f"set title \"Transients\"\n")
 some_file.write("set terminal png\n")
 some_file.write("set logs x\n")
 
@@ -736,21 +771,26 @@ for j in imgtimes:
         some_file.write(f" \"\" {j-t0},")
 some_file.write(")\n")
 
-some_file.write(f"set output \"transients-{d.meta['TARGET']}.png\"\n")
+try:
+    some_file.write(f"set output \"transients-{d.meta['TARGET']}.png\"\n")
+except:
+    some_file.write(f"set output \"transients.png\"\n")
 some_file.write(f"plot [{mintime-t0:.3f}:{maxtime-t0:.3f}] \\\n")
 
 j=0;
 for oo in trans:
-    if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 3:
+#    if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 3:
+    if oo['NSTAT']>3.5:
         some_file.write(f"\"-\" u ($1+$3/2.):2:($3/2.0):4 w xye pt 7 t \"a:{oo['ALPHA_J2000']:.5f} d:{oo['DELTA_J2000']:.5f} v={oo['MAG_VAR']:.1f} s={oo['SIGMA']:.2f} p={oo['DPOS']/d.meta['PIXEL']:.2f}\",\\\n")
         j+=1
 some_file.write("\n")
 
 for oo in trans:
-    if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 3:
+    #if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 3:
+    if oo['NSTAT'] > 3.5: # at least 4 points out of 6
         for mag in mags[oo['INDEX']]:
             some_file.write("%ld %.3f %d %.3f\n"%(\
-                mag['CTIME']-t0,\
+                mag['JD']-t0,\
                 mag['MAG_CALIB'],\
                 mag['EXPTIME'],\
                 mag['MAGERR_CALIB']))

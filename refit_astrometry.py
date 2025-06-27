@@ -123,12 +123,20 @@ def setup_initial_wcs(zpntest, meta):
             keys_invalid = True
 
     if keys_invalid:
+        try: # CROTA1 & 2 are optional, may be left to default=0 in stacked images
+            crota1 = meta['CROTA1']*np.pi/180
+        except:
+            crota1 = 0
+        try:
+            crota2 = meta['CROTA2']*np.pi/180
+        except:
+            crota2 = 0
         try:
             # Try to interpret old-fashioned WCS with CROTA
-            zpntest.fitterm(['CD1_1'], [meta['CDELT1'] * np.cos(meta['CROTA1']*np.pi/180)])
-            zpntest.fitterm(['CD1_2'], [meta['CDELT1'] * np.sin(meta['CROTA1']*np.pi/180)])
-            zpntest.fitterm(['CD2_1'], [meta['CDELT2'] * -np.sin(meta['CROTA2']*np.pi/180)])
-            zpntest.fitterm(['CD2_2'], [meta['CDELT2'] * np.cos(meta['CROTA2']*np.pi/180)])
+            zpntest.fitterm(['CD1_1'], [meta['CDELT1'] * np.cos(crota1)])
+            zpntest.fitterm(['CD1_2'], [meta['CDELT1'] * np.sin(crota1)])
+            zpntest.fitterm(['CD2_1'], [meta['CDELT2'] * -np.sin(crota2)])
+            zpntest.fitterm(['CD2_2'], [meta['CDELT2'] * np.cos(crota2)])
             keys_invalid = False
         except KeyError:
             keys_invalid = True
