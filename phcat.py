@@ -131,7 +131,7 @@ def run_iraf(cmdfile: str) -> bool:
         print(f"Error output: {e.stderr}")
         return False
 
-def call_iraf(file, det):
+def call_iraf(file, det, aperture=None):
     """call iraf/digiphot/daophot/phot on a file"""
     base = os.path.splitext(file)[0]
 
@@ -152,15 +152,18 @@ def call_iraf(file, det):
     # once the stars are too sharp, the sub-sqrt will make the transition
     # smooth so when comparing various images, there is no sharp edge between
     # groups
-    ape = np.sqrt(fwhm*fwhm+1.5*1.5)
+    ape = aperture or np.sqrt(fwhm*fwhm+1.5*1.5)
     danu = 1.5*ape
     anu = 2.0*ape
 
     # D50 Andor gain and rnoise, this stuff needs to be seriously improved
     try: ncombine = astropy.io.fits.getval(file, "NCOMBINE")
     except: ncombine = 1.0
-    epadu = 0.81 * ncombine
+    try: epadu = astropy.io.fits.getval(file, "GAIN")
+    except: epadu = 0.81 * ncombine
+    
     rnoise = 4.63 / np.sqrt(ncombine)
+    print(f"ape={ape} anu={anu} danu={danu}")
 
     script = f"""noao
 digiphot
@@ -223,6 +226,8 @@ def process_photometry(file: str,
     if not np.isnan(new_fwhm):
         det = call_sextractor(file, new_fwhm, bg=background)
 
+    print("W/H:",det.meta['IMAGEW'],det.meta['IMAGEH'])
+
     # Get target coordinates and prepare to track its ID
     orix, oriy = try_target(file)
     target_sextractor_id = None
@@ -266,7 +271,7 @@ def process_photometry(file: str,
     if noiraf:
         tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
     else:
-        mag, fwhm, ape = call_iraf(file, det)
+        mag, fwhm, ape = call_iraf(file, det, aperture=aperture)
 
         det.meta['FWHM'] = fwhm
         det.meta['APERTURE'] = ape

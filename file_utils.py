@@ -27,12 +27,12 @@ def try_sex(arg, verbose=False):
         return None, None
 
 # remove_meta must be True for compatibility reasons
-def try_ecsv(arg, verbose=False, remove_meta=True):
+def try_ecsv(arg, verbose=False, remove_meta=False):
     """Try to open arg as a sextractor file, exit cleanly if it does not happen"""
     try:
         det = astropy.io.ascii.read(arg, format='ecsv')
         if remove_meta:
-            det.meta=None # certainly contains interesting info, but breaks the code
+            det.meta=None # certainly contains interesting info, but used to break the code
         logging.info(f"Argument {arg} is an ascii/ecsv catalog")
         return arg, det
     except (FileNotFoundError,OSError,UnicodeDecodeError):
@@ -58,7 +58,7 @@ def try_det(arg, verbose=False):
 import astropy.table
 
 def write_region_file(catalog: Table, filename: str,
-                      color: str = "red", shape: str = "circle", 
+                      color: str = "red", shape: str = "circle",
                       radius: float = 3.0, coord_system: str = "fk5") -> None:
     """
     Write a DS9 region file based on the provided catalog.

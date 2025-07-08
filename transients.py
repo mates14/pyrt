@@ -26,7 +26,7 @@ from sklearn.neighbors import KDTree,BallTree
 import zpnfit
 import fotfit
 
-def try_grbt0(target): 
+def try_grbt0(target):
     """tries to run a command that gets T0 of a GRB from the stars DB"""
     try:
             some_file = "tmp%d.grb0"%(os.getppid())
@@ -39,7 +39,7 @@ def try_grbt0(target):
     except:
         return 0
 
-def try_tarname(target): 
+def try_tarname(target):
     """tries to run a command that gets TARGET name from the stars DB"""
     try:
             some_file = "tmp%d.tmp"%(os.getppid())
@@ -155,7 +155,7 @@ def get_usno(rasc, decl, width=0.25, height=0.25, mlim=17):
 # get another catalog from a file
 def get_catalog(filename):
 
-    cat = astropy.table.Table() 
+    cat = astropy.table.Table()
     catalog = astropy.io.ascii.read(filename, format='ecsv')
 
     cat.add_column(astropy.table.Column(name='radeg', dtype=np.float64, \
@@ -236,41 +236,44 @@ def simple_color_model(line, data):
     mag,color1,color2,color3,color4=data
     #print(data)
     model=0
-    for chunk in line.split(","):
-        term,strvalue = chunk.split("=")
-        if term == 'FILTER': continue
-        value=np.float64(strvalue)
-       # print(term,value)
-        if term[0] == 'P':
-            pterm = value; n=1;
-            for a in term[1:]:
-                if isnumber(a): n = int(a)
-                if a == 'C': pterm *= np.power(color1, n); n=1;
-                if a == 'D': pterm *= np.power(color2, n); n=1;
-                if a == 'E': pterm *= np.power(color3, n); n=1;
-                if a == 'F': pterm *= np.power(color4, n); n=1;
-                if a == 'X' or a == 'Y' or a == 'R': pterm = 0;
-            model += pterm 
-        if term == 'XC': 
-            if value < 0: bval = value * color1; 
-            if value > 0 and value <= 1: bval = value * color2; 
-            if value > 1: bval = (value-1) * color3 + color2; 
-        #    print("***",value,bval,color1,color2,color3)
-            model += bval;
+    try:
+        for chunk in line.split(","):
+            term,strvalue = chunk.split("=")
+            if term == 'FILTER': continue
+            value=np.float64(strvalue)
+           # print(term,value)
+            if term[0] == 'P':
+                pterm = value; n=1;
+                for a in term[1:]:
+                    if isnumber(a): n = int(a)
+                    if a == 'C': pterm *= np.power(color1, n); n=1;
+                    if a == 'D': pterm *= np.power(color2, n); n=1;
+                    if a == 'E': pterm *= np.power(color3, n); n=1;
+                    if a == 'F': pterm *= np.power(color4, n); n=1;
+                    if a == 'X' or a == 'Y' or a == 'R': pterm = 0;
+                model += pterm
+            if term == 'XC':
+                if value < 0: bval = value * color1;
+                if value > 0 and value <= 1: bval = value * color2;
+                if value > 1: bval = (value-1) * color3 + color2;
+            #    print("***",value,bval,color1,color2,color3)
+                model += bval;
+    except ValueError:
+        model=0
     return mag+model
 
 def open_ecsv_file(arg, verbose=True):
     """Opens a file if possible, given .ecsv or .fits"""
     det = None
-    
+
     fn = os.path.splitext(arg)[0] + ".ecsv"
-    
+
     try:
         det = astropy.table.Table.read(fn, format="ascii.ecsv")
         det.meta['filename'] = fn;
         return det
     except:
-        if verbose: print("%s did not open as an ecsv table"%(fn)); 
+        if verbose: print("%s did not open as an ecsv table"%(fn));
         det = None
 
     return det
@@ -281,13 +284,13 @@ imgtimes=[]
 old = []
 mags = []
 imgno = 0
-            
+
 if options.frame is not None: frame=options.frame
 else: frame=10
-        
+
 if options.siglim is not None: siglim = options.siglim
 else: siglim = 5
-        
+
 
 for arg in options.files:
 
@@ -304,8 +307,8 @@ for arg in options.files:
     canddmag=[]
     candfw=[]
 
-    det = open_ecsv_file(arg, verbose=options.verbose) 
-    if det is None: 
+    det = open_ecsv_file(arg, verbose=options.verbose)
+    if det is None:
         if options.verbose: print("Cannot handle %s Skipping."%(arg))
         continue
     if options.verbose: print("Input file:", det.meta['filename'])
@@ -329,14 +332,17 @@ for arg in options.files:
 
     if options.early:
         t0 = try_grbt0(det.meta['TARGET'])
-        if det.meta['CTIME']+det.meta['EXPTIME']/2-t0 > 43200:
+        if det.meta['JD']+det.meta['EXPTIME']/2.0/86400.0-t0 > 0.5:
             continue
 
-    if det.meta['CTIME'] < mintime: mintime = det.meta['CTIME']
-    if det.meta['CTIME']+det.meta['EXPTIME'] > maxtime: maxtime = det.meta['CTIME']+det.meta['EXPTIME']
-    imgtimes.append(det.meta['CTIME']+det.meta['EXPTIME']/2)
+    #if det.meta['CTIME'] < mintime: mintime = det.meta['CTIME']
+    #if det.meta['CTIME']+det.meta['EXPTIME'] > maxtime: maxtime = det.meta['CTIME']+det.meta['EXPTIME']
+    #imgtimes.append(det.meta['CTIME']+det.meta['EXPTIME']/2)
+    if det.meta['JD'] < mintime: mintime = det.meta['JD']
+    if det.meta['JD']+det.meta['EXPTIME']/86400.0 > maxtime: maxtime = det.meta['JD']+det.meta['EXPTIME']/86400.0
+    imgtimes.append(det.meta['JD']+det.meta['EXPTIME']/2.0/86400.0)
 
-    # 2000.0 = 2451544.5 
+    # 2000.0 = 2451544.5
     # 2015.5 = 2457204.5 # reference epoch of Gaia DR2
     epoch = ( det.meta['JD'] - 2457204.5 ) / 365.2425 # Epoch for PM correction
 
@@ -352,7 +358,7 @@ for arg in options.files:
     if options.verbose: print("Catalog search took %.3fs"%(time.time()-start))
 
     if options.idlimit: idlimit = options.idlimit
-    else: 
+    else:
         try:
             idlimit = det.meta['FWHM']
             if options.verbose: print("idlimit set to fits header FWHM value of %f pixels."%(idlimit))
@@ -376,8 +382,8 @@ for arg in options.files:
     except:
         if options.verbose: print("Astrometry of %s sucks! Skipping."%(arg))
         continue
-    
-    if len(X) < 1: 
+
+    if len(X) < 1:
         print("len(X)<1, wtf!? %d"%(len(x)))
         continue
     tree = KDTree(X)
@@ -427,7 +433,7 @@ for arg in options.files:
                 np.float64(mag1-mag2),
                 np.float64(mag2-mag3),
                 np.float64(mag3-mag4)))
-            
+
             mpar = (magcat-cm-magdet)/np.sqrt(errdet*errdet+0.01*0.01)
             if np.abs(mpar) < bestmatch:
                 bestmatch = np.abs(mpar)
@@ -435,16 +441,22 @@ for arg in options.files:
                 match = mpar
                 mdiff = np.abs(magcat-cm-magdet)
 
-        # pet moznosti: 
+        # pet moznosti:
         # 1. objekt je v katalogu a neni detekovan (timto zpusobem to nedam)
-       
+
         # 2. objekt neni v katalogu (= kandidat)
         if bestmag == 0 and errdet < 1.091/siglim:
-#            print("!",bestmag,magdet,errdet)
+#            print("!",bestmag,magdet,errdet,d["FWHM_IMAGE"]/det.meta['FWHM'] )
 #            print("!",i)
             if options.regs and (not options.usno) and d['MAG_CALIB'] < options.maglim:
-                some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
-    
+                print("#",d["FWHM_IMAGE"],det.meta['FWHM'])
+                if d["FWHM_IMAGE"] > 1.5*det.meta['FWHM'] or d["FWHM_IMAGE"] < 1.5*det.meta['FWHM']:
+#                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=brown\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
+                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=brown\n"%(d["X_IMAGE"], d["Y_IMAGE"],10*d["FWHM_IMAGE"]))
+                else:
+#                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
+                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(d["X_IMAGE"], d["Y_IMAGE"],10*d["FWHM_IMAGE"]))
+
             if d['X_IMAGE'] < frame or d['Y_IMAGE']<frame or d['X_IMAGE'] > d.meta['IMGAXIS1']-frame or d['Y_IMAGE']>d.meta['IMGAXIS2']-frame:
                 continue
 
@@ -452,7 +464,7 @@ for arg in options.files:
             candy.append(d["Y_IMAGE"])
             candra.append(d['ALPHA_J2000'])
             canddec.append(d['DELTA_J2000'])
-            candtime.append(d.meta['CTIME'])
+            candtime.append(d.meta['JD'])
             candexp.append(d.meta['EXPTIME'])
             candmag.append(d['MAG_CALIB'])
             canddmag.append(d['MAGERR_CALIB'])
@@ -464,56 +476,68 @@ for arg in options.files:
 #            print("+",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet,mdiff)
             if options.regs:
                 some_file.write("circle(%.7f,%.7f,%.3f\") # color=yellow\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
-            
+
         # 4. objekt je slabsi nez v katalogu (= zajimavost)
         if match is not None and match < -siglim and errdet<1.091/siglim and mdiff>0.05:
 #            print("-",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet,mdiff)
             if options.regs:
                 some_file.write("circle(%.7f,%.7f,%.3f\") # color=blue\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
-        
+
         # 5. objekt odpovida katalogu (nic)
         if match is not None and (( match > -siglim and (bestmag-magdet)/errdet < siglim) or mdiff<0.05 ) and errdet<1.091/siglim:
             if options.regs:
                 some_file.write("circle(%.7f,%.7f,%.3f\") # color=green\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
     #        print("o",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet)
-    
+
     print('Comparison to Atlas produced ',len(candx),' candidates')
 
     if options.usno and len(candy)>0:
+        usno = get_usno(det.meta['CTRRA'], det.meta['CTRDEC'],
+                       width=enlarge*det.meta['FIELD'],
+                       height=enlarge*det.meta['FIELD'],
+                       mlim=options.maglim)
 
-        #usno = get_usno(det.meta['CTRRA'], det.meta['CTRDEC'], width=enlarge*det.meta['FIELD'], height=enlarge*det.meta['FIELD'], mlim=det.meta['MAGLIMIT']+1.0)
-        usno = get_usno(det.meta['CTRRA'], det.meta['CTRDEC'], width=enlarge*det.meta['FIELD'], height=enlarge*det.meta['FIELD'], mlim=options.maglim)
+        # Store original candidates
+        orig_candidates = list(zip(candx, candy, candra, canddec, candtime,
+                                 candexp, candmag, canddmag, candfw))
 
-        for uphase,umaglim,uidlim,unumber in zip(
-            ['simple','double','bright'], 
-            #[det.meta['MAGLIMIT']+1.0, det.meta['MAGLIMIT'], det.meta['MAGLIMIT']-8], 
-            [options.maglim, options.maglim -1, options.maglim-9], 
-            #[idlimit, 4, 20], 
-            [idlimit, 4, 10], 
-            [0,1,0]):
-        
-            if len(candy)<1: break
+        # Track killed candidates for reg file
+        killed_candidates = set()  # Store indices of killed candidates
 
-            cand2x=[]; cand2y=[]; cand2ra=[]; cand2dec=[]; cand2time=[]; cand2exp=[]; cand2mag=[]; cand2dmag=[]; cand2fw=[]
+        # Define USNO filtering phases
+        usno_phases = [
+            ('simple', options.maglim, idlimit, 0),
+            ('double', options.maglim - 1, 4, 1),
+            ('bright', options.maglim - 9, 10, 0)
+        ]
 
-            tree_u = KDTree( np.array(imgwcs.all_world2pix(usno['radeg'][usno['R1']<umaglim], usno['decdeg'][usno['R1']<umaglim],1)).transpose() )
+        # Run through each USNO filtering phase
+        for uphase, umaglim, uidlim, unumber in usno_phases:
+            if len(candy) < 1:
+                break
+
+            # Create USNO KDTree for this phase
+            tree_u = KDTree(np.array(imgwcs.all_world2pix(
+                usno['radeg'][usno['R1'] < umaglim],
+                usno['decdeg'][usno['R1'] < umaglim],
+                1)).transpose())
+
             Y = np.array([candx, candy]).transpose()
+            nearest_ind_u, nearest_dist_u = tree_u.query_radius(
+                Y, r=uidlim, return_distance=True, count_only=False)
 
-            nearest_ind_u, nearest_dist_u = tree_u.query_radius(Y, r=uidlim, return_distance=True, count_only=False)
+            # Filter candidates
+            cand2x = []; cand2y = []; cand2ra = []; cand2dec = []
+            cand2time = []; cand2exp = []; cand2mag = []
+            cand2dmag = []; cand2fw = []
 
             live = 0; kill = 0
-            for i in range(0,len(candx)):
-                #print(i,nearest_ind_u[i], nearest_dist_u[i])
-                if len(nearest_ind_u[i]>0):
-                    if options.regs:
-                        some_file.write("circle(%.7f,%.7f,%.3f\") # color=cyan\n"%(candx[i], candy[i],1.5*idlimit*d.meta['PIXEL']))
-                    kill+=1
-    #                print("index",i,"killed by USNO")
+            for i in range(0, len(candx)):
+                if len(nearest_ind_u[i]) > 0:
+                    killed_candidates.add(i)
+                    kill += 1
                 else:
-                    if options.regs and d['MAG_CALIB'] < options.maglim:
-                        some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(candx[i], candy[i],1.5*idlimit*d.meta['PIXEL']))
-                    live+=1
-    #                print("index",i,"stays alive",)
+                    live += 1
                     cand2x.append(candx[i])
                     cand2y.append(candy[i])
                     cand2ra.append(candra[i])
@@ -526,12 +550,33 @@ for arg in options.files:
 
             print(f'USNO {uphase} left {live} candidates, killed {kill}')
 
-            candx=cand2x; candy=cand2y; candra=cand2ra; canddec=cand2dec; candtime=cand2time; candexp=cand2exp; candmag=cand2mag; canddmag=cand2dmag; candfw=cand2fw
-                   
+            # Update candidate lists for next phase
+            candx = cand2x; candy = cand2y; candra = cand2ra
+            canddec = cand2dec; candtime = cand2time; candexp = cand2exp
+            candmag = cand2mag; canddmag = cand2dmag; candfw = cand2fw
+
+        if options.regs:
+            fwhm_margin = 1.5  # Define FWHM margin
+
+            for i, (x, y, _, _, _, _, mag, _, fw) in enumerate(orig_candidates):
+                if mag < options.maglim:
+                    if i in killed_candidates:
+                        # Write killed candidates in cyan
+                        some_file.write(f"circle({x:.7f},{y:.7f},{1.5*idlimit*d.meta['PIXEL']}\") # color=cyan\n")
+                    else:
+                        # Check FWHM ratio for surviving candidates
+                        fwhm_ratio = fw / det.meta['FWHM']
+                        if 1/fwhm_margin < fwhm_ratio < fwhm_margin:
+                            # Normal FWHM ratio - use red
+                            some_file.write(f"circle({x:.7f},{y:.7f},{1.5*idlimit*d.meta['PIXEL']}\") # color=red\n")
+                        else:
+                            # Abnormal FWHM ratio - use magenta
+                            some_file.write(f"circle({x:.7f},{y:.7f},{1.5*idlimit*d.meta['PIXEL']}\") # color=magenta\n")
+
     if options.regs:
         some_file.close()
     cand = astropy.table.Table([candra,canddec,candtime,candexp,candmag,canddmag,candfw,np.int64(np.ones(len(candra)))], \
-        names=['ALPHA_J2000','DELTA_J2000','CTIME','EXPTIME','MAG_CALIB','MAGERR_CALIB','FWHM_IMAGE','NUM'])
+        names=['ALPHA_J2000','DELTA_J2000','JD','EXPTIME','MAG_CALIB','MAGERR_CALIB','FWHM_IMAGE','NUM'])
 #    print("file", os.path.splitext(arg)[0], len(cand), "candidates")
 
     if len(candra)>1:
@@ -561,7 +606,7 @@ for arg in options.files:
             r=d.meta['PIXEL']*idlimit/3600.0*np.pi/180*2,\
             return_distance=True, count_only=False)
 
-        for bu,ba,bo in zip(cand, nearest_ind, nearest_dist): 
+        for bu,ba,bo in zip(cand, nearest_ind, nearest_dist):
             if len(ba)>0:
                 # wrap-around non-safe! (and does not work!)
 #                ora=old['ALPHA_J2000'][ba[0]]
@@ -573,7 +618,7 @@ for arg in options.files:
             else: # this is a new position
                 old.add_row(bu)
                 mags.append(astropy.table.Table(bu))
-                
+
     imgno+=1
 
 if len(old) < 1:
@@ -591,20 +636,22 @@ if j < 1:
 # HERE TRANSIENTS ARE IDENTIFIED, TIME TO CLASSIFY
 
 def movement_residuals(fitvalues, data):
-    a0,da=fitvalues 
+    a0,da=fitvalues
     t,pos = data
     return a0 + da*t - pos
-      
+
+print("!!!! would mean all good, [PMV]=rejected by Movement (rMs or Pixel) > 3 sigma /  Variability < 2 sigma, [pmv]=less strict rejection")
 transtmp = []
 for oo,i in zip(mags,range(0,len(mags))):
         # full rejection if less than min_found
-        num_found = len(oo) 
+        num_found = len(oo)
         if num_found < options.min_found: continue
 
-        status = "!!!" # start with good
-        t0=np.min(old['CTIME'])/2+np.max(old['CTIME'])/2
-        dt=np.max(old['CTIME'])-np.min(old['CTIME'])
-        x = oo['CTIME']-t0
+        status = list("!!!!") # start with good (movement in pixels, movement significant, magvar > 3)
+        nstat = 10.0 # (2 points for each property)
+        t0=np.min(old['JD'])/2+np.max(old['JD'])/2
+        dt=np.max(old['JD'])-np.min(old['JD'])
+        x = oo['JD']-t0
         y = oo["ALPHA_J2000"]
         z = oo["DELTA_J2000"]
 
@@ -623,29 +670,62 @@ for oo,i in zip(mags,range(0,len(mags))):
         dd=res.x[1]*3600*3600 # -> arcsec/h
         sd = np.median(np.abs(movement_residuals(res.x, data))) / 0.67
         dpos = np.sqrt(dd*dd+da*da*np.cos(d0*np.pi/180.0)*np.cos(d0*np.pi/180.0))* (dt/3600.0)
-        sigma = np.sqrt(sd*sd+sa*sa*np.cos(d0*np.pi/180.0)*np.cos(d0*np.pi/180.0)) 
+        sigma = np.sqrt(sd*sd+sa*sa*np.cos(d0*np.pi/180.0)*np.cos(d0*np.pi/180.0))
         if dpos > d.meta['PIXEL']: # PIXEL is in arcsec, so "is the movement more than a pixel during the sequence?"
-            status = "*  "
-        cov = np.linalg.inv(res.jac.T.dot(res.jac))
-        fiterrors = np.sqrt(np.diagonal(cov))
+            status[0] = "p"
+            nstat /= dpos
+        if dpos > 2*d.meta['PIXEL']: # PIXEL is in arcsec, so "is the movement more than a pixel during the sequence?"
+            status[0] = "P"
+            nstat /= dpos
+        if dpos > 2*sigma: # is the movement significant?
+            status[1] = "m"
+#            nstat -= 1
+        if dpos > 3*sigma: # is the movement significant?
+            status[1] = "M"
+#            nstat -= 2
+        try:
+            cov = np.linalg.inv(res.jac.T.dot(res.jac))
+            fiterrors = np.sqrt(np.diagonal(cov))
+        except:
+            cov=None
+            fiterrors=None
 
         mag0 = np.sum(oo['MAG_CALIB']*oo['MAGERR_CALIB'])/np.sum(oo['MAGERR_CALIB'])
         magvar = np.sqrt(np.average(np.power( (oo['MAG_CALIB']-mag0)/oo['MAGERR_CALIB'] ,2)))
-        if magvar < 3:
-            if status == "*  ":
-                status="*- "
-            else:
-                status = " - "
+        if magvar < 3: 
+            status[2]="v"
+            nstat *= magvar**2
+        if magvar < 2: 
+            status[2]="V"
+            nstat *= magvar**2
 
-        print(status, f"num:{num_found} mag:{mag0:.2f} magvar:{magvar:.1f}, mean_pos:{a0:.5f},{d0:.5f}, movement: {da*np.cos(d0*np.pi/180.0):.3f},{dd:.3f}, sigma: {sa*3600:.2f},{sd*3600:.2f} fwhm_mean: {fwhm_mean}")
+        variability=0
+        for mag1,mag2,err1,err2 in zip(oo['MAG_CALIB'][:-1],oo['MAG_CALIB'][1:],oo['MAGERR_CALIB'][:-1],oo['MAGERR_CALIB'][1:]):
+#            print (f"mag={mag1},{mag2},{err1},{err2}")
+            variability += abs(mag1-mag2)/np.sqrt(err1*err1+err2*err2)
 
-        newtrans = [np.int64(i),np.int64(num_found),a0,d0,da,dd,dpos,sa*3600,sd*3600,sigma*3600,mag0,magvar]
+#        print(f"variability={variability}")
+
+# det.meta['FWHM'] musi byt nahrazeny prumerem snimku nebo lepe to udelat uplne jinak
+#        if fwhm_mean < det.meta['FWHM']/2 or fwhm_mean > det.meta['FWHM']*2:
+#            status[3]="F"
+#        if fwhm_mean < det.meta['FWHM']/1.5 or fwhm_mean > det.meta['FWHM']*1.5:
+#            status[3]="f"
+        variability = variability * num_found/(num_found-1) / magvar
+        nstat /= variability**2
+
+        print("".join(status), f"num:{num_found} mag:{mag0:.2f} magvar:{magvar:.1f}/{variability:.1f}, mean_pos:{a0:.5f},{d0:.5f}, movement: {da*np.cos(d0*np.pi/180.0):.3f},{dd:.3f}, sigma: {sa*3600:.2f},{sd*3600:.2f} fwhm_mean: {fwhm_mean}")
+        newtrans = [np.int64(i),np.int64(num_found),a0,d0,da,dd,dpos,sa*3600,sd*3600,sigma*3600,mag0,magvar,nstat]
         transtmp.append(newtrans)
 
 trans=astropy.table.Table(np.array(transtmp),\
-        names=['INDEX','NUM','ALPHA_J2000','DELTA_J2000','ALPHA_MOV','DELTA_MOV','DPOS','ALPHA_SIG','DELTA_SIG','SIGMA','MAG_CALIB','MAG_VAR'],\
-        dtype=['int64','int64','float64','float64','float32','float32','float32','float32','float32','float32','float32','float32'])
+        names=['INDEX','NUM','ALPHA_J2000','DELTA_J2000','ALPHA_MOV','DELTA_MOV','DPOS','ALPHA_SIG','DELTA_SIG','SIGMA','MAG_CALIB','MAG_VAR','NSTAT'],\
+        dtype=['int64','int64','float64','float64','float32','float32','float32','float32','float32','float32','float32','float32','float32'])
+print("*** TRANS START ***")
+trans.write("transients.ecsv", format='ascii.ecsv', overwrite=True)
 print(trans)
+print("*** TRANS END ***")
+
 
 print("In total",len(old),"positions considered.")
 
@@ -655,7 +735,7 @@ regfile = "transients.reg"
 some_file = open(regfile, "w+")
 some_file.write("# Region file format: DS9 version 4.1\nglobal color=green dashlist=8 3 width=3 font=\"helvetica 10 normal roman\" select=1 highlite=1 dash=0 fixed=0 edit=1 move=1 delete=1 include=1 source=1\nfk5\n")
 for oo in trans:
-#    print(oo)
+#    printfloat32)
     print("any  ra/dec %.7f %.7f num: %.0f"%(np.average(oo["ALPHA_J2000"]), np.average(oo["DELTA_J2000"]),len(mags[oo['INDEX']])))
     some_file.write("circle(%.7f,%.7f,%.3f\") # color=blue\n"%(np.average(oo["ALPHA_J2000"]), np.average(oo["DELTA_J2000"]),5*idlimit*d.meta['PIXEL']))
     if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 2:
@@ -667,10 +747,16 @@ for oo in trans:
 some_file.close()
 
 # GNUPLOT LIGHTCURVE
-t0 = try_grbt0(d.meta['TARGET'])
+try:
+    t0 = try_grbt0(d.meta['TARGET'])
+except:
+    t0=0
 some_file = open("transients.gp", "w+")
 some_file.write("set yrange reverse\n")
-some_file.write(f"set title \"{try_tarname(d.meta['TARGET'])}\"\n")
+try:
+    some_file.write(f"set title \"{try_tarname(d.meta['TARGET'])}\"\n")
+except:
+    some_file.write(f"set title \"Transients\"\n")
 some_file.write("set terminal png\n")
 some_file.write("set logs x\n")
 
@@ -685,28 +771,33 @@ for j in imgtimes:
         some_file.write(f" \"\" {j-t0},")
 some_file.write(")\n")
 
-some_file.write(f"set output \"transients-{d.meta['TARGET']}.png\"\n")
+try:
+    some_file.write(f"set output \"transients-{d.meta['TARGET']}.png\"\n")
+except:
+    some_file.write(f"set output \"transients.png\"\n")
 some_file.write(f"plot [{mintime-t0:.3f}:{maxtime-t0:.3f}] \\\n")
 
 j=0;
 for oo in trans:
-    if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 2:
+#    if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 3:
+    if oo['NSTAT']>3.5:
         some_file.write(f"\"-\" u ($1+$3/2.):2:($3/2.0):4 w xye pt 7 t \"a:{oo['ALPHA_J2000']:.5f} d:{oo['DELTA_J2000']:.5f} v={oo['MAG_VAR']:.1f} s={oo['SIGMA']:.2f} p={oo['DPOS']/d.meta['PIXEL']:.2f}\",\\\n")
         j+=1
 some_file.write("\n")
 
 for oo in trans:
-    if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 2:
+    #if oo['SIGMA']<1.5 and oo['DPOS']/d.meta['PIXEL']<1.5 and oo['MAG_VAR'] > 3:
+    if oo['NSTAT'] > 3.5: # at least 4 points out of 6
         for mag in mags[oo['INDEX']]:
             some_file.write("%ld %.3f %d %.3f\n"%(\
-                mag['CTIME']-t0,\
+                mag['JD']-t0,\
                 mag['MAG_CALIB'],\
                 mag['EXPTIME'],\
                 mag['MAGERR_CALIB']))
         some_file.write("e\n")
 
 some_file.close()
-if j>0: 
+if j>0:
     os.system("gnuplot < transients.gp")
 #os.system("rm transients.gp")
 # FINISHED GNUPLOT

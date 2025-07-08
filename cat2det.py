@@ -214,7 +214,8 @@ def open_files(arg, verbose=False):
     if img is None: imgf, img = try_img(os.path.splitext(arg)[0] + ".fits", verbose)
     if det is None: detf, det = try_sex(arg + ".xat", verbose)
     if det is None: detf, det = try_sex(os.path.splitext(arg)[0] + ".cat", verbose)
-    if det is None: detf, det = try_ecsv(os.path.splitext(arg)[0] + ".cat", verbose)
+    if det is None:
+        detf, det = try_ecsv(os.path.splitext(arg)[0] + ".cat", verbose)
 
     if det is None: # os.system does not raise an exception if it fails
         #cmd = f"sscat-noradec {arg}"
@@ -358,7 +359,10 @@ def process_detections(det: astropy.table.Table,
         print("Error: Bad astrometry, cannot continue")
         return None
 
-    if verbose: print(f"Target is {det.meta['OBJECT']} at ra:{det.meta['OBJRA']} dec:{det.meta['OBJDEC']} -> x:{tmp[0]} y:{tmp[1]}")
+
+    if verbose:
+        with suppress(KeyError):
+            print(f"Target is {det.meta['OBJECT']} at ra:{det.meta['OBJRA']} dec:{det.meta['OBJDEC']} -> x:{tmp[0]} y:{tmp[1]}")
 
     det.meta['CTRX'] = c['NAXIS1']/2
     det.meta['CTRY'] = c['NAXIS2']/2
@@ -375,7 +379,12 @@ def process_detections(det: astropy.table.Table,
     pixel = SkyCoord(rd[2][0]*astropy.units.deg, rd[2][1]*astropy.units.deg, frame='fk5').separation(center)
     field = center.separation(corner)
     if verbose:
-        print(f"Field size: {field.deg:.2f}°, Pixel size: {pixel.arcsec:.2f}\"")
+        if field.deg > 10:
+            print(f"Diagonal field size: {field.deg*2:.1f}°, Pixel size: {pixel.arcsec:.3f}\"")
+        elif field.deg > 1:
+            print(f"Diagonal field size: {field.deg*2:.2f}°, Pixel size: {pixel.arcsec:.3f}\"")
+        else:
+            print(f"Diagonal field size: {field.deg*120:.1f}\', Pixel size: {pixel.arcsec:.3f}\"")
 
     det.meta['FIELD'] = field.deg
     det.meta['PIXEL'] = pixel.arcsec
@@ -407,6 +416,9 @@ def main():
             det,filef,fitsfile = open_files(arg, verbose=options.verbose)
         except FileNotFoundError:
             continue
+
+        if det is not None and 'keywords' in det.meta:
+            del det.meta['keywords']
 
         det = process_detections(det, filef,
                                nonlin=options.nonlin,

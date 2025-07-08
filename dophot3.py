@@ -65,7 +65,7 @@ def print_image_line(det, flt, Zo, Zoe, target=None, idnum=0):
     print("%s %14.6f %14.6f %s %3.0f %6.3f %4d %7.3f %6.3f %7.3f %6.3f %7.3f %s %d %s %s"%(
         det.meta['FITSFILE'], det.meta['JD'], det.meta['JD']+det.meta['EXPTIME']/86400.0, flt, det.meta['EXPTIME'],
         det.meta['AIRMASS'], idnum, Zo, Zoe, (det.meta['LIMFLX10']+Zo),
-        (det.meta['LIMFLX3']+Zo), tarmag, tarerr, 0, det.meta['OBSID'], tarstatus))
+        (det.meta['LIMFLX3']+Zo+10), tarmag, tarerr, 0, det.meta['OBSID'], tarstatus))
 
     return
 
@@ -294,26 +294,72 @@ def perform_photometric_fitting(data, options, metadata):
     # Perform initial fit with just the zeropoints
     fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
 
-    # Set up terms for stepwise regression
-    all_terms = []
-    if options.terms:
-        for term in parse_terms(options.terms):
-            all_terms.extend(expand_pseudo_term(term))
+    # Decision point: stepwise regression vs direct fitting
+    if options.no_stepwise:
+        # Direct fitting - fast path
+        print("Stepwise regression disabled - fitting terms directly")
 
-    # Perform bidirectional stepwise regression
-    selected_terms, final_wssrndf = perform_stepwise_regression(
-        data, ffit, all_terms, options, metadata
-    )
+        if options.terms:
+            # Parse and expand terms
+            direct_terms = []
+            for term in parse_terms(options.terms):
+                direct_terms.extend(expand_pseudo_term(term))
 
-    # Final fit with refined mask
-    data.use_mask('default')
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
-    photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
-    data.apply_mask(photo_mask, 'photometry')
-    data.use_mask('photometry')
-    # 1.
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
-    ffit.fit(fdata)
+            print(f"Fitting terms directly: {direct_terms}")
+
+            # Set up fitting object
+            ffit.fixall()
+
+            # Use initial values if available
+            if initial_values:
+                values = [initial_values.get(term, 1e-6) for term in direct_terms]
+            else:
+                values = [1e-6] * len(direct_terms)
+
+            ffit.fitterm(direct_terms, values=values)
+            selected_terms = direct_terms
+        else:
+            # No terms specified - just fit zeropoints
+            print("No terms specified - fitting zeropoints only")
+            selected_terms = []
+
+        # Single fit with outlier rejection
+        ffit.fit(fdata)
+
+        # Apply 5-sigma clipping and refit
+        residuals = ffit.residuals(ffit.fitvalues, fdata)
+        photo_mask = residuals < 5 * ffit.wssrndf
+        data.apply_mask(photo_mask, 'photometry')
+        data.use_mask('photometry')
+
+        fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2',
+                               'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
+        ffit.fit(fdata)
+
+    else:
+        # Stepwise regression - existing logic
+        print("Using stepwise regression")
+
+        # Set up terms for stepwise regression
+        all_terms = []
+        if options.terms:
+            for term in parse_terms(options.terms):
+                all_terms.extend(expand_pseudo_term(term))
+
+        # Perform bidirectional stepwise regression
+        selected_terms, final_wssrndf = perform_stepwise_regression(
+            data, ffit, all_terms, options, metadata
+        )
+
+        # Final fit with refined mask
+        data.use_mask('default')
+        fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
+        photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
+        data.apply_mask(photo_mask, 'photometry')
+        data.use_mask('photometry')
+        # 1.
+        fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
+        ffit.fit(fdata)
 
     print(f"Final fit variance: {ffit.wssrndf}")
     print(f"Selected terms: {selected_terms}")
@@ -552,9 +598,11 @@ def write_results(data, ffit, options, alldet, target, zpntest):
             )
         det['MAGERR_CALIB'] = np.sqrt(np.power(det['MAGERR_AUTO'],2)+np.power(zerr[img],2))
 
+        # our zeropoint is a magnitude that 10000 counts are, motivation:
+        # solving nonlinearity introduced poor fix for this value during fit
         det.meta['MAGZERO'] = zero[img]
         det.meta['DMAGZERO'] = zerr[img]
-        det.meta['MAGLIMIT'] = det.meta['LIMFLX3']+zero[img]
+        det.meta['MAGLIMIT'] = det.meta['LIMFLX3']+zero[img]+10  # +10 because the nature of our zeropoint
         det.meta['WSSRNDF'] = ffit.wssrndf
 
         det.meta['RESPONSE'] = ffit.oneline()
@@ -667,9 +715,9 @@ def write_output_line(det, options, zero, zerr, ffit, target):
         data_target = np.array([[target['MAG_AUTO']], [det.meta['AIRMASS']], [tarx], [tary], [0], [0], [0], [0], [det.meta['IMGNO']], [0], [0], [0.5], [0.5]])
         mo = ffit.model(np.array(ffit.fitvalues), data_target)
 
-        out_line = f"{det.meta['FITSFILE']} {det.meta['JD']:.6f} {chartime:.6f} {det.meta['FILTER']} {det.meta['EXPTIME']:3.0f} {det.meta['AIRMASS']:6.3f} {det.meta['IDNUM']:4d} {zero:7.3f} {zerr:6.3f} {det.meta['LIMFLX3']+zero:7.3f} {ffit.wssrndf:6.3f} {mo[0]:7.3f} {target['MAGERR_AUTO']:6.3f} {tarid} {obsid} ok"
+        out_line = f"{det.meta['FITSFILE']} {det.meta['JD']:.6f} {chartime:.6f} {det.meta['FILTER']} {det.meta['EXPTIME']:3.0f} {det.meta['AIRMASS']:6.3f} {det.meta['IDNUM']:4d} {zero:7.3f} {zerr:6.3f} {det.meta['LIMFLX3']+zero+10:7.3f} {ffit.wssrndf:6.3f} {mo[0]:7.3f} {target['MAGERR_AUTO']:6.3f} {tarid} {obsid} ok"
     else:
-        out_line = f"{det.meta['FITSFILE']} {det.meta['JD']:.6f} {chartime:.6f} {det.meta['FILTER']} {det.meta['EXPTIME']:3.0f} {det.meta['AIRMASS']:6.3f} {det.meta['IDNUM']:4d} {zero:7.3f} {zerr:6.3f} {det.meta['LIMFLX3']+zero:7.3f} {ffit.wssrndf:6.3f}  99.999  99.999 {tarid} {obsid} not_found"
+        out_line = f"{det.meta['FITSFILE']} {det.meta['JD']:.6f} {chartime:.6f} {det.meta['FILTER']} {det.meta['EXPTIME']:3.0f} {det.meta['AIRMASS']:6.3f} {det.meta['IDNUM']:4d} {zero:7.3f} {zerr:6.3f} {det.meta['LIMFLX3']+zero+10:7.3f} {ffit.wssrndf:6.3f}  99.999  99.999 {tarid} {obsid} not_found"
 
     print(out_line)
 

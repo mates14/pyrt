@@ -133,6 +133,7 @@ def parse_arguments(args=None):
     parser.add_argument("-m", "--margin", help="Modify the magnitude margin for star selection (default=2.0)", type=float, default=config.get("margin",2.0))
     parser.add_argument("-M", "--model", help="Read model from a file", type=str)
     parser.add_argument("-n", "--nonlin", help="CCD is not linear, apply linear correction on mag", action='store_true')
+    parser.add_argument("--no-stepwise", help="Disable stepwise regression and fit terms directly", action="store_true")
     parser.add_argument("-p", "--plot", help="Produce plots", action='store_true')
     parser.add_argument("-r", "--reject", help="No outputs for Reduced Chi^2 > value", type=float)
     parser.add_argument("--remove-spatial", help="Remove spatial terms and concentrate to color response fit", action='store_true')

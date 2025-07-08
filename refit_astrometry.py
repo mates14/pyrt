@@ -66,9 +66,11 @@ def refit_astrometry(det, data, options):
 #        zpntest.fitterm(["PV2_2"], [1e-6])
 
     # Initialize ZPN fit object based on camera type
-    elif camera in ["C1", "C2", "makak", "makak2", "NF4", "ASM1"]:
+    elif camera in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S"]:
         zpntest = zpnfit.zpnfit(proj="ZPN")
         zpntest.fixterm(["PV2_1"], [1])
+    elif camera in ["CAM-ZEA"]:
+        zpntest = zpnfit.zpnfit(proj="ZEA")
     else:
         zpntest = zpnfit.zpnfit(proj="TAN")
 
@@ -91,13 +93,19 @@ def refit_astrometry(det, data, options):
     # Refine the fit
     refine_fit(zpntest, data)
     refine_fit(zpntest, data)
+    print(zpntest)
 
     if options.sip is not None:
         zpntest.fixall()
-        zpntest.add_sip_terms(options.sip)
         data.use_mask('photometry')
-        refine_fit(zpntest, data)
-        refine_fit(zpntest, data)
+        if options.sip > 2:
+            adata = data.get_arrays('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+            rms,num = zpntest.fit_sip2(adata, options.sip)
+            logging.info(f"Fitted a SIP{options.sip} on {num} objects with rms={rms}")
+        else:
+            zpntest.add_sip_terms(options.sip)
+            refine_fit(zpntest, data)
+            refine_fit(zpntest, data)
 
     # Save the model and print results
     zpntest.savemodel("astmodel.ecsv")
@@ -115,12 +123,20 @@ def setup_initial_wcs(zpntest, meta):
             keys_invalid = True
 
     if keys_invalid:
+        try: # CROTA1 & 2 are optional, may be left to default=0 in stacked images
+            crota1 = meta['CROTA1']*np.pi/180
+        except:
+            crota1 = 0
+        try:
+            crota2 = meta['CROTA2']*np.pi/180
+        except:
+            crota2 = 0
         try:
             # Try to interpret old-fashioned WCS with CROTA
-            zpntest.fitterm(['CD1_1'], [meta['CDELT1'] * np.cos(meta['CROTA1']*np.pi/180)])
-            zpntest.fitterm(['CD1_2'], [meta['CDELT1'] * np.sin(meta['CROTA1']*np.pi/180)])
-            zpntest.fitterm(['CD2_1'], [meta['CDELT2'] * -np.sin(meta['CROTA2']*np.pi/180)])
-            zpntest.fitterm(['CD2_2'], [meta['CDELT2'] * np.cos(meta['CROTA2']*np.pi/180)])
+            zpntest.fitterm(['CD1_1'], [meta['CDELT1'] * np.cos(crota1)])
+            zpntest.fitterm(['CD1_2'], [meta['CDELT1'] * np.sin(crota1)])
+            zpntest.fitterm(['CD2_1'], [meta['CDELT2'] * -np.sin(crota2)])
+            zpntest.fitterm(['CD2_2'], [meta['CDELT2'] * np.cos(crota2)])
             keys_invalid = False
         except KeyError:
             keys_invalid = True
@@ -159,10 +175,24 @@ def setup_camera_params(zpntest, camera, refit_zpn):
 
     if camera == "ASM1":
         if refit_zpn:
-            zpntest.fitterm(["PV2_3", "PV2_5", "PV2_5"], [-0.0388566,0.001255,-0.002769])
+            zpntest.fitterm(["PV2_3", "PV2_5", "PV2_7"], [-0.0388566,0.001255,-0.002769])
             zpntest.fitterm(["CRPIX1", "CRPIX2"], [2054.5,2059.0])
         else:
-            zpntest.fixterm(["PV2_3", "PV2_5", "PV2_5"], [-0.0388566,0.001255,-0.002769])
+            zpntest.fixterm(["PV2_3", "PV2_5", "PV2_7"], [-0.0388566,0.001255,-0.002769])
             zpntest.fixterm(["CRPIX1", "CRPIX2"], [2054.5,2059.0])
-    # ... (similar blocks for other camera types)
+    if camera == "ASM-S":
+        if refit_zpn:
+            zpntest.fitterm(["PV2_3", "PV2_5"], [-0.0456,0.0442])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], [128.5,128.5])
+#            zpntest.fitterm(["CRPIX1", "CRPIX2"], [339.8,335.5])
+        else:
+            zpntest.fixterm(["PV2_3", "PV2_5"], [-0.0456,0.0442])
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], [128.5,128.5])
+#            zpntest.fixterm(["CRPIX1", "CRPIX2"], [339.8,335.5])
+# PV2_3   =  -0.045557711245 / ± 0.001318165008 (2.893396%)
+# PV2_5   =   0.044189874766 / ± 0.002482740922 (5.618348%)
+# CRPIX1  = 339.882095473812 / ± 0.262750191549 (0.077306%)
+# CRPIX2  = 335.523756136020 / ± 0.325225858217 (0.096931%)
+
+#    # ... (similar blocks for other camera types)
 
