@@ -1,5 +1,6 @@
 import os
 import astropy.io.fits
+import astropy.wcs
 import logging
 from contextlib import suppress
 from astropy.table import Table
@@ -25,11 +26,13 @@ def try_sex(arg, verbose=False):
         logging.debug(f"Argument {arg} is not a sextractor catalog")
         return None, None
 
-def try_ecsv(arg, verbose=False):
+# remove_meta must be True for compatibility reasons
+def try_ecsv(arg, verbose=False, remove_meta=True):
     """Try to open arg as a sextractor file, exit cleanly if it does not happen"""
     try:
         det = astropy.io.ascii.read(arg, format='ecsv')
-        det.meta=None # certainly contains interesting info, but breaks the code
+        if remove_meta:
+            det.meta=None # certainly contains interesting info, but breaks the code
         logging.info(f"Argument {arg} is an ascii/ecsv catalog")
         return arg, det
     except (FileNotFoundError,OSError,UnicodeDecodeError):
