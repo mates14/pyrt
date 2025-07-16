@@ -549,8 +549,8 @@ def process_input_file(arg, options):
 
     if det is None: return None
     # print(type(det.meta)) # OrderedDict, so we can:
-    with suppress(KeyError): det.meta.pop('comments')
-    with suppress(KeyError): det.meta.pop('history')
+    with suppress(KeyError, AttributeError): det.meta.pop('comments')
+    with suppress(KeyError, AttributeError): det.meta.pop('history')
 
     # 3. have fitsimg, have .det, note the fitsimg filename, close fitsimg and run
     # 4. have det, no fitsimg: just run, writing results into fits will be disabled
@@ -567,6 +567,10 @@ def process_input_file(arg, options):
 def setup_logging(verbose):
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    # Silence matplotlib's debug spam
+    logging.getLogger('matplotlib').setLevel(logging.WARNING)
+    logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
 
 def write_results(data, ffit, options, alldet, target, zpntest):
     zero, zerr = ffit.zero_val()
@@ -878,6 +882,8 @@ def main():
                 logging.info(f"Will overwrite {newfits}")
                 os.unlink(newfits)
             os.system(f"cp {fitsbase}.fits {newfits}")
+            for key in ['FIELD', 'PIXEL', 'FWHM']:
+                astropy.io.fits.setval(newfits, key, 0, value=det.meta[key])
             zpntest.write(newfits)
             zpntest.write(det.meta)
             imgwcs = astropy.wcs.WCS(zpntest.wcs())

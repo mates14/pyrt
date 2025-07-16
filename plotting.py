@@ -103,6 +103,7 @@ def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry')
 
         ylim = (-sigma*7, sigma*7)
 
+#        for idx, (label, param) in enumerate(params):
         for idx, (label, param) in enumerate(aparams):
             ax = fig.add_subplot(gs[idx // 2, idx % 2])
 
