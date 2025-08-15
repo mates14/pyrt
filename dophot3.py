@@ -756,9 +756,15 @@ def main():
     # """ REFIT ASTROMETRY """
     zpntest=None # correct behaviour if astrometry is off
     if options.astrometry:
-        start = time.time()
-        zpntest = refit_astrometry(det, data, options)
-        logging.info(f"Astrometric fit took {time.time()-start:.3f}s")
+        if len(alldet) > 1:
+            logging.warning(f"Astrometric fitting is not supported with multiple input files ({len(alldet)} files provided)")
+            logging.warning("Astrometry disabled to prevent bogus results. Process files individually for astrometric fitting.")
+            print(f"WARNING: Astrometry disabled - {len(alldet)} input files detected")
+            print("WARNING: Astrometric fitting only works with single images. Process files individually.")
+        else:
+            start = time.time()
+            zpntest = refit_astrometry(det, data, options)
+            logging.info(f"Astrometric fit took {time.time()-start:.3f}s")
         if zpntest is not None:
             # Update FITS file with new WCS
             start = time.time()
