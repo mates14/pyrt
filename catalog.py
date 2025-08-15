@@ -78,6 +78,7 @@ class CatalogFilters:
         'Sloan_i': CatalogFilter('Sloan_i', 7520, 'AB'),
         'Sloan_z': CatalogFilter('Sloan_z', 8660, 'AB'),
         'J': CatalogFilter('J', 12000, 'AB'),
+        'J_Vega': CatalogFilter('J_Vega', 12000, 'Vega'),  # J_AB - 0.894 mag (H_Vega: -1.374, K_Vega: -1.85 from Cohen et al. 2003)
         'Johnson_B': CatalogFilter('Johnson_B', 4353, 'Vega'),
         'Johnson_V': CatalogFilter('Johnson_V', 5477, 'Vega'),
         'Johnson_R': CatalogFilter('Johnson_R', 6349, 'Vega'),
@@ -357,6 +358,11 @@ class Catalog(astropy.table.Table):
                           0.083113 * ri * ri - 0.179943
         cat['Johnson_I'] = cat['Sloan_r'] - 0.897087 * ri - \
                           0.575316 * iz - 0.423971
+
+        # Add J_Vega for Johnson system compatibility
+        # Using 2MASS standard AB→Vega conversion: J(Vega) = J(AB) - 0.894
+        # Reference: Cohen et al. (2003) AJ 126, 1090 - "Spectral Irradiance Calibration in the Infrared. XIV"
+        cat['J_Vega'] = cat['J'] - 0.894
 
     def _get_atlas_vizier(self) -> Optional[astropy.table.Table]:
         """Get ATLAS RefCat2 data from VizieR with updated column mapping"""

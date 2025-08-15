@@ -27,16 +27,17 @@ from astropy.wcs import FITSFixedWarning
 warnings.simplefilter('ignore', category=FITSFixedWarning)
 
 import fotfit
-from catalog import Catalog, CatalogFilter
+from catalog import Catalog
 from cat2det import remove_junk
 from refit_astrometry import refit_astrometry
 from file_utils import try_det, try_img, write_region_file
 from config import parse_arguments
-from data_handling import PhotometryData, make_pairs_to_fit, compute_initial_zeropoints
+from data_handling import PhotometryData, make_pairs_to_fit, compute_zeropoints_all_filters
 from match_stars import process_image_with_dynamic_limits
 from stepwise_regression import perform_stepwise_regression, parse_terms, expand_pseudo_term
 
 from plotting import create_residual_plots
+from filter_matching import determine_filter
 
 if sys.version_info[0]*1000+sys.version_info[1]<3008:
     print(f"Error: python3.8 or higher is required (this is python {sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]})")
@@ -69,114 +70,6 @@ def print_image_line(det, flt, Zo, Zoe, target=None, idnum=0):
 
     return
 
-def get_catalog_filters(catalog_name):
-    """
-    Get filter information for a catalog without instantiating it.
-
-    Args:
-        catalog_name: Name of the catalog (e.g., 'atlas@localhost', 'makak', etc.)
-
-    Returns:
-        dict: Dictionary of CatalogFilter objects
-    """
-    catalog_info = Catalog.KNOWN_CATALOGS.get(catalog_name)
-    if catalog_info is None:
-        raise ValueError(f"Unknown catalog: {catalog_name}")
-    return catalog_info['filters']
-
-def get_base_filter(det, options, catalog_name):
-    '''
-    Set up or guess the base filter to use for fitting, selecting the closest available filter
-    by wavelength when necessary, and determine the appropriate filter schema.
-
-    Args:
-        det: Detection table with metadata
-        options: Command line options
-        catalog_name: Name of the catalog to use
-
-    Returns:
-        tuple: (base_filter_name, photometric_system, schema_name)
-    '''
-    def get_filter_wavelength(filter_name, filters):
-        """Get effective wavelength for a filter"""
-        filter_info = filters.get(filter_name)
-        if filter_info:
-            return filter_info.effective_wl
-        return None
-
-    def find_closest_filter_by_wavelength(target_wavelength, available_filters):
-        """Find the filter closest in wavelength to the target"""
-        if not available_filters:
-            return None
-
-        closest_filter = None
-        min_diff = float('inf')
-
-        for cat_filter in list(available_filters.values()):
-            if not isinstance(cat_filter, CatalogFilter):
-                logging.warning(f"Skipping invalid filter object: {cat_filter}")
-                continue
-            wavelength = cat_filter.effective_wl
-            if wavelength is not None:
-                diff = abs(wavelength - target_wavelength)
-                if diff < min_diff:
-                    min_diff = diff
-                    closest_filter = cat_filter
-
-        return closest_filter
-
-    def find_compatible_schema(available_filters, filter_schemas, basemag):
-        """Find compatible schema that includes the base filter"""
-        available_filter_set = set(available_filters.keys())
-
-        for schema_name, schema_filters in filter_schemas.items():
-            if basemag not in schema_filters:
-                continue
-            if set(schema_filters).issubset(available_filter_set):
-                logging.info(f"Photometric schema: {schema_name} with base filter {basemag}")
-                return schema_name
-
-        logging.warning(f"No compatible filter schema found that includes base filter {basemag}")
-        return None
-
-    # Get available filters for this catalog
-    available_filters = get_catalog_filters(catalog_name)
-    if not available_filters:
-        logging.warning(f"Catalog does not contain filters. Using Sloan_r + AB")
-        return 'Sloan_r', 'AB', None
-
-    # Map current filter name to catalog filter
-    filter_name = det.meta.get('FILTER', 'Sloan_r')
-
-    if filter_name in available_filters:
-        basemag = available_filters[filter_name]
-    else:
-        # Find closest matching filter by wavelength
-        FILTER_WAVELENGTHS = {
-            'U': 3600, 'B': 4353, 'V': 5477, 'R': 6349, 'I': 8797,
-            'g': 4810, 'r': 6170, 'i': 7520, 'z': 8660, 'y': 9620,
-            'G': 5890, 'BP': 5050, 'RP': 7730,
-            'Sloan_g': 4810, 'Sloan_r': 6170, 'Sloan_i': 7520, 'Sloan_z': 8660,
-            'Johnson_U': 3600, 'Johnson_B': 4353, 'Johnson_V': 5477,
-            'Johnson_R': 6349, 'Johnson_I': 8797, 'N': 6000
-        }
-
-        target_wavelength = FILTER_WAVELENGTHS.get(filter_name)
-        logging.info(f"Filter {filter_name} has wavelength {target_wavelength}")
-        if target_wavelength:
-            closest = find_closest_filter_by_wavelength(target_wavelength, available_filters)
-            if closest:
-                basemag = closest
-
-    # Find compatible schema that includes basemag
-    schema_name = find_compatible_schema(available_filters, options.filter_schemas, basemag.name)
-
-    # Determine photometric system
-    fit_in_johnson = 'AB'
-    if 'Johnson' in basemag.name:
-        fit_in_johnson = 'Johnson'
-
-    return basemag.name, fit_in_johnson, schema_name
 
 def write_stars_file(data, ffit, imgwcs, filename="stars"):
     """
@@ -258,19 +151,51 @@ def perform_photometric_fitting(data, options, metadata):
     Returns:
     fotfit.fotfit: The fitted photometry model.
     """
+    # Set initial filter from already-determined metadata (from main loop)
     data.set_current_filter(metadata[0]['PHFILTER'])
     photometric_system = metadata[0]['PHSYSTEM']
 
-    if options.select_best:
-        # First, try fitting zeropoints to each available catalog filter
-        best_filter = select_best_filter(data, metadata)
-        print(f"Selected best filter for initial calibration: {best_filter}")
-        # Set the current filter in the PhotometryData object
-        data.set_current_filter(best_filter)
-        # Determine the photometric system based on the best filter
-        photometric_system = 'Johnson' if best_filter.startswith('Johnson') else 'AB'
 
-    zeropoints = compute_initial_zeropoints(data, metadata)
+    # Unified zeropoint computation and filter validation/discovery
+    zeropoints, final_filter, filter_results = compute_zeropoints_all_filters(data, metadata, options)
+
+    # Update photometric system and schema if filter changed
+    if final_filter != metadata[0]['PHFILTER']:
+        try:
+            from filter_matching import get_catalog_filters, find_compatible_schema
+            catalog_name = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
+            available_filters = get_catalog_filters(catalog_name)
+
+            if final_filter in available_filters:
+                photometric_system = available_filters[final_filter].system
+                # Find new compatible schema
+                new_schema = find_compatible_schema(available_filters, options.filter_schemas, final_filter)
+                if new_schema:
+                    metadata[0]['PHSCHEMA'] = new_schema
+            else:
+                photometric_system = 'AB'  # Default fallback
+        except:
+            photometric_system = 'AB'  # Safe fallback
+
+        # Update metadata for all images (discover mode finds one filter for entire dataset)
+        for meta in metadata:
+            meta['PHFILTER'] = final_filter
+            meta['PHSYSTEM'] = photometric_system
+            if 'new_schema' in locals() and new_schema:
+                meta['PHSCHEMA'] = new_schema
+
+    # Check for filter consistency across all images (after any corrections)
+    if len(metadata) > 1:
+        filter_list = [meta['PHFILTER'] for meta in metadata]
+        unique_filters = set(filter_list)
+        if len(unique_filters) > 1:
+            print(f"ERROR: Mixed filters detected after validation: {sorted(unique_filters)}")
+            filter_counts = {}
+            for f in filter_list:
+                filter_counts[f] = filter_counts.get(f, 0) + 1
+            print(f"Filter distribution: {filter_counts}")
+            print("Cannot fit mixed filters in single run. Process images separately.")
+            sys.exit(1)
 
     # Compute colors and apply color limits
     data.compute_colors_and_apply_limits(metadata[0]['PHSCHEMA'], options)
@@ -731,52 +656,6 @@ def write_output_line(det, options, zero, zerr, ffit, target):
     except Exception as e:
         print(f"Error writing to dophot.dat: {e}")
 
-def select_best_filter(data, metadata):
-    """
-    Select the best catalog filter for initial calibration.
-
-    Args:
-    data (PhotometryData): Object containing all photometry data.
-    metadata (list): List of metadata for each image.
-
-    Returns:
-    str: The name of the best filter to use for initial calibration.
-    """
-    available_filters = data.get_filter_columns()
-    best_filter = None
-    best_wssrndf = float('inf')
-
-    for filter_name in available_filters:
-        ffit = fotfit.fotfit()
-        # Initialize zeropoints with zeros (we'll estimate them later)
-        ffit.zero = [0] * len(metadata)
-
-        # Temporarily set the current filter
-        data.set_current_filter(filter_name)
-
-        # Get the data for fitting, including placeholder color columns
-        try:
-            fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'img', 'x', 'dy')
-
-            # Add placeholder color columns
-            placeholder_colors = np.zeros((4, len(fdata[0])))
-            fdata = fdata[:5] + tuple(placeholder_colors) + fdata[5:]
-
-            ffit.fit(fdata)
-            if ffit.wssrndf < best_wssrndf:
-                best_wssrndf = ffit.wssrndf
-                best_filter = filter_name
-            print(f"Successfully fitted filter {filter_name} with wssrndf: {ffit.wssrndf}")
-        except Exception as e:
-            print(f"Error fitting filter {filter_name}: {str(e)}")
-            print(f"fdata shape: {[len(arr) for arr in fdata]}")
-            print(f"First few elements of fdata: {[arr[:5] for arr in fdata]}")
-
-    if best_filter is None:
-        raise ValueError("Failed to fit any filter. Check the input data and fitting process.")
-
-    print(f"Best filter: {best_filter} with wssrndf: {best_wssrndf}")
-    return best_filter
 
 # ******** main() **********
 
@@ -803,7 +682,7 @@ def main():
             continue
 
         catalog_name = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
-        det.meta['PHFILTER'], det.meta['PHSYSTEM'], det.meta['PHSCHEMA'] = get_base_filter(det, options, catalog_name)
+        determine_filter(det, options, catalog_name)
         logging.info(f'Reference filter is {det.meta["PHFILTER"]}, '
                 f'Schema: {det.meta["PHSCHEMA"]}, '
                 f'System: {det.meta["PHSYSTEM"]}')
@@ -855,6 +734,13 @@ def main():
     ffit = perform_photometric_fitting(data, options, metadata)
     logging.info(ffit)
     logging.info(f"Photometric fit took {time.time()-start:.3f}s")
+
+    # Update det objects if filter was changed during discovery/validation
+    final_filter = metadata[0]['PHFILTER']
+    for i, det in enumerate(alldet):
+        if det.meta['FILTER'] != final_filter:
+            logging.info(f"Updating det object {i}: {det.meta['FILTER']} → {final_filter}")
+            det.meta['FILTER'] = final_filter
 
     if options.reject:
         if ffit.wssrndf > options.reject:

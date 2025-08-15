@@ -296,3 +296,155 @@ def compute_initial_zeropoints(data, metadata):
 
     return zeropoints
 
+
+def compute_zeropoints_all_filters(data, metadata, options):
+    """
+    Compute zeropoints for all available filters with quality metrics.
+    Unified function that handles both zeropoint computation and filter discovery/validation.
+
+    Args:
+    data (PhotometryData): Object containing all photometry data.
+    metadata (list): List of metadata for each image.
+    options: Command line options (for filter_check mode)
+
+    Returns:
+    tuple: (zeropoints_for_final_filter, final_filter_name, filter_results_dict)
+        - zeropoints_for_final_filter: list of zeropoints for the chosen filter
+        - final_filter_name: name of the filter that should be used
+        - filter_results_dict: detailed results for all tested filters
+    """
+    import logging
+    
+    # Get all available catalog filters for comprehensive testing
+    catalog_name = 'makak' if getattr(options, 'makak', False) else (getattr(options, 'catalog', None) or 'atlas@localhost')
+    try:
+        from filter_matching import get_catalog_filters
+        all_catalog_filters = list(get_catalog_filters(catalog_name).keys())
+    except:
+        # Fallback to loaded filters if catalog lookup fails
+        all_catalog_filters = data.get_filter_columns()
+    
+    loaded_filters = data.get_filter_columns()
+    filter_check_mode = getattr(options, 'filter_check', 'none')
+    original_filter = data._current_filter
+    results = {}
+    
+    # Determine which filters to test
+    if filter_check_mode in ['n', 'none']:
+        # Only test current filter for efficiency
+        filters_to_test = [original_filter] if original_filter else loaded_filters[:1]
+    else:
+        # Test all catalog filters for discovery/validation, but only those we can actually use
+        filters_to_test = [f for f in all_catalog_filters if f in loaded_filters]
+        
+        # If we don't have all filters loaded, warn the user
+        missing_filters = set(all_catalog_filters) - set(loaded_filters)
+        if missing_filters:
+            print(f"Note: {len(missing_filters)} catalog filters not loaded during schema processing: {sorted(missing_filters)}")
+            print(f"Testing {len(filters_to_test)} available filters: {sorted(filters_to_test)}")
+    
+    print(f"Computing zeropoints for {len(filters_to_test)} filter(s)...")
+    
+    for filter_name in filters_to_test:
+        data.set_current_filter(filter_name)
+        x, y, img = data.get_arrays('x', 'y', 'img')
+        
+        zeropoints = []
+        correlations = []
+        n_stars_per_image = []
+        
+        for img_meta in metadata:
+            img_mask = img == img_meta['IMGNO']
+            img_x = x[img_mask]
+            img_y = y[img_mask]
+            
+            n_stars = len(img_x)
+            n_stars_per_image.append(n_stars)
+            
+            if n_stars > 0:
+                zeropoint = np.median(img_x - img_y)  # x (catalog mag) - y (observed mag)
+                
+                # Compute correlation if we have enough stars
+                if n_stars >= 5:
+                    # Remove outliers for better correlation
+                    residuals = img_x - img_y
+                    median_res = np.median(residuals)
+                    mad = np.median(np.abs(residuals - median_res))
+                    good_mask = np.abs(residuals - median_res) < 3 * mad
+                    
+                    if np.sum(good_mask) >= 5:
+                        correlation = np.corrcoef(img_x[good_mask], img_y[good_mask])[0, 1]
+                        if np.isnan(correlation):
+                            correlation = 0
+                    else:
+                        correlation = 0
+                else:
+                    correlation = 0
+            else:
+                logging.warning(f"No stars for image {img_meta['IMGNO']}, filter {filter_name}")
+                zeropoint = 0
+                correlation = 0
+                
+            zeropoints.append(zeropoint)
+            correlations.append(correlation)
+        
+        # Compute overall quality metrics
+        valid_correlations = [c for c in correlations if c > 0]
+        mean_correlation = np.mean(valid_correlations) if valid_correlations else 0
+        total_stars = sum(n_stars_per_image)
+        
+        results[filter_name] = {
+            'zeropoints': zeropoints,
+            'correlations': correlations,
+            'mean_correlation': mean_correlation,
+            'total_stars': total_stars,
+            'n_images': len([c for c in correlations if c > 0])
+        }
+        
+        print(f"Filter {filter_name}: correlation={mean_correlation:.3f}, stars={total_stars}, images={results[filter_name]['n_images']}")
+    
+    # Determine final filter based on mode
+    header_filter = original_filter
+    
+    if filter_check_mode in ['n', 'none']:
+        final_filter = header_filter
+        logging.info(f"Using header filter {final_filter} (no validation)")
+        
+    elif filter_check_mode in ['d', 'discover']:
+        # Pick filter with best correlation
+        best_filter = max(results.keys(), key=lambda f: results[f]['mean_correlation'])
+        final_filter = best_filter
+        
+        if best_filter != header_filter:
+            logging.info(f"Filter discovery: using {best_filter} (correlation={results[best_filter]['mean_correlation']:.3f}) instead of header {header_filter}")
+            print(f"Filter discovery: using {best_filter} (header was {header_filter})")
+        else:
+            logging.info(f"Filter discovery confirmed header filter: {header_filter}")
+            
+    else:
+        # Validation modes (warn/strict)
+        best_filter = max(results.keys(), key=lambda f: results[f]['mean_correlation'])
+        
+        if best_filter == header_filter:
+            logging.info(f"Filter validation passed: {header_filter}")
+            final_filter = header_filter
+        else:
+            message = f"Filter mismatch: header={header_filter} (corr={results[header_filter]['mean_correlation']:.3f}), best={best_filter} (corr={results[best_filter]['mean_correlation']:.3f})"
+            
+            if filter_check_mode in ['w', 'warn']:
+                logging.warning(message)
+                print(f"WARNING: {message}")
+                final_filter = header_filter  # Continue with header
+            elif filter_check_mode in ['s', 'strict']:
+                logging.error(message)
+                print(f"ERROR: {message}")
+                print("Use --filter-check=none to override or fix the filter in FITS header")
+                import sys
+                sys.exit(1)
+    
+    # Restore final filter and return its zeropoints
+    data.set_current_filter(final_filter)
+    final_zeropoints = results[final_filter]['zeropoints']
+    
+    return final_zeropoints, final_filter, results
+

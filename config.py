@@ -17,17 +17,17 @@ fsr = False
 guessbase = False
 johnson = False
 makak = False
-select_best = False
+filter_check = none
 stars = False
 gain = 2.3
 
 [FILTER_SCHEMAS]
 JohnsonU = Johnson_U, Johnson_B, Johnson_V, Johnson_R, Johnson_I
-JohnsonJ = Johnson_B, Johnson_V, Johnson_R, Johnson_I, J
+JohnsonJ = Johnson_B, Johnson_V, Johnson_R, Johnson_I, J_Vega
 SloanU = Sloan_u, Sloan_g, Sloan_r, Sloan_i, Sloan_z
 SloanJ = Sloan_g, Sloan_r, Sloan_i, Sloan_z, J
 Gaia = BP, G, RP, BP, RP
-GaiaJ = Johnson_B, Johnson_V, Johnson_R, Johnson_I, G
+GaiaJ = Johnson_B, Johnson_V, Johnson_R, Johnson_I, Johnson_I  # Duplicate last filter to create zero color4, avoiding mixed AB/Vega systems
 PS = g, r, i, z, y
 USNO = B2, R2, I, R1, B1
 """
@@ -137,7 +137,9 @@ def parse_arguments(args=None):
     parser.add_argument("-p", "--plot", help="Produce plots", action='store_true')
     parser.add_argument("-r", "--reject", help="No outputs for Reduced Chi^2 > value", type=float)
     parser.add_argument("--remove-spatial", help="Remove spatial terms and concentrate to color response fit", action='store_true')
-    parser.add_argument("--select-best", action='store_true', default=config.get('select_best', None), help="Try to select the best filter for photometric fitting")
+    parser.add_argument("--filter-check", choices=['none', 'warn', 'strict', 'discover', 'n', 'w', 's', 'd'],
+                        default=config.get('filter_check', 'none'),
+                        help="Filter validation mode: none=trust header, warn=validate and warn on mismatch, strict=reject on mismatch, discover=ignore header and find best filter")
     parser.add_argument("-s", "--stars", action='store_true', default=config.get('stars', 'False'), help="Output fitted numbers to a file")
     parser.add_argument("-S", "--sip", help="Order of SIP refinement for the astrometric solution (0=disable)", type=int)
     parser.add_argument("-t", "--fit-terms", help="Comma separated list of terms to fit", type=str)
@@ -163,7 +165,7 @@ def parse_arguments(args=None):
     args.filter_schemas = config['filter_schemas']
 
     # Convert string 'True'/'False' to boolean for action="store_true" arguments
-    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'fsr', 'select_best']:
+    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'fsr']:
         setattr(args, arg, str(getattr(args, arg)).lower() == 'true')
 
     return args
