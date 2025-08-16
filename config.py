@@ -13,7 +13,6 @@ astrometry = False
 basemag = Sloan_r
 verbose = False
 autoupdate = False
-fsr = False
 guessbase = False
 johnson = False
 makak = False
@@ -116,8 +115,6 @@ def parse_arguments(args=None):
     parser.add_argument("-d", "--date", action='store', help="what to put into the third column (char,mid,bjd), default=mid")
     parser.add_argument("-e", "--enlarge", type=float, default=config.get('enlarge'), help="Enlarge catalog search region")
     parser.add_argument("-f", "--filter", default=config.get('filter'), help="Override filter info from fits")
-    parser.add_argument("--fsr", help="Use forward stepwise regression", default=config.get('fsr', 'False') )
-    parser.add_argument("--fsr-terms", help="Terms to be used to do forward stepwise regression", default=config.get('fsr_terms', None) )
     parser.add_argument("-F", "--flat", help="Produce flats", action='store_true')
     parser.add_argument("-g", "--guessbase", action="store_true", default=config.get('guessbase', 'False'),
                         help="Try and set base filter from fits header (implies -j if Bessel filter is found)")
@@ -133,8 +130,6 @@ def parse_arguments(args=None):
     parser.add_argument("-L", "--brightlim", help="Do not get any less than this mag from the catalog to compare", type=float)
     parser.add_argument("-m", "--margin", help="Modify the magnitude margin for star selection (default=2.0)", type=float, default=config.get("margin",2.0))
     parser.add_argument("-M", "--model", help="Read model from a file", type=str)
-    parser.add_argument("-n", "--nonlin", help="CCD is not linear, apply linear correction on mag", action='store_true')
-    parser.add_argument("--no-stepwise", help="Disable stepwise regression and fit terms directly", action="store_true")
     parser.add_argument("--use-stepwise", action="store_true", default=config.get('use_stepwise', 'True'),
                         help="Default behavior for unmarked terms: use stepwise regression (default) vs direct fitting")
     parser.add_argument("-p", "--plot", help="Produce plots", action='store_true')
@@ -145,13 +140,12 @@ def parse_arguments(args=None):
                         help="Filter validation mode: none=trust header, warn=validate and warn on mismatch, strict=reject on mismatch, discover=ignore header and find best filter")
     parser.add_argument("-s", "--stars", action='store_true', default=config.get('stars', 'False'), help="Output fitted numbers to a file")
     parser.add_argument("-S", "--sip", help="Order of SIP refinement for the astrometric solution (0=disable)", type=int)
-    parser.add_argument("-t", "--fit-terms", help="Comma separated list of terms to fit", type=str)
-    parser.add_argument("-T", "--trypar", type=str, help="Terms to examine to see if necessary (and include in the fit if they are)")
     parser.add_argument("-u", "--autoupdate", action='store_true', help="Update .det if .fits is newer", default=config.get('autoupdate', 'False'))
-    parser.add_argument("-U", "--terms", help="Terms to fit", type=str, default=config.get('terms', ''))
+    parser.add_argument("-U", "--terms",
+                        help="Extended term specification: PC=0.2 (initial value), #PC=0.2 (fixed), @term (stepwise), &term (always), .p3/.r2 (macros). Supports mixed strategies (cf. terms-explained.md)",
+                        type=str, default=config.get('terms', ''))
     parser.add_argument("-w", "--weight", action='store_true', help="Produce weight image")
     parser.add_argument("-W", "--save-model", help="Write model into a file", type=str)
-    parser.add_argument("-x", "--fix-terms", help="Comma separated list of terms to keep fixed", type=str)
     parser.add_argument("-y", "--fit-xy", action='store_true', help="Fit xy tilt for each image separately (i.e. terms PX/PY)")
     parser.add_argument("-z", "--refit-zpn", action='store_true', help="Refit the ZPN radial terms")
     parser.add_argument("-Z", "--szp", action='store_true', help="use SZP while fitting astrometry")
@@ -168,7 +162,7 @@ def parse_arguments(args=None):
     args.filter_schemas = config['filter_schemas']
 
     # Convert string 'True'/'False' to boolean for action="store_true" arguments
-    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'fsr', 'use_stepwise']:
+    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'use_stepwise', 'stars', 'autoupdate']:
         setattr(args, arg, str(getattr(args, arg)).lower() == 'true')
 
     return args

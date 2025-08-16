@@ -103,22 +103,34 @@ class termfit:
         return np.nan
 
     def __str__(self):
-        """Print all terms fitted by this class"""
+        """Print all terms fitted by this class, excluding per-image terms (handled by fotfit)"""
         output = ""
-        for term,value in zip(self.fixterms,self.fixvalues):
-            output += "%-8s= %16f / fixed\n"%(term,value)
 
-        i=0
+        # Show fixed terms (excluding per-image)
+        for term, value in zip(self.fixterms, self.fixvalues):
+            if ':' in term and term.split(':')[-1].isdigit():
+                continue  # Skip per-image terms
+            output += "%-8s= %16f / fixed\n" % (term, value)
+
+        # Show fitted terms (excluding per-image)
+        i = 0
         for term, value in zip(self.fitterms, self.fitvalues):
-            try: error = self.fiterrors[i]
-            except IndexError: error = np.nan
-            output += "%-8s= %16f / ± %f (%.3f%%)\n"%\
+            if ':' in term and term.split(':')[-1].isdigit():
+                i += 1  # Still increment index to keep errors aligned
+                continue  # Skip per-image terms
+
+            try:
+                error = self.fiterrors[i]
+            except (IndexError, AttributeError):
+                error = np.nan
+            output += "%-8s= %16f / ± %f (%.3f%%)\n" % \
                 (term, value, error, np.abs(100*error/value))
             i += 1
-        output += "NDF     = %d\n"%(self.ndf)
-        output += "SIGMA   = %.3f\n"%(self.sigma)
-        output += "VARIANCE= %.3f\n"%(self.variance)
-        output += "WSSR/NDF= %.3f"%(self.wssrndf)
+
+        output += "NDF     = %d\n" % (self.ndf)
+        output += "SIGMA   = %.3f\n" % (self.sigma)
+        output += "VARIANCE= %.3f\n" % (self.variance)
+        output += "WSSR/NDF= %.3f" % (self.wssrndf)
 
         return output
 
@@ -131,6 +143,75 @@ class termfit:
             else: comma = True
             output += "%s=%f"%(term,value)
         return output
+
+    def oneline_for_image(self, img_idx):
+        """Generate RESPONSE string for specific image, converting per-image terms to base names"""
+        output = ""
+        comma = False
+        img_suffix = f":{img_idx}"
+
+        for term, value in zip(self.fixterms + self.fitterms, self.fixvalues + self.fitvalues):
+            include_term = False
+            output_term = term
+
+            if term.endswith(img_suffix):
+                # This is a per-image term for our image - convert PX:1 → PX, Z:1 → Z
+                output_term = term.rsplit(':', 1)[0]
+                include_term = True
+            elif ':' not in term or not term.split(':')[-1].isdigit():
+                # This is a global term (no :n suffix) - include for all images
+                include_term = True
+            # Terms with other image suffixes are excluded
+
+            if include_term:
+                if comma:
+                    output += ","
+                else:
+                    comma = True
+                output += f"{output_term}={value:f}"
+
+        return output
+
+    def format_grouped_terms(self, terms_list=None):
+        """Format terms with nice grouping for per-image and global terms"""
+        if terms_list is None:
+            # Use all terms from the object
+            all_terms = list(zip(self.fixterms + self.fitterms, self.fixvalues + self.fitvalues))
+            all_errors = [0.0] * len(self.fixterms) + list(self.fiterrors) if hasattr(self, 'fiterrors') else [0.0] * len(all_terms)
+            term_data = [(term, value, error) for (term, value), error in zip(all_terms, all_errors)]
+        else:
+            # Use provided terms list (for selected_terms display)
+            term_data = [(term, None, None) for term in terms_list]
+
+        # Group terms by type
+        global_terms = set()
+        per_image_base_terms = set()  # Track unique base terms for per-image terms
+
+        for term, value, error in term_data:
+            if ':' in term and term.split(':')[-1].isdigit():
+                # Per-image term - only track the base term once
+                base_term = term.rsplit(':', 1)[0]
+                per_image_base_terms.add(base_term)
+            else:
+                # Global term
+                global_terms.add(term)
+
+        # Format output
+        output_lines = []
+
+        # Show global terms first
+        if global_terms:
+            output_lines.append("Global terms:")
+            for term in sorted(global_terms):
+                output_lines.append(f"  {term}")
+
+        # Show per-image terms in a compact format
+        if per_image_base_terms:
+            output_lines.append("Per-image terms:")
+            for base_term in sorted(per_image_base_terms):
+                output_lines.append(f"  {base_term} (for each image)")
+
+        return "\n".join(output_lines)
 
     def fit(self, data):
         """fit data to the defined model"""

@@ -82,10 +82,10 @@ def format_output_line(ecsv_file, meta, target, wssrndf=None):
         mag = target['MAG_CALIB'] if 'MAG_CALIB' in target.colnames else target['MAG_AUTO']
         mag_err = target['MAGERR_CALIB'] if 'MAGERR_CALIB' in target.colnames else target['MAGERR_AUTO']
 
-        out_line = f"{ecsv_file} {jd:.6f} {chartime:.6f} {filt} {exptime:3.0f} {airmass:6.3f} {idnum:4d} {magzero:7.3f} {dmagzero:6.3f} {limflx3+magzero+10:7.3f} {wssrndf:6.3f} {mag:7.3f} {mag_err:6.3f} {tarid} {obsid} ok"
+        out_line = f"{ecsv_file} {jd:.6f} {chartime:.6f} {filt} {exptime:3.0f} {airmass:6.3f} {idnum:4d} {magzero:7.3f} {dmagzero:6.3f} {limflx3+magzero:7.3f} {wssrndf:6.3f} {mag:7.3f} {mag_err:6.3f} {tarid} {obsid} ok"
     else:
         # Target not found
-        out_line = f"{ecsv_file} {jd:.6f} {chartime:.6f} {filt} {exptime:3.0f} {airmass:6.3f} {idnum:4d} {magzero:7.3f} {dmagzero:6.3f} {limflx3+magzero+10:7.3f} {wssrndf:6.3f}  99.999  99.999 {tarid} {obsid} not_found"
+        out_line = f"{ecsv_file} {jd:.6f} {chartime:.6f} {filt} {exptime:3.0f} {airmass:6.3f} {idnum:4d} {magzero:7.3f} {dmagzero:6.3f} {limflx3+magzero:7.3f} {wssrndf:6.3f}  99.999  99.999 {tarid} {obsid} not_found"
 
     return out_line
 

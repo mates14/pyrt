@@ -66,7 +66,7 @@ def print_image_line(det, flt, Zo, Zoe, target=None, idnum=0):
     print("%s %14.6f %14.6f %s %3.0f %6.3f %4d %7.3f %6.3f %7.3f %6.3f %7.3f %s %d %s %s"%(
         det.meta['FITSFILE'], det.meta['JD'], det.meta['JD']+det.meta['EXPTIME']/86400.0, flt, det.meta['EXPTIME'],
         det.meta['AIRMASS'], idnum, Zo, Zoe, (det.meta['LIMFLX10']+Zo),
-        (det.meta['LIMFLX3']+Zo+10), tarmag, tarerr, 0, det.meta['OBSID'], tarstatus))
+        (det.meta['LIMFLX3']+Zo), tarmag, tarerr, 0, det.meta['OBSID'], tarstatus))
 
     return
 
@@ -219,13 +219,32 @@ def perform_photometric_fitting(data, options, metadata):
     # Perform initial fit with just the zeropoints
     fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
 
-    # Parse extended term syntax if terms are provided
+    # Build forced zeropoint terms from computed values
+    z_terms = []
+    for i, zp in enumerate(zeropoints, 1):
+        if len(zeropoints) == 1:
+            z_terms.append(f"&Z={zp}")  # Single image: &Z=20.1
+        else:
+            z_terms.append(f"&Z:{i}={zp}")  # Multiple images: &Z:1=20.1, &Z:2=20.3
+
+    # PREPEND zeropoint terms to user terms
+    terms_parts = z_terms.copy()
+
+    # Add per-image PX/PY terms if fit_xy is enabled (compact form)
+    if options.fit_xy:
+        terms_parts.append("&*.p")  # Expands to &*PX,&*PY automatically
+
+    # Add user terms if specified
     if options.terms:
-        parsed_terms = parse_terms(options.terms)
-        print(f"Parsed terms: stepwise={parsed_terms['stepwise']}, direct={parsed_terms['direct']}, "
-              f"fixed={list(parsed_terms['fixed'].keys())}, default={parsed_terms['default']}")
-    else:
-        parsed_terms = {'stepwise': [], 'direct': [], 'fixed': {}, 'initial_values': {}, 'default': []}
+        terms_parts.append(options.terms)
+
+    extended_terms = ",".join(terms_parts)
+
+    # Parse extended term syntax with auto-added zeropoints
+    parsed_terms = parse_terms(extended_terms, len(metadata))
+    print(f"Extended terms string: {extended_terms}")
+    print(f"Parsed terms: stepwise={parsed_terms['stepwise']}, direct={parsed_terms['direct']}, "
+          f"fixed={list(parsed_terms['fixed'].keys())}, default={parsed_terms['default']}")
 
     # Merge initial values from model file and command line
     combined_initial_values = {**initial_values, **parsed_terms['initial_values']}
@@ -264,8 +283,8 @@ def perform_photometric_fitting(data, options, metadata):
             data, ffit, stepwise_terms, options, metadata, always_selected=direct_terms
         )
 
-        # The result includes both direct terms (always selected) and stepwise terms
-        selected_terms = direct_terms + selected_stepwise_terms
+        # The result already includes both direct terms (always selected) and stepwise terms
+        selected_terms = selected_stepwise_terms
     else:
         # No terms specified - just fit zeropoints and fixed terms
         print("No variable terms specified - fitting zeropoints and fixed terms only")
@@ -273,7 +292,16 @@ def perform_photometric_fitting(data, options, metadata):
         selected_terms = []
 
     print(f"Final fit variance: {ffit.wssrndf}")
-    print(f"Selected terms: {selected_terms}")
+    if selected_terms:
+        # Filter out Z:n terms from grouped display (they're shown in 2D table)
+        non_z_terms = [t for t in selected_terms if not (t.startswith('Z:') or t == 'Z')]
+        if non_z_terms:
+            print("Selected terms:")
+            print(ffit.format_grouped_terms(non_z_terms))
+        else:
+            print("Selected terms: Only zeropoints (shown in table above)")
+    else:
+        print("No terms selected")
 
     return ffit
 
@@ -409,7 +437,7 @@ def write_results(data, ffit, options, alldet, target, zpntest):
             try:
                 astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "LIMMAG", 0, value=zero[img]+det.meta['LIMFLX3'])
                 astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "MAGZERO", 0, value=zero[img])
-                astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "RESPONSE", 0, value=ffit.oneline())
+                astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "RESPONSE", 0, value=ffit.oneline_for_image(img + 1))
             except Exception as e:
                 logging.warning(f"Writing LIMMAG/MAGZERO/RESPONSE to an astrometrized image failed: {e}")
         logging.info(f"Writing to astrometrized image took {time.time()-start:.3f}s")
@@ -434,10 +462,10 @@ def write_results(data, ffit, options, alldet, target, zpntest):
         # solving nonlinearity introduced poor fix for this value during fit
         det.meta['MAGZERO'] = zero[img]
         det.meta['DMAGZERO'] = zerr[img]
-        det.meta['MAGLIMIT'] = det.meta['LIMFLX3']+zero[img]+10  # +10 because the nature of our zeropoint
+        det.meta['MAGLIMIT'] = det.meta['LIMFLX3']+zero[img]  # Now using astronomical zeropoint directly
         det.meta['WSSRNDF'] = ffit.wssrndf
 
-        det.meta['RESPONSE'] = ffit.oneline()
+        det.meta['RESPONSE'] = ffit.oneline_for_image(img + 1)
 
         if (zerr[img] < 0.2) or (options.reject is None):
             det.write(fn, format="ascii.ecsv", overwrite=True)
@@ -547,9 +575,9 @@ def write_output_line(det, options, zero, zerr, ffit, target):
         data_target = np.array([[target['MAG_AUTO']], [det.meta['AIRMASS']], [tarx], [tary], [0], [0], [0], [0], [det.meta['IMGNO']], [0], [0], [0.5], [0.5]])
         mo = ffit.model(np.array(ffit.fitvalues), data_target)
 
-        out_line = f"{det.meta['FITSFILE']} {det.meta['JD']:.6f} {chartime:.6f} {det.meta['FILTER']} {det.meta['EXPTIME']:3.0f} {det.meta['AIRMASS']:6.3f} {det.meta['IDNUM']:4d} {zero:7.3f} {zerr:6.3f} {det.meta['LIMFLX3']+zero+10:7.3f} {ffit.wssrndf:6.3f} {mo[0]:7.3f} {target['MAGERR_AUTO']:6.3f} {tarid} {obsid} ok"
+        out_line = f"{det.meta['FITSFILE']} {det.meta['JD']:.6f} {chartime:.6f} {det.meta['FILTER']} {det.meta['EXPTIME']:3.0f} {det.meta['AIRMASS']:6.3f} {det.meta['IDNUM']:4d} {zero:7.3f} {zerr:6.3f} {det.meta['LIMFLX3']+zero:7.3f} {ffit.wssrndf:6.3f} {mo[0]:7.3f} {target['MAGERR_AUTO']:6.3f} {tarid} {obsid} ok"
     else:
-        out_line = f"{det.meta['FITSFILE']} {det.meta['JD']:.6f} {chartime:.6f} {det.meta['FILTER']} {det.meta['EXPTIME']:3.0f} {det.meta['AIRMASS']:6.3f} {det.meta['IDNUM']:4d} {zero:7.3f} {zerr:6.3f} {det.meta['LIMFLX3']+zero+10:7.3f} {ffit.wssrndf:6.3f}  99.999  99.999 {tarid} {obsid} not_found"
+        out_line = f"{det.meta['FITSFILE']} {det.meta['JD']:.6f} {chartime:.6f} {det.meta['FILTER']} {det.meta['EXPTIME']:3.0f} {det.meta['AIRMASS']:6.3f} {det.meta['IDNUM']:4d} {zero:7.3f} {zerr:6.3f} {det.meta['LIMFLX3']+zero:7.3f} {ffit.wssrndf:6.3f}  99.999  99.999 {tarid} {obsid} not_found"
 
     print(out_line)
 

@@ -343,7 +343,7 @@ def compute_zeropoints_all_filters(data, metadata, options):
             print(f"Note: {len(missing_filters)} catalog filters not loaded during schema processing: {sorted(missing_filters)}")
             print(f"Testing {len(filters_to_test)} available filters: {sorted(filters_to_test)}")
     
-    print(f"Computing zeropoints for {len(filters_to_test)} filter(s)...")
+    # Computing zeropoints for multiple filters
     
     for filter_name in filters_to_test:
         data.set_current_filter(filter_name)

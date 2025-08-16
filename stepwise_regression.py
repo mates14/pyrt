@@ -59,11 +59,13 @@ def expand_pseudo_term(term):
 
     if term[0] == '.':
         if term[1] == 'p':
-            # Surface polynomial
-            pol_order = int(term[2:])
+            # Surface polynomial - handle default order
+            order_str = term[2:] if len(term) > 2 else '1'
+            pol_order = int(order_str) if order_str else 1
             for pp in range(1, pol_order + 1):
                 for rr in range(0, pp + 1):
-                    expanded_terms.append(format_polynomial_term(rr, pp-rr))
+                    term_name = format_polynomial_term(rr, pp-rr)
+                    expanded_terms.append(term_name)
         if term[1] == 's':
             # subpixel variation
             expanded_terms.append("SXY")
@@ -75,8 +77,9 @@ def expand_pseudo_term(term):
             expanded_terms.append("RS")
             expanded_terms.append("RO")
         elif term[1] in ['r', 'c', 'd', 'e', 'f', 'n']:
-            # 1D polynomial (radial and other types)
-            pol_order = int(term[2:])
+            # 1D polynomial (radial and other types) - handle default order
+            order_str = term[2:] if len(term) > 2 else '1'
+            pol_order = int(order_str) if order_str else 1
             for pp in range(1, pol_order + 1):
                 if pp == 1:
                     # P1R → PR, P1C → PC, P1D → PD, etc. (omit the 1)
@@ -102,7 +105,7 @@ def parse_terms_simple(terms_string):
     """
     return [term.strip() for term in terms_string.split(',') if term.strip()]
 
-def parse_terms(terms_string):
+def parse_terms(terms_string, n_images=1):
     """
     Parse extended term syntax supporting value assignment, fixed terms, and stepwise control.
 
@@ -111,11 +114,13 @@ def parse_terms(terms_string):
     - #PC=0.2    : Fix term at specific value
     - @PR        : Force stepwise regression
     - &P2X       : Force direct fitting
+    - *PX        : Per-image term (expands to PX_1, PX_2, etc.)
     - PC         : Use default behavior based on --use-stepwise
     - .p3        : Macros work with all modifiers
 
     Args:
         terms_string (str): Comma-separated string of terms with modifiers
+        n_images (int): Number of images for per-image term expansion
 
     Returns:
         dict: Dictionary with keys:
@@ -147,20 +152,28 @@ def parse_terms(terms_string):
         initial_value = None
         fixed_value = None
 
-        # Check for fixed term prefix (#)
-        if term.startswith('#'):
+        # Parse all modifiers - they can be combined (e.g., *@PX, *#PC=0.1)
+        is_per_image = False
+
+        # Check for per-image modifier (*)
+        if '*' in term:
+            is_per_image = True
+            term = term.replace('*', '', 1)  # Remove first occurrence
+
+        # Check for fixed term modifier (#)
+        if '#' in term:
             is_fixed = True
-            term = term[1:]
+            term = term.replace('#', '', 1)  # Remove first occurrence
 
-        # Check for stepwise prefix (@)
-        elif term.startswith('@'):
+        # Check for stepwise modifier (@)
+        elif '@' in term:
             is_stepwise = True
-            term = term[1:]
+            term = term.replace('@', '', 1)  # Remove first occurrence
 
-        # Check for direct prefix (&)
-        elif term.startswith('&'):
+        # Check for direct modifier (&)
+        elif '&' in term:
             is_direct = True
-            term = term[1:]
+            term = term.replace('&', '', 1)  # Remove first occurrence
 
         # Check for value assignment (=)
         if '=' in term:
@@ -178,6 +191,14 @@ def parse_terms(terms_string):
 
         # Expand pseudo-terms (e.g., .p3 -> P1X, PY, P1XY, etc.)
         expanded_terms = expand_pseudo_term(term)
+
+        # Handle per-image expansion if * modifier was used
+        if is_per_image:
+            per_image_terms = []
+            for base_term in expanded_terms:
+                for img_idx in range(1, n_images + 1):
+                    per_image_terms.append(f"{base_term}:{img_idx}")
+            expanded_terms = per_image_terms
 
         # Apply the parsed modifiers to all expanded terms
         for expanded_term in expanded_terms:
@@ -198,23 +219,52 @@ def parse_terms(terms_string):
                 if initial_value is not None:
                     result['initial_values'][expanded_term] = initial_value
 
-    # Remove duplicates and handle priority: fixed > direct > stepwise > default
-    # Fixed terms take precedence over everything
-    fixed_terms = set(result['fixed'].keys())
+    # Conflict resolution with priorities:
+    # 1. Fixed > everything else
+    # 2. Per-image > global (for same base term)
+    # 3. Direct > stepwise (for same scope)
 
-    # Remove fixed terms from direct, stepwise, and default lists
-    result['direct'] = [t for t in result['direct'] if t not in fixed_terms]
-    result['stepwise'] = [t for t in result['stepwise'] if t not in fixed_terms]
-    result['default'] = [t for t in result['default'] if t not in fixed_terms]
+    def resolve_conflicts(result):
+        """Apply priority-based conflict resolution"""
 
-    # Direct terms take precedence over stepwise and default
-    direct_terms = set(result['direct'])
-    result['stepwise'] = [t for t in result['stepwise'] if t not in direct_terms]
-    result['default'] = [t for t in result['default'] if t not in direct_terms]
+        # Step 1: Fixed terms take precedence over everything
+        fixed_terms = set(result['fixed'].keys())
+        result['direct'] = [t for t in result['direct'] if t not in fixed_terms]
+        result['stepwise'] = [t for t in result['stepwise'] if t not in fixed_terms]
+        result['default'] = [t for t in result['default'] if t not in fixed_terms]
 
-    # Stepwise terms take precedence over default
-    stepwise_terms = set(result['stepwise'])
-    result['default'] = [t for t in result['default'] if t not in stepwise_terms]
+        # Step 2: Per-image terms remove conflicting global terms
+        # Collect all per-image terms and their base names
+        all_terms = result['direct'] + result['stepwise'] + result['default']
+        per_image_bases = set()
+
+        for term in all_terms:
+            if ':' in term and term.split(':')[-1].isdigit():
+                base_term = term.rsplit(':', 1)[0]
+                per_image_bases.add(base_term)
+
+        # Remove global versions of terms that have per-image versions
+        def filter_global_conflicts(term_list):
+            return [t for t in term_list if not (t in per_image_bases)]
+
+        result['direct'] = filter_global_conflicts(result['direct'])
+        result['stepwise'] = filter_global_conflicts(result['stepwise'])
+        result['default'] = filter_global_conflicts(result['default'])
+
+        # Step 3: Direct > stepwise > default (for same scope)
+        direct_terms = set(result['direct'])
+        result['stepwise'] = [t for t in result['stepwise'] if t not in direct_terms]
+        result['default'] = [t for t in result['default'] if t not in direct_terms]
+
+        stepwise_terms = set(result['stepwise'])
+        result['default'] = [t for t in result['default'] if t not in stepwise_terms]
+
+        return result
+
+    result = resolve_conflicts(result)
+
+    # Zeropoint terms are now explicitly added in dophot3.py with computed values
+    # No need to auto-add them here
 
     return result
 
@@ -395,7 +445,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
             print(f"Added term {best_new_term} (improvement: {best_improvement:.1%}). New wssrndf: {best_wssrndf}")
 
             # Apply the new mask to data
-            data.apply_mask(best_new_mask, 'current')
+            data.apply_mask(best_new_mask, 'photometry')
 
 #            print(f"Before removal step: wssrndf={best_wssrndf}")
             # Backward step - check if any terms can be removed in parallel

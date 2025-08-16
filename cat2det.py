@@ -61,7 +61,6 @@ def read_options(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
     parser.add_argument("-v", "--verbose", action='store_true', help="Print debugging info.")
     parser.add_argument("-o", "--output", action='store_true', help="Output file.")
-    parser.add_argument("-n", "--nonlin", help="CCD is not linear, apply linear correction on mag.", action='store_true')
     parser.add_argument("-f", "--filter", help="Override filter info from fits", type=str)
     parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
     opts = parser.parse_args(args)
@@ -299,7 +298,6 @@ def remove_junk(hdr):
 
 def process_detections(det: astropy.table.Table,
                       fits_path: str,
-                      nonlin: bool = False,
                       filter_override: Optional[str] = None,
                       verbose: bool = False) -> astropy.table.Table:
     """Main detection processing function that can be called programmatically"""
@@ -421,7 +419,6 @@ def main():
             del det.meta['keywords']
 
         det = process_detections(det, filef,
-                               nonlin=options.nonlin,
                                filter_override=options.filter,
                                verbose=options.verbose)
 
