@@ -735,12 +735,14 @@ def main():
     logging.info(ffit)
     logging.info(f"Photometric fit took {time.time()-start:.3f}s")
 
-    # Update det objects if filter was changed during discovery/validation
-    final_filter = metadata[0]['PHFILTER']
-    for i, det in enumerate(alldet):
-        if det.meta['FILTER'] != final_filter:
-            logging.info(f"Updating det object {i}: {det.meta['FILTER']} → {final_filter}")
-            det.meta['FILTER'] = final_filter
+    # Update det objects if filter was changed during discovery
+    filter_check_mode = getattr(options, 'filter_check', 'none')
+    if filter_check_mode in ['d', 'discover']:
+        final_filter = metadata[0]['PHFILTER']
+        for i, det in enumerate(alldet):
+            if det.meta['FILTER'] != final_filter:
+                logging.info(f"Updating det object {i}: {det.meta['FILTER']} → {final_filter}")
+                det.meta['FILTER'] = final_filter
 
     if options.reject:
         if ffit.wssrndf > options.reject:
