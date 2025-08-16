@@ -20,6 +20,7 @@ makak = False
 filter_check = none
 stars = False
 gain = 2.3
+use_stepwise = True
 
 [FILTER_SCHEMAS]
 JohnsonU = Johnson_U, Johnson_B, Johnson_V, Johnson_R, Johnson_I
@@ -134,6 +135,8 @@ def parse_arguments(args=None):
     parser.add_argument("-M", "--model", help="Read model from a file", type=str)
     parser.add_argument("-n", "--nonlin", help="CCD is not linear, apply linear correction on mag", action='store_true')
     parser.add_argument("--no-stepwise", help="Disable stepwise regression and fit terms directly", action="store_true")
+    parser.add_argument("--use-stepwise", action="store_true", default=config.get('use_stepwise', 'True'),
+                        help="Default behavior for unmarked terms: use stepwise regression (default) vs direct fitting")
     parser.add_argument("-p", "--plot", help="Produce plots", action='store_true')
     parser.add_argument("-r", "--reject", help="No outputs for Reduced Chi^2 > value", type=float)
     parser.add_argument("--remove-spatial", help="Remove spatial terms and concentrate to color response fit", action='store_true')
@@ -165,7 +168,7 @@ def parse_arguments(args=None):
     args.filter_schemas = config['filter_schemas']
 
     # Convert string 'True'/'False' to boolean for action="store_true" arguments
-    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'fsr']:
+    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'fsr', 'use_stepwise']:
         setattr(args, arg, str(getattr(args, arg)).lower() == 'true')
 
     return args

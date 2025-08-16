@@ -219,100 +219,63 @@ def perform_photometric_fitting(data, options, metadata):
     # Perform initial fit with just the zeropoints
     fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
 
-    # Decision point: stepwise regression vs direct fitting
-    if options.no_stepwise:
-        # Direct fitting - fast path
-        print("Stepwise regression disabled - fitting terms directly")
-
-        if options.terms:
-            # Parse and expand terms
-            direct_terms = []
-            for term in parse_terms(options.terms):
-                direct_terms.extend(expand_pseudo_term(term))
-
-            print(f"Fitting terms directly: {direct_terms}")
-
-            # Set up fitting object
-            ffit.fixall()
-
-            # Use initial values if available
-            if initial_values:
-                values = [initial_values.get(term, 1e-6) for term in direct_terms]
-            else:
-                values = [1e-6] * len(direct_terms)
-
-            ffit.fitterm(direct_terms, values=values)
-            selected_terms = direct_terms
-        else:
-            # No terms specified - just fit zeropoints
-            print("No terms specified - fitting zeropoints only")
-            selected_terms = []
-
-        # Single fit with outlier rejection
-        ffit.fit(fdata)
-
-        # Apply 5-sigma clipping and refit
-        residuals = ffit.residuals(ffit.fitvalues, fdata)
-        photo_mask = residuals < 5 * ffit.wssrndf
-        data.apply_mask(photo_mask, 'photometry')
-        data.use_mask('photometry')
-
-        fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2',
-                               'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
-        ffit.fit(fdata)
-
+    # Parse extended term syntax if terms are provided
+    if options.terms:
+        parsed_terms = parse_terms(options.terms)
+        print(f"Parsed terms: stepwise={parsed_terms['stepwise']}, direct={parsed_terms['direct']}, "
+              f"fixed={list(parsed_terms['fixed'].keys())}, default={parsed_terms['default']}")
     else:
-        # Stepwise regression - existing logic
-        print("Using stepwise regression")
+        parsed_terms = {'stepwise': [], 'direct': [], 'fixed': {}, 'initial_values': {}, 'default': []}
 
-        # Set up terms for stepwise regression
-        all_terms = []
-        if options.terms:
-            for term in parse_terms(options.terms):
-                all_terms.extend(expand_pseudo_term(term))
+    # Merge initial values from model file and command line
+    combined_initial_values = {**initial_values, **parsed_terms['initial_values']}
 
-        # Perform bidirectional stepwise regression
-        selected_terms, final_wssrndf = perform_stepwise_regression(
-            data, ffit, all_terms, options, metadata
+    # Determine term assignment based on --use-stepwise default and per-term modifiers
+    if options.use_stepwise:
+        # Default behavior is stepwise for unmarked terms
+        stepwise_terms = parsed_terms['stepwise'] + parsed_terms['default']
+        direct_terms = parsed_terms['direct']
+        print(f"Default: stepwise. Stepwise terms: {stepwise_terms}, Direct terms: {direct_terms}")
+    else:
+        # Default behavior is direct for unmarked terms
+        stepwise_terms = parsed_terms['stepwise']
+        direct_terms = parsed_terms['direct'] + parsed_terms['default']
+        print(f"Default: direct. Stepwise terms: {stepwise_terms}, Direct terms: {direct_terms}")
+
+    # Set up fixed terms first
+    ffit.fixall()  # Reset all terms
+    if parsed_terms['fixed']:
+        fixed_terms = list(parsed_terms['fixed'].keys())
+        fixed_values = list(parsed_terms['fixed'].values())
+        print(f"Setting fixed terms: {dict(zip(fixed_terms, fixed_values))}")
+        ffit.fixterm(fixed_terms, values=fixed_values)
+
+    # Handle the unified fitting approach
+    if stepwise_terms or direct_terms:
+        print(f"Using unified stepwise approach:")
+        print(f"  - Always selected (direct): {direct_terms}")
+        print(f"  - Stepwise candidates: {stepwise_terms}")
+
+        # Pass combined initial values to stepwise regression
+        options._combined_initial_values = combined_initial_values
+
+        # Perform stepwise regression with always-selected direct terms
+        selected_stepwise_terms, final_wssrndf = perform_stepwise_regression(
+            data, ffit, stepwise_terms, options, metadata, always_selected=direct_terms
         )
 
-        # Final fit with refined mask
-        data.use_mask('default')
-        fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
-        photo_mask = ffit.residuals(ffit.fitvalues, fdata) < 5 * ffit.wssrndf
-        data.apply_mask(photo_mask, 'photometry')
-        data.use_mask('photometry')
-        # 1.
-        fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
+        # The result includes both direct terms (always selected) and stepwise terms
+        selected_terms = direct_terms + selected_stepwise_terms
+    else:
+        # No terms specified - just fit zeropoints and fixed terms
+        print("No variable terms specified - fitting zeropoints and fixed terms only")
         ffit.fit(fdata)
+        selected_terms = []
 
     print(f"Final fit variance: {ffit.wssrndf}")
     print(f"Selected terms: {selected_terms}")
 
     return ffit
-
-def setup_photometric_model(ffit, options, trying=None):
-    """
-    Set up the photometric model based on command line options.
-
-    Args:
-    ffit (fotfit.fotfit): The photometric fitting object.
-    options (argparse.Namespace): Command line options.
-    """
-
-    # Load model from file if specified
-    if options.model:
-        load_model_from_file(ffit, options.model)
-
-    ffit.fixall()  # Fix all terms initially
-    #ffit.fixterm(["N1"], values=[0])
-
-    # Set up fitting terms
-    if trying is None:
-        if options.terms:
-            setup_fitting_terms(ffit, options.terms, options.verbose, options.fit_xy)
-    else:
-        setup_fitting_terms(ffit, trying, options.verbose, options.fit_xy)
 
 def load_model_from_file(ffit, model_file):
     """
@@ -335,66 +298,6 @@ def load_model_from_file(ffit, model_file):
 #        except:
 #            pass
     print(f"Cannot open model {model_file}")
-
-def setup_fitting_terms(ffit, terms, verbose, fit_xy):
-    """
-    Set up fitting terms based on the provided options.
-
-    Args:
-    ffit (fotfit.fotfit): The photometric fitting object.
-    terms (str): Comma-separated list of terms to fit.
-    verbose (bool): Whether to print verbose output.
-    fit_xy (bool): Whether to fit xy tilt for each image separately.
-    """
-    for term in terms.split(","):
-        if term == "":
-            continue  # Skip empty terms
-        if term[0] == '.':
-            setup_polynomial_terms(ffit, term, verbose, fit_xy)
-        else:
-            ffit.fitterm([term], values=[1e-6])
-
-def setup_polynomial_terms(ffit, term, verbose, fit_xy):
-    """
-    Set up polynomial terms for fitting.
-
-    Args:
-    ffit (fotfit.fotfit): The photometric fitting object.
-    term (str): The polynomial term descriptor.
-    verbose (bool): Whether to print verbose output.
-    fit_xy (bool): Whether to fit xy tilt for each image separately.
-    """
-    if term[1] == 'p':
-        setup_surface_polynomial(ffit, term, verbose, fit_xy)
-    elif term[1] == 'r':
-        setup_radial_polynomial(ffit, term, verbose)
-
-def setup_surface_polynomial(ffit, term, verbose, fit_xy):
-    """Set up surface polynomial terms."""
-    pol_order = int(term[2:])
-    if verbose:
-        print(f"Setting up a surface polynomial of order {pol_order}:")
-    polytxt = "P(x,y)="
-    for pp in range(1, pol_order + 1):
-        if fit_xy and pp == 1:
-            continue
-        for rr in range(0, pp + 1):
-            polytxt += f"+P{rr}X{pp-rr}Y*x**{rr}*y**{pp-rr}"
-            ffit.fitterm([f"P{rr}X{pp-rr}Y"], values=[1e-6])
-    if verbose:
-        print(polytxt)
-
-def setup_radial_polynomial(ffit, term, verbose):
-    """Set up radial polynomial terms."""
-    pol_order = int(term[2:])
-    if verbose:
-        print(f"Setting up a polynomial of order {pol_order} in radius:")
-    polytxt = "P(r)="
-    for pp in range(1, pol_order + 1):
-        polytxt += f"+P{pp}R*(x**2+y**2)**{pp}"
-        ffit.fitterm([f"P{pp}R"], values=[1e-6])
-    if verbose:
-        print(polytxt)
 
 def update_det_file(fitsimgf: str, options): #  -> Tuple[Optional[Table], str]:
     """Update the .det file using cat2det.py."""

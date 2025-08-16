@@ -8,6 +8,43 @@ import numpy as np
 import concurrent.futures
 from copy import deepcopy
 
+def format_polynomial_term(x_power, y_power):
+    """
+    Format polynomial term in human-friendly notation.
+
+    Rules:
+    - P0X1Y → PY (omit 0 coefficients, omit 1 exponents)
+    - P1X0Y → PX
+    - P1X1Y → PXY
+    - P2X0Y → P2X
+    - P0X2Y → P2Y
+    - P2X3Y → P2X3Y
+
+    Args:
+        x_power (int): Power of X
+        y_power (int): Power of Y
+
+    Returns:
+        str: Human-friendly term name
+    """
+    result = "P"
+
+    # Handle X component
+    if x_power > 0:
+        if x_power == 1:
+            result += "X"  # P1X → PX
+        else:
+            result += f"{x_power}X"  # P2X, P3X, etc.
+
+    # Handle Y component
+    if y_power > 0:
+        if y_power == 1:
+            result += "Y"  # P1Y → PY
+        else:
+            result += f"{y_power}Y"  # P2Y, P3Y, etc.
+
+    return result
+
 def expand_pseudo_term(term):
     """
     Expands pseudo-terms like '.p3' or '.r2' into their constituent terms.
@@ -26,7 +63,7 @@ def expand_pseudo_term(term):
             pol_order = int(term[2:])
             for pp in range(1, pol_order + 1):
                 for rr in range(0, pp + 1):
-                    expanded_terms.append(f"P{rr}X{pp-rr}Y")
+                    expanded_terms.append(format_polynomial_term(rr, pp-rr))
         if term[1] == 's':
             # subpixel variation
             expanded_terms.append("SXY")
@@ -38,19 +75,24 @@ def expand_pseudo_term(term):
             expanded_terms.append("RS")
             expanded_terms.append("RO")
         elif term[1] in ['r', 'c', 'd', 'e', 'f', 'n']:
-            # Radial polynomial
+            # 1D polynomial (radial and other types)
             pol_order = int(term[2:])
             for pp in range(1, pol_order + 1):
-                expanded_terms.append(f"P{pp}{term[1].upper()}")
+                if pp == 1:
+                    # P1R → PR, P1C → PC, P1D → PD, etc. (omit the 1)
+                    expanded_terms.append(f"P{term[1].upper()}")
+                else:
+                    # P2R, P3R, P2C, P3C, etc. (keep higher numbers)
+                    expanded_terms.append(f"P{pp}{term[1].upper()}")
     else:
         # Regular term, no expansion needed
         expanded_terms.append(term)
 
     return expanded_terms
 
-def parse_terms(terms_string):
+def parse_terms_simple(terms_string):
     """
-    Parse the terms string into a list of individual terms.
+    Parse the terms string into a list of individual terms (legacy function).
 
     Args:
         terms_string (str): Comma-separated string of terms.
@@ -59,6 +101,122 @@ def parse_terms(terms_string):
         list: List of individual terms.
     """
     return [term.strip() for term in terms_string.split(',') if term.strip()]
+
+def parse_terms(terms_string):
+    """
+    Parse extended term syntax supporting value assignment, fixed terms, and stepwise control.
+
+    Syntax:
+    - PC=0.2     : Set initial value
+    - #PC=0.2    : Fix term at specific value
+    - @PR        : Force stepwise regression
+    - &P2X       : Force direct fitting
+    - PC         : Use default behavior based on --use-stepwise
+    - .p3        : Macros work with all modifiers
+
+    Args:
+        terms_string (str): Comma-separated string of terms with modifiers
+
+    Returns:
+        dict: Dictionary with keys:
+            - 'stepwise': list of terms for stepwise regression
+            - 'direct': list of terms for direct fitting
+            - 'fixed': dict of {term: value} for fixed terms
+            - 'initial_values': dict of {term: value} for initial values
+            - 'default': list of terms using default behavior
+    """
+    result = {
+        'stepwise': [],
+        'direct': [],
+        'fixed': {},
+        'initial_values': {},
+        'default': []
+    }
+
+    if not terms_string:
+        return result
+
+    terms = [term.strip() for term in terms_string.split(',') if term.strip()]
+
+    for term in terms:
+        # Parse modifiers and values
+        original_term = term
+        is_fixed = False
+        is_stepwise = False
+        is_direct = False
+        initial_value = None
+        fixed_value = None
+
+        # Check for fixed term prefix (#)
+        if term.startswith('#'):
+            is_fixed = True
+            term = term[1:]
+
+        # Check for stepwise prefix (@)
+        elif term.startswith('@'):
+            is_stepwise = True
+            term = term[1:]
+
+        # Check for direct prefix (&)
+        elif term.startswith('&'):
+            is_direct = True
+            term = term[1:]
+
+        # Check for value assignment (=)
+        if '=' in term:
+            term_name, value_str = term.split('=', 1)
+            try:
+                value = float(value_str)
+                if is_fixed:
+                    fixed_value = value
+                else:
+                    initial_value = value
+            except ValueError:
+                print(f"Warning: Invalid value '{value_str}' for term '{term_name}', ignoring")
+                continue
+            term = term_name
+
+        # Expand pseudo-terms (e.g., .p3 -> P1X, PY, P1XY, etc.)
+        expanded_terms = expand_pseudo_term(term)
+
+        # Apply the parsed modifiers to all expanded terms
+        for expanded_term in expanded_terms:
+            if is_fixed:
+                # Fixed terms: use fixed_value if specified, otherwise need existing value
+                result['fixed'][expanded_term] = fixed_value if fixed_value is not None else 0.0
+            elif is_stepwise:
+                result['stepwise'].append(expanded_term)
+                if initial_value is not None:
+                    result['initial_values'][expanded_term] = initial_value
+            elif is_direct:
+                result['direct'].append(expanded_term)
+                if initial_value is not None:
+                    result['initial_values'][expanded_term] = initial_value
+            else:
+                # Default behavior - will be determined by --use-stepwise setting
+                result['default'].append(expanded_term)
+                if initial_value is not None:
+                    result['initial_values'][expanded_term] = initial_value
+
+    # Remove duplicates and handle priority: fixed > direct > stepwise > default
+    # Fixed terms take precedence over everything
+    fixed_terms = set(result['fixed'].keys())
+
+    # Remove fixed terms from direct, stepwise, and default lists
+    result['direct'] = [t for t in result['direct'] if t not in fixed_terms]
+    result['stepwise'] = [t for t in result['stepwise'] if t not in fixed_terms]
+    result['default'] = [t for t in result['default'] if t not in fixed_terms]
+
+    # Direct terms take precedence over stepwise and default
+    direct_terms = set(result['direct'])
+    result['stepwise'] = [t for t in result['stepwise'] if t not in direct_terms]
+    result['default'] = [t for t in result['default'] if t not in direct_terms]
+
+    # Stepwise terms take precedence over default
+    stepwise_terms = set(result['stepwise'])
+    result['default'] = [t for t in result['default'] if t not in stepwise_terms]
+
+    return result
 
 def setup_terms(ffit, terms, initial_values=None):
     """
@@ -137,7 +295,7 @@ def try_remove_term_parallel(term_to_remove, current_terms, ffit, fdata, initial
     new_wssrndf, _ = try_term_robust(ffit, None, test_terms, fdata, initial_values)
     return term_to_remove, new_wssrndf
 
-def perform_stepwise_regression(data, ffit, initial_terms, options, metadata):
+def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, always_selected=None):
     """
     Perform bidirectional stepwise regression while maintaining robustness to outliers.
     Uses parallel processing for both forward and backward steps.
@@ -145,15 +303,17 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata):
     Args:
         data: PhotometryData object containing the data
         ffit: fotfit object for model fitting
-        initial_terms: List of initial terms to consider
+        initial_terms: List of initial terms to consider for stepwise selection
         options: Command line options
         metadata: List of metadata for the images
+        always_selected: List of terms that should always be selected (never removed)
 
     Returns:
         tuple: (selected_terms, final_wssrndf)
     """
-    # Initialize with just zeropoints
-    selected_terms = []
+    # Initialize with always selected terms (direct terms)
+    always_selected = always_selected or []
+    selected_terms = always_selected.copy()
     remaining_terms = initial_terms.copy()
 
     # Get initial fit data
@@ -161,9 +321,25 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata):
                            'color2', 'color3', 'color4', 'img', 'x', 'dy',
                            'image_x', 'image_y')
 
-    # Initial fit
+    # Initial fit with always selected terms
     ffit.fixall()
-    ffit.fit(fdata) # i.e. this only fits the zeropoint and optionally PX,PY if fit_xy
+    if always_selected:
+        # Set up always selected terms (direct terms) with their initial values
+        initial_values_for_direct = {}
+        if options.model:
+            for term, value in zip(ffit.fixterms + ffit.fitterms,
+                                 ffit.fixvalues + ffit.fitvalues):
+                initial_values_for_direct[term] = value
+
+        # Use command line initial values if available
+        if hasattr(options, '_combined_initial_values'):
+            initial_values_for_direct.update(options._combined_initial_values)
+
+        values = [initial_values_for_direct.get(term, 1e-6) for term in always_selected]
+        ffit.fitterm(always_selected, values=values)
+        print(f"Starting with always-selected terms: {always_selected}")
+
+    ffit.fit(fdata) # Fits zeropoint, optionally PX/PY if fit_xy, and always_selected terms
     best_wssrndf = ffit.wssrndf
 
     # Load initial values from model if available
@@ -223,17 +399,19 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata):
 
 #            print(f"Before removal step: wssrndf={best_wssrndf}")
             # Backward step - check if any terms can be removed in parallel
-            if len(selected_terms) > 1:  # Keep at least one term
+            # Only consider removing terms that are not in always_selected
+            removable_terms = [t for t in selected_terms if t not in always_selected]
+            if len(removable_terms) > 0:  # Keep at least one term, but respect always_selected
                 worst_term = None
                 smallest_degradation = float('inf')
 
                 with concurrent.futures.ProcessPoolExecutor() as executor:
-                    # Submit all term removal trials in parallel
+                    # Submit all term removal trials in parallel (only for removable terms)
                     futures = [
                         executor.submit(try_remove_term_parallel,
                                      term, selected_terms,
                                      ffit, fdata, initial_values)
-                        for term in selected_terms
+                        for term in removable_terms
                     ]
 
                     # Process results as they complete
