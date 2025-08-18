@@ -217,6 +217,19 @@ class zpnfit(termfit.termfit):
                 except: # if it does not work, screw it, it is not mandatory
                     pass
 
+            # Write astrometric solution quality parameters
+            if hasattr(self, 'wssrndf'):
+                try:
+                    set_value('ASTWSSR', self.wssrndf)  # Astrometric WSSR/NDF
+                except:
+                    pass
+
+            if hasattr(self, 'variance'):
+                try:
+                    set_value('ASTVAR', self.variance)  # Astrometric variance
+                except:
+                    pass
+
             # Write fixed and fitted terms
             for term, value in zip(self.fixterms + self.fitterms,
                                  self.fixvalues + self.fitvalues):
