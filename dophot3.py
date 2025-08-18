@@ -222,10 +222,8 @@ def perform_photometric_fitting(data, options, metadata):
     # Build forced zeropoint terms from computed values
     z_terms = []
     for i, zp in enumerate(zeropoints, 1):
-        if len(zeropoints) == 1:
-            z_terms.append(f"&Z={zp}")  # Single image: &Z=20.1
-        else:
-            z_terms.append(f"&Z:{i}={zp}")  # Multiple images: &Z:1=20.1, &Z:2=20.3
+        # Always use per-image format for consistency, even with single image
+        z_terms.append(f"&Z:{i}={zp}")  # Always: &Z:1=20.1, &Z:2=20.3, etc.
 
     # PREPEND zeropoint terms to user terms
     terms_parts = z_terms.copy()
