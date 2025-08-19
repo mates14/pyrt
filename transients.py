@@ -1213,8 +1213,8 @@ try:
 except:
     title = "Transients"
 
-# Count valid transients (NSTAT > 3.5, at least 4 points out of 6)
-valid_transients = [oo for oo in trans if oo['NSTAT'] > 3.5]
+# Count valid transients (NSTAT > 2.0, at least 4 points out of 6)
+valid_transients = [oo for oo in trans if oo['NSTAT'] > 2.0]
 
 if len(valid_transients) > 0:
     print(f"Creating matplotlib plot for {len(valid_transients)} valid transients...")
