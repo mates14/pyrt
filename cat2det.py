@@ -62,11 +62,13 @@ def read_options(args=sys.argv[1:]):
     parser.add_argument("-v", "--verbose", action='store_true', help="Print debugging info.")
     parser.add_argument("-o", "--output", action='store_true', help="Output file.")
     parser.add_argument("-f", "--filter", help="Override filter info from fits", type=str)
+    parser.add_argument("--target-photometry", action='store_true', default=True,
+                        help="Enable direct photometry of RTS2 target coordinates (default: True)")
     parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
     opts = parser.parse_args(args)
     return opts
 
-def fix_time(hdr, verbose=False):
+def fix_time(hdr, target_photometry=True, verbose=False):
     """fixes time-related problems in a FITS header"""
 
     # these three need to be put in sync together with a few lower priority keywords
@@ -133,11 +135,12 @@ def fix_time(hdr, verbose=False):
     time = astropy.time.Time(hdr['JD'], format='jd')
 
     # for stellar physics with high time resolution, BJD is very useful
-    ondrejov = EarthLocation(lat=hdr['LATITUDE']*u.deg, lon=hdr['LONGITUD']*u.deg, height=hdr['ALTITUDE']*u.m)
-    with suppress(KeyError):
-        target = SkyCoord(hdr['ORIRA'], hdr['ORIDEC'], unit=u.deg)
-        hdr['BJD'] = hdr['JD'] + time.light_travel_time(target, kind='barycentric', location=ondrejov,
-            ephemeris='builtin').to_value('jd',subfmt='float')
+    if target_photometry:
+        ondrejov = EarthLocation(lat=hdr['LATITUDE']*u.deg, lon=hdr['LONGITUD']*u.deg, height=hdr['ALTITUDE']*u.m)
+        with suppress(KeyError):
+            target = SkyCoord(hdr['ORIRA'], hdr['ORIDEC'], unit=u.deg)
+            hdr['BJD'] = hdr['JD'] + time.light_travel_time(target, kind='barycentric', location=ondrejov,
+                ephemeris='builtin').to_value('jd',subfmt='float')
 
 def calculate_background_stats(data):
     """Calculate background sigma using row differences method"""
@@ -299,6 +302,7 @@ def remove_junk(hdr):
 def process_detections(det: astropy.table.Table,
                       fits_path: str,
                       filter_override: Optional[str] = None,
+                      target_photometry: bool = True,
                       verbose: bool = False) -> astropy.table.Table:
     """Main detection processing function that can be called programmatically"""
 
@@ -323,7 +327,7 @@ def process_detections(det: astropy.table.Table,
     det.meta['CHIP_ID'] = load_chip_id(c)
 
     fix_latlon(det.meta, verbose=verbose)
-    fix_time(det.meta, verbose=verbose)
+    fix_time(det.meta, target_photometry=target_photometry, verbose=verbose)
     get_limits(det, verbose=verbose)
 
     imgwcs = astropy.wcs.WCS(det.meta)
@@ -346,21 +350,24 @@ def process_detections(det: astropy.table.Table,
 
     # RTS2 true target coordinates: ORIRA/ORIDEC
     # it sounds stupid, but comes from complicated telescope pointing logic
-    det.meta['OBJRA'] = -100
-    with suppress(KeyError): det.meta['OBJRA'] = np.float64(c['ORIRA'])
-    det.meta['OBJDEC'] = -100
-    with suppress(KeyError): det.meta['OBJDEC'] = np.float64(c['ORIDEC'])
+    if target_photometry:
+        det.meta['OBJRA'] = -100
+        with suppress(KeyError): det.meta['OBJRA'] = np.float64(c['ORIRA'])
+        det.meta['OBJDEC'] = -100
+        with suppress(KeyError): det.meta['OBJDEC'] = np.float64(c['ORIDEC'])
 
-    try:
-        tmp = imgwcs.all_world2pix(det.meta['OBJRA'], det.meta['OBJDEC'], 0)
-    except RuntimeError:
-        print("Error: Bad astrometry, cannot continue")
-        return None
+        try:
+            tmp = imgwcs.all_world2pix(det.meta['OBJRA'], det.meta['OBJDEC'], 0)
+        except RuntimeError:
+            print("Error: Bad astrometry, cannot continue")
+            return None
 
-
-    if verbose:
-        with suppress(KeyError):
-            print(f"Target is {det.meta['OBJECT']} at ra:{det.meta['OBJRA']} dec:{det.meta['OBJDEC']} -> x:{tmp[0]} y:{tmp[1]}")
+        if verbose:
+            with suppress(KeyError):
+                print(f"Target is {det.meta['OBJECT']} at ra:{det.meta['OBJRA']} dec:{det.meta['OBJDEC']} -> x:{tmp[0]} y:{tmp[1]}")
+    else:
+        det.meta['OBJRA'] = -100
+        det.meta['OBJDEC'] = -100
 
     det.meta['CTRX'] = c['NAXIS1']/2
     det.meta['CTRY'] = c['NAXIS2']/2
@@ -420,6 +427,7 @@ def main():
 
         det = process_detections(det, filef,
                                filter_override=options.filter,
+                               target_photometry=options.target_photometry,
                                verbose=options.verbose)
 
         output = os.path.splitext(filef)[0] + ".det"

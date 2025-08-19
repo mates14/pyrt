@@ -18,6 +18,8 @@ def read_options(args=sys.argv[1:]):
     parser.add_argument("-a", "--aperture", help="Override an automated aperture choice", type=float)
     parser.add_argument("-I", "--noiraf", help="Do not use IRAF", action='store_true')
     parser.add_argument("-b", "--background", help="Save the background check image", action='store_true')
+    parser.add_argument("--target-photometry", action='store_true', default=True,
+                        help="Enable direct photometry of RTS2 target coordinates (default: True)")
     parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
     opts = parser.parse_args(args)
     return opts
@@ -218,6 +220,7 @@ def process_photometry(file: str,
                       noiraf: bool = False,
                       aperture: Optional[float] = None,
                       background: bool = False,
+                      target_photometry: bool = True,
                       verbose: bool = False) -> astropy.table.Table:
     """Main photometry processing function that can be called programmatically"""
 
@@ -229,44 +232,45 @@ def process_photometry(file: str,
     print("W/H:",det.meta['IMAGEW'],det.meta['IMAGEH'])
 
     # Get target coordinates and prepare to track its ID
-    orix, oriy = try_target(file)
     target_sextractor_id = None
+    if target_photometry:
+        orix, oriy = try_target(file)
 
-    # If we have valid target coordinates, add them to detections
-    if orix is not None and oriy is not None and not np.isnan(orix) and not np.isnan(oriy):
-        # Check if target is far enough from all detections
-        is_unique = True
-        for x, y in zip(det['X_IMAGE'], det['Y_IMAGE']):
-            distance = np.sqrt((x - orix)**2 + (y - oriy)**2)
-            if distance <= new_fwhm:
-                is_unique = False
-                break
+        # If we have valid target coordinates, add them to detections
+        if orix is not None and oriy is not None and not np.isnan(orix) and not np.isnan(oriy):
+            # Check if target is far enough from all detections
+            is_unique = True
+            for x, y in zip(det['X_IMAGE'], det['Y_IMAGE']):
+                distance = np.sqrt((x - orix)**2 + (y - oriy)**2)
+                if distance <= new_fwhm:
+                    is_unique = False
+                    break
 
-        if is_unique:
-            # Create a new row as a dictionary with all required fields
-            target_dict = {
-                'NUMBER': len(det) + 1,  # New sequential number at the end
-                'X_IMAGE': orix,
-                'Y_IMAGE': oriy,
-                'ALPHA_J2000': 0,  # or calculate from WCS if needed
-                'DELTA_J2000': 0,  # or calculate from WCS if needed
-                'MAG_AUTO': 99,  # placeholder
-                'MAGERR_AUTO': 99,  # placeholder
-                'FWHM_IMAGE': new_fwhm,  # use median FWHM
-                'ELLIPTICITY': 0,
-                'FLAGS': 0,
-                'ERRX2_IMAGE': 0,
-                'ERRY2_IMAGE': 0
-            }
+            if is_unique:
+                # Create a new row as a dictionary with all required fields
+                target_dict = {
+                    'NUMBER': len(det) + 1,  # New sequential number at the end
+                    'X_IMAGE': orix,
+                    'Y_IMAGE': oriy,
+                    'ALPHA_J2000': 0,  # or calculate from WCS if needed
+                    'DELTA_J2000': 0,  # or calculate from WCS if needed
+                    'MAG_AUTO': 99,  # placeholder
+                    'MAGERR_AUTO': 99,  # placeholder
+                    'FWHM_IMAGE': new_fwhm,  # use median FWHM
+                    'ELLIPTICITY': 0,
+                    'FLAGS': 0,
+                    'ERRX2_IMAGE': 0,
+                    'ERRY2_IMAGE': 0
+                }
 
-            # Create a single-row table from the dictionary
-            target_row = astropy.table.Table([target_dict])
+                # Create a single-row table from the dictionary
+                target_row = astropy.table.Table([target_dict])
 
-            # Remember the sextractor ID we assigned to target
-            target_sextractor_id = target_dict['NUMBER']
+                # Remember the sextractor ID we assigned to target
+                target_sextractor_id = target_dict['NUMBER']
 
-            # Add target row to the end of detections
-            det = astropy.table.vstack([det, target_row])
+                # Add target row to the end of detections
+                det = astropy.table.vstack([det, target_row])
 
     if noiraf:
         tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
@@ -325,6 +329,7 @@ def main():
                                noiraf=options.noiraf,
                                aperture=options.aperture,
                                background=options.background,
+                               target_photometry=options.target_photometry,
                                verbose=True)
 
         tbl.write(base+".cat", format="ascii.ecsv", overwrite=True)

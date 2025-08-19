@@ -20,6 +20,7 @@ filter_check = none
 stars = False
 gain = 2.3
 use_stepwise = True
+target_photometry = True
 
 [FILTER_SCHEMAS]
 JohnsonU = Johnson_U, Johnson_B, Johnson_V, Johnson_R, Johnson_I
@@ -149,6 +150,9 @@ def parse_arguments(args=None):
     parser.add_argument("-y", "--fit-xy", action='store_true', help="Fit xy tilt for each image separately (i.e. terms PX/PY)")
     parser.add_argument("-z", "--refit-zpn", action='store_true', help="Refit the ZPN radial terms")
     parser.add_argument("-Z", "--szp", action='store_true', help="use SZP while fitting astrometry")
+    parser.add_argument("--target-photometry", action='store_true', 
+                        default=config.get('target_photometry', 'True'),
+                        help="Enable direct photometry of RTS2 target coordinates (default: True)")
 
     parser.add_argument("-v", "--verbose", action="store_true",
                         default=config.get('verbose', 'False'), help="Print debugging info")
@@ -162,7 +166,7 @@ def parse_arguments(args=None):
     args.filter_schemas = config['filter_schemas']
 
     # Convert string 'True'/'False' to boolean for action="store_true" arguments
-    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'use_stepwise', 'stars', 'autoupdate']:
+    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'use_stepwise', 'stars', 'autoupdate', 'target_photometry']:
         setattr(args, arg, str(getattr(args, arg)).lower() == 'true')
 
     return args
