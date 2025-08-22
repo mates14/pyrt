@@ -196,17 +196,9 @@ class fotfit(termfit.termfit):
 
         radius2 = coord_x**2 + coord_y**2
 
-        # Convert instrumental magnitude to counts
-        counts = 10.0 ** (-0.4 * mc)
-
-        # Transform counts to be relative to reference point
-        REFERENCE_COUNTS = 10000.0
-        OFFSET = 0.01
-        transformed_counts = (counts + OFFSET) / REFERENCE_COUNTS
-        mct = -2.5 * np.log10(transformed_counts)
-
+        # Apply reference magnitude offset for numerical stability
         # Calculate base magnitude relative to reference point
-        model = mct
+        model = mct = mc + 10
 
         val2 = np.concatenate((values[0:len(self.fitterms)], np.array(self.fixvalues)))
 
@@ -297,9 +289,6 @@ class fotfit(termfit.termfit):
             denom = 1 + rational_c * x * x  # Square term for stability
             rational = rational_s * x / (denom + 1e-10)  # Small epsilon to prevent division by zero
             model += rational
-            #x = -mct
-            #rational_correction = (rational_a + rational_b * x) / (1 + rational_c * x)
-            #model += rational_correction
 
         # Zeropoints are now handled as regular Z:n terms in the main loop above
         # No need for special zeropoint handling here
