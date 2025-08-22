@@ -320,6 +320,7 @@ def try_term_robust(ffit, term, current_terms, fdata, initial_values=None):
         # Perform the fit
         try:
             new_ffit.fit(masked_data)
+
         except Exception as e:
             print(f"Fitting failed for terms {terms_to_fit}: {str(e)}")
             return float('inf'), None
@@ -389,8 +390,13 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
         ffit.fitterm(always_selected, values=values)
         print(f"Starting with always-selected terms: {always_selected}")
 
-    ffit.fit(fdata) # Fits zeropoint, optionally PX/PY if fit_xy, and always_selected terms
-    best_wssrndf = ffit.wssrndf
+    # Perform initial fit with sigma clipping using existing robust fitting function
+    # This ensures photometry mask is always created, even when no stepwise terms are selected
+    initial_wssrndf, initial_mask = try_term_robust(ffit, None, always_selected or [], fdata, initial_values_for_direct if 'initial_values_for_direct' in locals() else None)
+
+    # Store the photometry mask in the data object for plotting
+    data.add_mask('photometry', initial_mask)
+    best_wssrndf = initial_wssrndf
 
     # Load initial values from model if available
     initial_values = {}
