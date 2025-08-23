@@ -1,24 +1,18 @@
 #!/usr/bin/python3
 
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any, Type, TypeVar, cast
 import numpy as np
 import warnings
 import os
 import subprocess
 import tempfile
-import sys
 import astropy.table
 import astropy.io.ascii
 from astropy.coordinates import SkyCoord
 import astropy.units as u
-from contextlib import suppress
 import logging
-import subprocess
-import tempfile
 
-from dataclasses import asdict, dataclass
-from typing import Any, Dict, Optional, Tuple, Type, TypeVar, cast
 
 # Type aliases
 TableType = TypeVar("TableType", bound=astropy.table.Table)
@@ -279,7 +273,7 @@ class Catalog(astropy.table.Table):
 
         config = self.KNOWN_CATALOGS[self._catalog_name]
         result: Optional[astropy.table.Table] = None
-
+ 
         # Get catalog data
         if self._catalog_name == self.ATLAS:
             result = self._get_atlas_local()
@@ -294,7 +288,7 @@ class Catalog(astropy.table.Table):
         elif self._catalog_name == self.USNOB:
             result = self._get_usnob_data()
         else:
-            raise ValueError(f"Unknown catalog: {catalog}")
+            raise ValueError(f"Unknown catalog: {self._catalog_name}")
 
         if result is None:
             raise ValueError(f"No data retrieved from {self._catalog_name}")
@@ -511,10 +505,6 @@ class Catalog(astropy.table.Table):
             for gaia_name, our_name in config['column_mapping'].items():
                 if gaia_name in gaia_cat.columns:
                     result[our_name] = gaia_cat[gaia_name].astype(np.float64)
-#                gaia_name_err = gaia_name.replace('_mag_error', '_flux_over_error')
-#                if gaia_name_err in gaia_cat.columns:
-#                    flux_over_error = gaia_cat[gaia_name_err]
-#                    result[our_name] = 2.5 / (flux_over_error * np.log(10))
 
             # Based on Stetson stars
             bpg = result['BP'] - result['G']
@@ -596,7 +586,7 @@ class Catalog(astropy.table.Table):
             )
 
             if not result or len(result) == 0:
-                print("No USNO-B data found")
+                logging.warning("No USNO-B data found")
                 return None
 
             usnob = result[0]
