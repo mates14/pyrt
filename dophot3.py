@@ -649,11 +649,11 @@ def main():
     data.finalize()
 
     if imgno == 0:
-        print("No images found to work with, quit")
+        logging.error("No images found to work with")
         sys.exit(0)
 
     if len(data) == 0:
-        print("No objects found to work with, quit")
+        logging.error("No objects found to work with")
         sys.exit(0)
 
     logging.info(f"Photometry will be fitted with {len(data)} objects from {imgno} files")

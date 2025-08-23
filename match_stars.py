@@ -292,6 +292,11 @@ def process_image_with_dynamic_limits(det, options):
             catalog='makak' if options.makak else (options.catalog or 'atlas@localhost')
         )
 
+        # Check if catalog is empty (e.g., SDSS outside coverage area)
+        if len(cat) == 0:
+            logging.warning(f"Empty catalog from {options.catalog or 'atlas@localhost'} - no reference stars available")
+            return None, None, None, None
+
         if options.maglim is None:
             # this is for the adaptive magnitude limit
             # Match stars
@@ -327,6 +332,10 @@ def process_image_with_dynamic_limits(det, options):
                 catalog=catalog_name
             )
 
+            # Check if catalog is empty (e.g., SDSS outside coverage area)
+            if len(cat) == 0:
+                logging.warning(f"Empty catalog from {catalog_name} - no reference stars available")
+                return None, None, None, None
 
         logging.info(f"Matching {len(det)} objects from file with {len(cat)} objects from the catalog")
         # Final matching with full catalog
