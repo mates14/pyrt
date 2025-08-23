@@ -328,7 +328,9 @@ class Catalog(astropy.table.Table):
             raise ValueError(f"Unknown catalog: {self._catalog_name}")
 
         if result is None:
-            raise ValueError(f"No data retrieved from {self._catalog_name}")
+            # Create empty catalog with proper metadata for graceful handling
+            result = astropy.table.Table()
+            logging.warning(f"No data found in {self._catalog_name} for this field")
 
         result.meta.update({
             'catalog': self._catalog_name,
@@ -424,6 +426,7 @@ class Catalog(astropy.table.Table):
         )
 
         if not result or len(result) == 0:
+            logging.warning("No ATLAS VizieR data found")
             return None
 
         atlas = result[0]
@@ -474,6 +477,7 @@ class Catalog(astropy.table.Table):
         )
 
         if len(ps1) == 0:
+            logging.warning("No PanSTARRS data found")
             return None
 
         result = astropy.table.Table()
@@ -522,6 +526,7 @@ class Catalog(astropy.table.Table):
             gaia_cat = job.get_results()
 
             if len(gaia_cat) == 0:
+                logging.warning("No Gaia data found")
                 return None
 
             result = astropy.table.Table()
