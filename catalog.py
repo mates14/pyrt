@@ -45,6 +45,7 @@ class CatalogFilters:
     GAIA: FilterDict
     ATLAS: FilterDict
     USNOB: FilterDict
+    SDSS: FilterDict
 
     # Pan-STARRS DR2 filters
     PANSTARRS = {
@@ -86,6 +87,15 @@ class CatalogFilters:
         'I': CatalogFilter('I', 8100, 'AB', 'e_Imag'),
     }
 
+    # SDSS filters (using Sloan naming convention)
+    SDSS = {
+        'Sloan_u': CatalogFilter('Sloan_u', 3551, 'AB', 'Sloan_u_err'),
+        'Sloan_g': CatalogFilter('Sloan_g', 4686, 'AB', 'Sloan_g_err'),
+        'Sloan_r': CatalogFilter('Sloan_r', 6166, 'AB', 'Sloan_r_err'),
+        'Sloan_i': CatalogFilter('Sloan_i', 7480, 'AB', 'Sloan_i_err'),
+        'Sloan_z': CatalogFilter('Sloan_z', 8932, 'AB', 'Sloan_z_err'),
+    }
+
 class Catalog(astropy.table.Table):
     """
     Represents a stellar catalog with methods for retrieval and transformation.
@@ -99,6 +109,7 @@ class Catalog(astropy.table.Table):
     GAIA: str = 'gaia'
     MAKAK: str = 'makak'
     USNOB: str = 'usno'
+    SDSS: str = 'sdss'
 
     # Define available catalogs with their properties
     KNOWN_CATALOGS: Dict[str, CatalogConfig]
@@ -212,6 +223,30 @@ class Catalog(astropy.table.Table):
                 'pmRA': 'pmra',
                 'pmDE': 'pmdec'
             }
+        },
+        SDSS: {
+            'description': 'SDSS Data Release 16',
+            'filters': CatalogFilters.SDSS,
+            'epoch': 2000.0,
+            'local': False,
+            'service': 'VizieR',
+            'catalog_id': 'V/154/sdss16',
+            'column_mapping': {
+                'RA_ICRS': 'radeg',
+                'DE_ICRS': 'decdeg',
+                'upmag': 'Sloan_u',
+                'gpmag': 'Sloan_g',
+                'rpmag': 'Sloan_r',
+                'ipmag': 'Sloan_i',
+                'zpmag': 'Sloan_z',
+                'e_upmag': 'Sloan_u_err',
+                'e_gpmag': 'Sloan_g_err',
+                'e_rpmag': 'Sloan_r_err',
+                'e_ipmag': 'Sloan_i_err',
+                'e_zpmag': 'Sloan_z_err',
+                'pmRA': 'pmra',
+                'pmDE': 'pmdec',
+            }
         }
     }
 
@@ -287,6 +322,8 @@ class Catalog(astropy.table.Table):
             result = self._get_makak_data()
         elif self._catalog_name == self.USNOB:
             result = self._get_usnob_data()
+        elif self._catalog_name == self.SDSS:
+            result = self._get_sdss_data()
         else:
             raise ValueError(f"Unknown catalog: {self._catalog_name}")
 
@@ -625,6 +662,79 @@ class Catalog(astropy.table.Table):
 
         except Exception as e:
             raise ValueError(f"USNO-B query failed: {str(e)}")
+
+    def _get_sdss_data(self) -> Optional[astropy.table.Table]:
+        """Get SDSS DR16 data from VizieR"""
+        try:
+            from astroquery.vizier import Vizier
+
+            config = self.KNOWN_CATALOGS[self.SDSS]
+            column_mapping = config['column_mapping']
+
+            # Configure Vizier
+            vizier = Vizier(
+                columns=list(column_mapping.keys()),
+                column_filters={
+                    "rpmag": f"<{self._query_params.mlim}"  # Magnitude limit in r-band
+                },
+                row_limit=-1  # Get all matching objects
+            )
+
+            # Create coordinate object
+            coords = SkyCoord(
+                ra=self._query_params.ra*u.deg,
+                dec=self._query_params.dec*u.deg,
+                frame='icrs'
+            )
+
+            # Query VizieR (use 2x width/height for SDSS like catalog+sdss.py does)
+            result = vizier.query_region(
+                coords,
+                width=2*self._query_params.width * u.deg,
+                height=2*self._query_params.height * u.deg,
+                catalog=config['catalog_id']
+            )
+
+            if not result or len(result) == 0:
+                logging.warning("No SDSS data found")
+                return None
+
+            sdss = result[0]
+
+            # Create output catalog
+            cat = astropy.table.Table()
+
+            # Initialize mapped columns
+            our_columns = set(column_mapping.values())
+            for col in our_columns:
+                cat[col] = np.zeros(len(sdss), dtype=np.float64)
+
+            # Map columns according to configuration
+            for vizier_name, our_name in column_mapping.items():
+                if vizier_name in sdss.columns:
+                    # Convert proper motions from mas/yr to deg/yr if needed
+                    if vizier_name in ['pmRA', 'pmDE']:
+                        cat[our_name] = sdss[vizier_name] / (3.6e6)
+                    else:
+                        cat[our_name] = sdss[vizier_name]
+
+            # Handle quality flags and uncertainties
+            for band in ['u', 'g', 'r', 'i', 'z']:
+                mag_col = f'Sloan_{band}'
+                err_col = f'Sloan_{band}_err'
+                if mag_col in cat.columns:
+                    # Set typical errors if not provided
+                    if err_col not in cat.columns or np.all(cat[err_col] == 0):
+                        cat[err_col] = np.where(
+                            cat[mag_col] < 19,
+                            0.1,  # Brighter stars
+                            0.2   # Fainter stars
+                        )
+
+            return cat
+
+        except Exception as e:
+            raise ValueError(f"SDSS query failed: {str(e)}")
 
     def _get_makak_data(self) -> Optional[astropy.table.Table]:
         """Get data from pre-filtered MAKAK catalog"""
