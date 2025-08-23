@@ -604,47 +604,49 @@ def main():
     imgno=0
 
     for arg in options.files:
+        try:
+            det = process_input_file(arg, options)
+            if det is None:
+                logging.warning(f"I do not know what to do with {arg}")
+                continue
 
-        det = process_input_file(arg, options)
-        if det is None:
-            logging.warning(f"I do not know what to do with {arg}")
-            continue
+            catalog_name = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
+            determine_filter(det, options, catalog_name)
+            logging.info(f'Reference filter is {det.meta["PHFILTER"]}, '
+                    f'Schema: {det.meta["PHSCHEMA"]}, '
+                    f'System: {det.meta["PHSYSTEM"]}')
+            
+            start = time.time()
 
-        catalog_name = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
-        determine_filter(det, options, catalog_name)
-        logging.info(f'Reference filter is {det.meta["PHFILTER"]}, '
-                f'Schema: {det.meta["PHSCHEMA"]}, '
-                f'System: {det.meta["PHSYSTEM"]}')
+            cat, matches, imgwcs, target_match = process_image_with_dynamic_limits(det, options)
+            if cat is None:
+                logging.warning(f"Failed to process {arg}, skipping")
+                continue
 
-        start = time.time()
-
-        cat, matches, imgwcs, target_match = process_image_with_dynamic_limits(det, options)
-        if cat is None:
-            logging.warning(f"Failed to process {arg}, skipping")
-            continue
-
-        logging.info(f"Catalog processing took {time.time()-start:.3f}s")
+            logging.info(f"Catalog processing took {time.time()-start:.3f}s")
 
 
-        det['ALPHA_J2000'], det['DELTA_J2000'] = imgwcs.all_pix2world( [det['X_IMAGE']], [det['Y_IMAGE']], 1)
+            det['ALPHA_J2000'], det['DELTA_J2000'] = imgwcs.all_pix2world( [det['X_IMAGE']], [det['Y_IMAGE']], 1)
 
-        logging.info("Reference filter is %s, Photometric schema: %s, Photometric system: %s"\
-            %(det.meta['PHFILTER'],det.meta['PHSCHEMA'],det.meta['PHSYSTEM']))
+            logging.info("Reference filter is %s, Photometric schema: %s, Photometric system: %s"\
+                %(det.meta['PHFILTER'],det.meta['PHSCHEMA'],det.meta['PHSYSTEM']))
 
-        # make pairs to be fitted
-        det.meta['IMGNO'] = imgno
-        n_matched_stars = make_pairs_to_fit(det, cat, matches, imgwcs, options, data, None)
-        det.meta['IDNUM'] = n_matched_stars
+            # make pairs to be fitted
+            det.meta['IMGNO'] = imgno
+            n_matched_stars = make_pairs_to_fit(det, cat, matches, imgwcs, options, data, None)
+            det.meta['IDNUM'] = n_matched_stars
 
-        if n_matched_stars == 0:
-            logging.warning(f"No matched stars in {det.meta['FITSFILE']}, skipping image")
-            continue
+            if n_matched_stars == 0:
+                logging.warning(f"No matched stars in {det.meta['FITSFILE']}, skipping image")
+                continue
 
-        metadata.append(det.meta)
-        alldet.append(det)
-        target.append(target_match)
+            metadata.append(det.meta)
+            alldet.append(det)
+            target.append(target_match)
 
-        imgno += 1
+            imgno += 1
+        except Exception as e:
+            logging.error(f"Error processing {arg}: {e}")
 
     data.finalize()
 

@@ -28,9 +28,10 @@ JohnsonJ = Johnson_B, Johnson_V, Johnson_R, Johnson_I, J_Vega
 SloanU = Sloan_u, Sloan_g, Sloan_r, Sloan_i, Sloan_z
 SloanJ = Sloan_g, Sloan_r, Sloan_i, Sloan_z, J
 Gaia = BP, G, RP, BP, RP
-GaiaJ = Johnson_B, Johnson_V, Johnson_R, Johnson_I, Johnson_I  # Duplicate last filter to create zero color4, avoiding mixed AB/Vega systems
+GaiaJ = Johnson_B, Johnson_V, Johnson_R, Johnson_I, Johnson_I
 PS = g, r, i, z, y
 USNO = B2, R2, I, R1, B1
+SDSS = upmag, gpmag, rpmag, ipmag, zpmag
 """
 
 DEFAULT_CONFIG_FILE = '~/.config/dophot3/config'

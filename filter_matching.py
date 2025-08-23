@@ -106,7 +106,8 @@ def get_base_filter(det, options, catalog_name):
             'G': 5890, 'BP': 5050, 'RP': 7730,
             'Sloan_g': 4810, 'Sloan_r': 6170, 'Sloan_i': 7520, 'Sloan_z': 8660,
             'Johnson_U': 3600, 'Johnson_B': 4353, 'Johnson_V': 5477,
-            'Johnson_R': 6349, 'Johnson_I': 8797, 'N': 6000
+            'Johnson_R': 6349, 'Johnson_I': 8797, 'N': 6000,
+            'upmag': 3551, 'gpmag': 4686, 'rpmag': 6166, 'ipmag': 7480, 'zpmag': 8932,
         }
 
         target_wavelength = FILTER_WAVELENGTHS.get(filter_name)
