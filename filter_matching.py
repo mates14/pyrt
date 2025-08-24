@@ -32,7 +32,14 @@ def get_catalog_filters(catalog_name):
     """
     catalog_info = Catalog.KNOWN_CATALOGS.get(catalog_name)
     if catalog_info is None:
-        raise ValueError(f"Unknown catalog: {catalog_name}")
+        import logging
+        import sys
+        available_catalogs = list(Catalog.KNOWN_CATALOGS.keys())
+        logging.error(f"Unknown catalog '{catalog_name}'")
+        logging.error(f"Available catalogs: {', '.join(sorted(available_catalogs))}")
+        logging.error("Use one of the available catalogs with the -C option.")
+        logging.error("Example: dophot3.py -C atlas@localhost your_file.fits")
+        sys.exit(1)
     return catalog_info['filters']
 
 
