@@ -49,11 +49,11 @@ class CatalogFilters:
 
     # Pan-STARRS DR2 filters
     PANSTARRS = {
-        'g': CatalogFilter('gMeanPSFMag', 4810, 'AB', 'gMeanPSFMagErr'),
-        'r': CatalogFilter('rMeanPSFMag', 6170, 'AB', 'rMeanPSFMagErr'),
-        'i': CatalogFilter('iMeanPSFMag', 7520, 'AB', 'iMeanPSFMagErr'),
-        'z': CatalogFilter('zMeanPSFMag', 8660, 'AB', 'zMeanPSFMagErr'),
-        'y': CatalogFilter('yMeanPSFMag', 9620, 'AB', 'yMeanPSFMagErr'),
+        'g': CatalogFilter('g', 4810, 'AB', 'dg'),
+        'r': CatalogFilter('r', 6170, 'AB', 'dr'),
+        'i': CatalogFilter('i', 7520, 'AB', 'di'),
+        'z': CatalogFilter('z', 8660, 'AB', 'dz'),
+        'y': CatalogFilter('y', 9620, 'AB', 'dy'),
     }
     # Gaia DR3 filters
     GAIA = {
@@ -140,16 +140,16 @@ class Catalog(astropy.table.Table):
             'column_mapping': {
                 'raMean': 'radeg',
                 'decMean': 'decdeg',
-                'gMeanPSFMag': 'gMeanPSFMag',
-                'gMeanPSFMagErr': 'gMeanPSFMagErr',
-                'rMeanPSFMag': 'rMeanPSFMag',
-                'rMeanPSFMagErr': 'rMeanPSFMagErr',
-                'iMeanPSFMag': 'iMeanPSFMag',
-                'iMeanPSFMagErr': 'iMeanPSFMagErr',
-                'zMeanPSFMag': 'zMeanPSFMag',
-                'zMeanPSFMagErr': 'zMeanPSFMagErr',
-                'yMeanPSFMag': 'yMeanPSFMag',
-                'yMeanPSFMagErr': 'yMeanPSFMagErr'
+                'gMeanPSFMag': 'g',
+                'gMeanPSFMagErr': 'dg',
+                'rMeanPSFMag': 'r',
+                'rMeanPSFMagErr': 'dr',
+                'iMeanPSFMag': 'i',
+                'iMeanPSFMagErr': 'di',
+                'zMeanPSFMag': 'z',
+                'zMeanPSFMagErr': 'dz',
+                'yMeanPSFMag': 'y',
+                'yMeanPSFMagErr': 'dy'
             }
         },
         GAIA: {
@@ -308,7 +308,7 @@ class Catalog(astropy.table.Table):
 
         config = self.KNOWN_CATALOGS[self._catalog_name]
         result: Optional[astropy.table.Table] = None
- 
+
         # Get catalog data
         if self._catalog_name == self.ATLAS:
             result = self._get_atlas_local()
@@ -487,9 +487,30 @@ class Catalog(astropy.table.Table):
             if ps1_name in ps1.columns:
                 result[our_name] = ps1[ps1_name].astype(np.float64)
 
+        # Convert all MaskedArrays to regular arrays with NaN for missing values
+        # This eliminates all the confusion and unpredictable behavior of masked arrays
+        for col_name in result.columns:
+            if hasattr(result[col_name], 'mask'):
+                # Replace masked values with NaN and convert to regular array
+                result[col_name] = np.where(result[col_name].mask, np.nan, result[col_name].data)
+
+        # Filter out stars with missing data in any of the 5 filters
+        # This ensures complete photometry for color calculations and fitting
+        complete_mask = np.ones(len(result), dtype=bool)
+        for filter_name in ['g', 'r', 'i', 'z', 'y']:
+            if filter_name in result.columns:
+                # Simple NaN check - no mask complexity!
+                complete_mask &= ~np.isnan(result[filter_name])
+
+        logging.info(f"PanSTARRS: kept {np.sum(complete_mask)}/{len(result)} stars with complete g,r,i,z,y photometry")
+
+        # Apply the filter - only keep stars with complete 5-filter photometry
+        result = result[complete_mask]
+        logging.info(f"PanSTARRS: kept {len(result)} stars with complete g,r,i,z,y photometry")
+
         # Add proper motion columns (not provided by PanSTARRS)
-        result['pmra'] = np.zeros(len(ps1), dtype=np.float64)
-        result['pmdec'] = np.zeros(len(ps1), dtype=np.float64)
+        result['pmra'] = np.zeros(len(result), dtype=np.float64)
+        result['pmdec'] = np.zeros(len(result), dtype=np.float64)
 
         return result
 
