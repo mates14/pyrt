@@ -18,26 +18,23 @@ def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry')
     current_mask = data.get_current_mask()
     data.use_mask('default')
 
-    x, y, adif, coord_x, coord_y, color1, color2, color3, color4, img, dy, ra, dec, image_x, image_y, cat_x, cat_y = data.get_arrays(
-        'x', 'y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'dy', 'ra', 'dec', 'image_x', 'image_y', 'cat_x', 'cat_y'
-    )
+    fd = data.get_fitdata('x', 'y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'dy', 'ra', 'dec', 'image_x', 'image_y', 'cat_x', 'cat_y', 'airmass')
 
     # Calculate astrometric residuals (if available)
     try:
         imgwcs = astropy.wcs.WCS(afit.wcs())
-        astx, asty = imgwcs.all_world2pix( ra, dec, 1)
-        ast_residuals = np.sqrt((astx - coord_x)**2 + (asty - coord_y)**2)
+        astx, asty = imgwcs.all_world2pix(fd.ra, fd.dec, 1)
+        ast_residuals = np.sqrt((astx - fd.coord_x)**2 + (asty - fd.coord_y)**2)
     except (KeyError,AttributeError):
-        ast_residuals = np.zeros_like(x)  # If astrometric data is not available
+        ast_residuals = np.zeros_like(fd.x)  # If astrometric data is not available
 
-    # Calculate model magnitudes
-    model_input = (y, adif, coord_x, coord_y, color1, color2, color3, color4, img, x, dy, image_x, image_y)
-    model_mags = ffit.model(np.array(ffit.fitvalues), model_input)
+    # Calculate model magnitudes - use elegant fotparams property
+    model_mags = ffit.model(np.array(ffit.fitvalues), fd.fotparams)
 
     # Calculate center coordinates for radius calculation
-    X0 = np.mean(coord_x)
-    Y0 = np.mean(coord_y)
-    radius = np.sqrt((coord_y - Y0)**2 + (coord_x - X0)**2)
+    X0 = np.mean(fd.coord_x)
+    Y0 = np.mean(fd.coord_y)
+    radius = np.sqrt((fd.coord_y - Y0)**2 + (fd.coord_x - X0)**2)
 
     # Set up the plotting parameters
 #    plt.style.use('dark_background')
@@ -46,30 +43,30 @@ def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry')
 
     # List of parameters to plot
     params = [
-    #    ('Color x Airmass', adif * color1),
+    #    ('Color x Airmass', fd.adif * fd.color1),
         ('Radius', radius),
-        ('Color3', color3),
-    #    ('Color4', color4),
-        ('Color1', color1),
-        ('Color2', color2),
-        ('CoordX', coord_x),
-        ('CoordY', coord_y),
-        ('Catalog', x),
-        ('Airmass', adif)
+        ('Color3', fd.color3),
+    #    ('Color4', fd.color4),
+        ('Color1', fd.color1),
+        ('Color2', fd.color2),
+        ('CoordX', fd.coord_x),
+        ('CoordY', fd.coord_y),
+        ('Catalog', fd.x),
+        ('Airmass', fd.adif)
     ]
 
     aparams = [
-    #    ('Color x Airmass', adif * color1),
-        ('CoordX', coord_x),
-        ('CoordY', coord_y)
+    #    ('Color x Airmass', fd.adif * fd.color1),
+        ('CoordX', fd.coord_x),
+        ('CoordY', fd.coord_y)
     ]
 
     # Color mapping for points based on errors
-    error_colors = plt.cm.hsv(np.log10(dy))
+    error_colors = plt.cm.hsv(np.log10(fd.dy))
 
     if plot_type == 'photometry':
         # Magnitude residuals, up higher values, should me "measured brighter"
-        residuals = x - model_mags
+        residuals = fd.x - model_mags
         # I'd like to have 10-sigma here
         sigma = ffit.sigma
         ylim = (-sigma*7, sigma*7)
@@ -83,7 +80,7 @@ def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry')
 
             # Plot unmasked points with color coding
             sc = ax.scatter(param[current_mask], residuals[current_mask],
-                          c=dy[current_mask], cmap='hsv', s=2)
+                          c=fd.dy[current_mask], cmap='hsv', s=2)
 
             ax.set_ylabel('Magnitude Residuals')
             ax.set_xlabel(label)
@@ -93,12 +90,12 @@ def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry')
 #    else:  # astrometry
 
         try:
-            dx = image_x - astx
-            dy = image_y - asty
+            dx = fd.image_x - astx
+            dy = fd.image_y - asty
             sigma = afit.sigma
         except:
-            dx=np.zeros_like(image_x)
-            dy=np.zeros_like(image_x)
+            dx=np.zeros_like(fd.image_x)
+            dy=np.zeros_like(fd.image_x)
             sigma=0.1
 
         ylim = (-sigma*7, sigma*7)

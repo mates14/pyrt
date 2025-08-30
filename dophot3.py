@@ -89,25 +89,22 @@ def write_stars_file(data, ffit, imgwcs, filename="stars"):
     data.use_mask('default')
 
     # Get all required arrays
-    x, y, adif, coord_x, coord_y, color1, color2, color3, color4, img, dy, ra, dec, image_x, image_y, cat_x, cat_y = data.get_arrays(
-        'x', 'y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'dy', 'ra', 'dec', 'image_x', 'image_y', 'cat_x', 'cat_y'
-    )
+    fd_plot = data.get_fitdata('x', 'y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'dy', 'ra', 'dec', 'image_x', 'image_y', 'cat_x', 'cat_y', 'airmass')
 
-    # Calculate model magnitudes
-    model_input = (y, adif, coord_x, coord_y, color1, color2, color3, color4, img, x, dy, image_x, image_y)
-    model_mags = ffit.model(np.array(ffit.fitvalues), model_input)
+    # Calculate model magnitudes using fotparams
+    model_mags = ffit.model(np.array(ffit.fitvalues), fd_plot.fotparams)
 
     # Calculate astrometric residuals (if available)
     try:
-        astx, asty = imgwcs.all_world2pix( ra, dec, 1)
-        ast_residuals = np.sqrt((astx - coord_x)**2 + (asty - coord_y)**2)
+        astx, asty = imgwcs.all_world2pix(fd_plot.ra, fd_plot.dec, 1)
+        ast_residuals = np.sqrt((astx - fd_plot.coord_x)**2 + (asty - fd_plot.coord_y)**2)
     except KeyError:
-        ast_residuals = np.zeros_like(x)  # If astrometric data is not available
+        ast_residuals = np.zeros_like(fd_plot.x)  # If astrometric data is not available
 
     # Create a table with all the data
     stars_table = Table([
-        x, adif, image_x, image_y, color1, color2, color3, color4,
-        model_mags, dy, ra, dec, astx, asty, ast_residuals, current_mask, current_mask, current_mask, cat_x, cat_y
+        fd_plot.x, fd_plot.adif, fd_plot.image_x, fd_plot.image_y, fd_plot.color1, fd_plot.color2, fd_plot.color3, fd_plot.color4,
+        model_mags, fd_plot.dy, fd_plot.ra, fd_plot.dec, astx, asty, ast_residuals, current_mask, current_mask, current_mask, fd_plot.cat_x, fd_plot.cat_y
     ], names=[
         'cat_mags', 'airmass', 'image_x', 'image_y', 'color1', 'color2', 'color3', 'color4',
         'model_mags', 'mag_err', 'ra', 'dec', 'ast_x', 'ast_y', 'ast_residual', 'mask', 'mask2', 'mask3', 'cat_x', 'cat_y'
@@ -217,13 +214,20 @@ def perform_photometric_fitting(data, options, metadata):
         print(f"Loaded initial values from model for terms: {list(initial_values.keys())}")
 
     # Perform initial fit with just the zeropoints
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y')
+    fd = data.get_fitdata('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y', 'airmass')
 
     # Build forced zeropoint terms from computed values
     z_terms = []
-    for i, zp in enumerate(zeropoints, 1):
-        # Always use per-image format for consistency, even with single image
-        z_terms.append(f"&Z:{i}={zp}")  # Always: &Z:1=20.1, &Z:2=20.3, etc.
+    if options.single_zeropoint:
+        # Use single common zeropoint for all-sky fitting
+        avg_zp = np.mean(zeropoints)
+        z_terms.append(f"&Z={avg_zp:.6f}")
+        print(f"Single zeropoint mode: Z={avg_zp:.6f} (average of {len(zeropoints)} individual estimates)")
+    else:
+        # Use per-image zeropoints (traditional mode)
+        for i, zp in enumerate(zeropoints, 1):
+            # Always use per-image format for consistency, even with single image
+            z_terms.append(f"&Z:{i}={zp}")  # Always: &Z:1=20.1, &Z:2=20.3, etc.
 
     # PREPEND zeropoint terms to user terms
     terms_parts = z_terms.copy()
@@ -286,7 +290,7 @@ def perform_photometric_fitting(data, options, metadata):
     else:
         # No terms specified - just fit zeropoints and fixed terms
         print("No variable terms specified - fitting zeropoints and fixed terms only")
-        ffit.fit(fdata)
+        ffit.fit(fd.fotparams)
         selected_terms = []
 
     print(f"Final fit variance: {ffit.wssrndf}")
@@ -445,14 +449,15 @@ def write_results(data, ffit, options, alldet, target, zpntest):
         fn = os.path.splitext(det.meta['detf'])[0] + ".ecsv"
         det['MAG_CALIB'] = ffit.model(np.array(ffit.fitvalues),
             (   det['MAG_AUTO'],     # magnitude
-                det.meta['AIRMASS'], # airmass
+                0,                   # airmass (relative to image center = 0)
                 det['X_IMAGE']/1024 - det.meta['CTRX']/1024, # X-coord
                 det['Y_IMAGE']/1024 - det.meta['CTRY']/1024, # Y-coord
                 0, 0, 0, 0, # colors (zeroes, we output instrumental mag)
                 img,  # image index
                 0, 0, # y and dy (obviously not used in model)
                 det['X_IMAGE'], # x for pixel structure
-                det['Y_IMAGE']) # y for pixel structure
+                det['Y_IMAGE'], # y for pixel structure
+                det.meta['AIRMASS']) # airmass (absolute)
             )
         det['MAGERR_CALIB'] = np.sqrt(np.power(det['MAGERR_AUTO'],2)+np.power(zerr[img],2))
 
@@ -570,7 +575,7 @@ def write_output_line(det, options, zero, zerr, ffit, target):
     if target is not None:
         tarx = target['X_IMAGE']/1024 - det.meta['CTRX']/1024
         tary = target['Y_IMAGE']/1024 - det.meta['CTRY']/1024
-        data_target = np.array([[target['MAG_AUTO']], [det.meta['AIRMASS']], [tarx], [tary], [0], [0], [0], [0], [det.meta['IMGNO']], [0], [0], [0.5], [0.5]])
+        data_target = np.array([[target['MAG_AUTO']], [0], [tarx], [tary], [0], [0], [0], [0], [det.meta['IMGNO']], [0], [0], [0.5], [0.5], [det.meta['AIRMASS']]])
         mo = ffit.model(np.array(ffit.fitvalues), data_target)
 
         out_line = f"{det.meta['FITSFILE']} {det.meta['JD']:.6f} {chartime:.6f} {det.meta['FILTER']} {det.meta['EXPTIME']:3.0f} {det.meta['AIRMASS']:6.3f} {det.meta['IDNUM']:4d} {zero:7.3f} {zerr:6.3f} {det.meta['LIMFLX3']+zero:7.3f} {ffit.wssrndf:6.3f} {mo[0]:7.3f} {target['MAGERR_AUTO']:6.3f} {tarid} {obsid} ok"
@@ -633,7 +638,7 @@ def main():
 
         # make pairs to be fitted
         det.meta['IMGNO'] = imgno
-        n_matched_stars = make_pairs_to_fit(det, cat, matches, imgwcs, options, data, None)
+        n_matched_stars = make_pairs_to_fit(det, cat, matches, imgwcs, options, data, None, target_match)
         det.meta['IDNUM'] = n_matched_stars
 
         if n_matched_stars == 0:

@@ -368,9 +368,9 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
     remaining_terms = initial_terms.copy()
 
     # Get initial fit data
-    fdata = data.get_arrays('y', 'adif', 'coord_x', 'coord_y', 'color1',
-                           'color2', 'color3', 'color4', 'img', 'x', 'dy',
-                           'image_x', 'image_y')
+    fd = data.get_fitdata('y', 'adif', 'coord_x', 'coord_y', 'color1',
+                         'color2', 'color3', 'color4', 'img', 'x', 'dy',
+                         'image_x', 'image_y', 'airmass')
 
     # Initial fit with always selected terms
     ffit.fixall()
@@ -392,7 +392,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
 
     # Perform initial fit with sigma clipping using existing robust fitting function
     # This ensures photometry mask is always created, even when no stepwise terms are selected
-    initial_wssrndf, initial_mask = try_term_robust(ffit, None, always_selected or [], fdata, initial_values_for_direct if 'initial_values_for_direct' in locals() else None)
+    initial_wssrndf, initial_mask = try_term_robust(ffit, None, always_selected or [], fd.fotparams, initial_values_for_direct if 'initial_values_for_direct' in locals() else None)
 
     # Store the photometry mask in the data object for plotting
     data.add_mask('photometry', initial_mask)
@@ -422,7 +422,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
         with concurrent.futures.ProcessPoolExecutor() as executor:
             # Submit all term trials in parallel
             future_to_term = {
-                executor.submit(try_term_robust, ffit, term, selected_terms, fdata, initial_values): term
+                executor.submit(try_term_robust, ffit, term, selected_terms, fd.fotparams, initial_values): term
                 for term in remaining_terms
             }
 
@@ -466,7 +466,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
                     futures = [
                         executor.submit(try_remove_term_parallel,
                                      term, selected_terms,
-                                     ffit, fdata, initial_values)
+                                     ffit, fd.fotparams, initial_values)
                         for term in removable_terms
                     ]
 
@@ -515,6 +515,6 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
     # Final fit with all selected terms
     ffit.fixall()
     setup_terms(ffit, selected_terms, initial_values)
-    ffit.fit(fdata)
+    ffit.fit(fd.fotparams)
 
     return selected_terms, ffit.wssrndf

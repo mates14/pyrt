@@ -1,10 +1,94 @@
 # astrometry_refit.py
 
+import os
 import numpy as np
 #import astropy.wcs
 #import astropy.io.fits
 import zpnfit
 import logging
+import matplotlib.pyplot as plt
+
+def plot_astrometric_residuals(zpntest, data, filename="astrometric_residuals.png", arrow_scale=300):
+    """
+    Create diagnostic plot showing astrometric residuals as arrows
+
+    Args:
+        zpntest: Fitted ZPN model
+        data: PhotometryData object with current mask
+        filename: Output plot filename
+        arrow_scale: Arrow scaling factor for visibility
+    """
+    try:
+        # Get data arrays using current mask
+        ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+
+        # Calculate catalog positions in image coordinates using fitted WCS
+        x_cat, y_cat = zpntest.model(zpntest.fitvalues, ad.astparams)
+
+        # Calculate residual vectors
+        dx = ad.image_x - x_cat  # Detection - Catalog
+        dy = ad.image_y - y_cat
+        residual_mag = np.sqrt(dx**2 + dy**2)
+
+        # Debug information
+        print(f"Astrometric residuals: min={np.min(residual_mag):.4f}, max={np.max(residual_mag):.4f}, mean={np.mean(residual_mag):.4f}")
+        print(f"Scaled arrows: min={np.min(residual_mag*arrow_scale):.1f}, max={np.max(residual_mag*arrow_scale):.1f} pixels")
+        print(f"Image dimensions: x=[{np.min(ad.image_x):.0f}, {np.max(ad.image_x):.0f}], y=[{np.min(ad.image_y):.0f}, {np.max(ad.image_y):.0f}]")
+
+        # Create the plot
+        fig, ax = plt.subplots(figsize=(10, 10))
+
+        # Plot stars as blue dots
+        ax.scatter(ad.image_x, ad.image_y, c='blue', s=20, alpha=0.6, label='Detected positions')
+
+        # Plot residual arrows (scaled for visibility)
+        # Use better quiver parameters for small residuals
+        ax.quiver(ad.image_x, ad.image_y, dx * arrow_scale, dy * arrow_scale,
+                 residual_mag, scale_units='xy', scale=1, angles='xy',
+                 cmap='viridis', alpha=0.8, width=0.002, headwidth=3, headlength=4)
+
+        # Add colorbar for residual magnitude
+        cbar = plt.colorbar(ax.collections[-1], ax=ax)
+        cbar.set_label('Astrometric residual (pixels)', fontsize=12)
+
+        # Get image dimensions automatically
+        x_min, x_max = np.min(ad.image_x) - 50, np.max(ad.image_x) + 50
+        y_min, y_max = np.min(ad.image_y) - 50, np.max(ad.image_y) + 50
+
+        # Set equal aspect ratio and limits based on actual data
+        ax.set_aspect('equal')
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+
+        # Labels and title
+        ax.set_xlabel('X (pixels)', fontsize=12)
+        ax.set_ylabel('Y (pixels)', fontsize=12)
+        ax.set_title(f'Astrometric Residuals (arrows scaled ×{arrow_scale})\n'
+                    f'RMS: {np.sqrt(np.mean(residual_mag**2)):.3f} pixels', fontsize=14)
+
+        # Add statistics text
+        stats_text = f'Stars: {len(residual_mag)}\n'
+        stats_text += f'RMS: {np.sqrt(np.mean(residual_mag**2)):.3f} px\n'
+        stats_text += f'Max: {np.max(residual_mag):.3f} px\n'
+        stats_text += f'Median: {np.median(residual_mag):.3f} px'
+
+        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+        # Grid and legend
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right')
+
+        # Save plot
+        plt.tight_layout()
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+        plt.close()
+
+        logging.info(f"Astrometric residual plot saved to {filename}")
+        print(f"Astrometric residual plot saved to {filename}")
+
+    except Exception as e:
+        logging.warning(f"Failed to create astrometric residual plot: {e}")
 
 def refine_fit(zpntest, data):
     """
@@ -12,8 +96,8 @@ def refine_fit(zpntest, data):
     """
     # Remove all masks to compute residuals for all points
     data.use_mask('default')
-    adata_all = data.get_arrays('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
-    residuals = zpntest.residuals(zpntest.fitvalues, adata_all)
+    ad_all = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+    residuals = zpntest.residuals(zpntest.fitvalues, ad_all.astparams)
 
     # Create the astrometric mask
     astro_mask = residuals < 3.0 * zpntest.wssrndf
@@ -28,9 +112,9 @@ def refine_fit(zpntest, data):
     data.use_mask('combined')
 
     # Refine the fit with the combined mask
-    adata_ok = data.get_arrays('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+    ad_ok = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
     zpntest.delin = True
-    zpntest.fit(adata_ok)
+    zpntest.fit(ad_ok.astparams)
 
 def refit_astrometry(det, data, options):
     """
@@ -87,8 +171,8 @@ def refit_astrometry(det, data, options):
     data.use_mask('photometry')
 
     # Perform the initial fit
-    adata = data.get_arrays('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
-    zpntest.fit(adata)
+    ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+    zpntest.fit(ad.astparams)
 
     # Refine the fit
     refine_fit(zpntest, data)
@@ -99,8 +183,8 @@ def refit_astrometry(det, data, options):
         zpntest.fixall()
         data.use_mask('photometry')
         if options.sip > 2:
-            adata = data.get_arrays('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
-            rms,num = zpntest.fit_sip2(adata, options.sip)
+            ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+            rms,num = zpntest.fit_sip2(ad.astparams, options.sip)
             logging.info(f"Fitted a SIP{options.sip} on {num} objects with rms={rms}")
         else:
             zpntest.add_sip_terms(options.sip)
@@ -110,6 +194,14 @@ def refit_astrometry(det, data, options):
     # Save the model and print results
     zpntest.savemodel("astmodel.ecsv")
     print(zpntest)
+
+    # Create diagnostic plot of astrometric residuals if plotting is enabled
+    if options.plot:
+        base_filename = os.path.splitext(det.meta['FITSFILE'])[0]
+        plot_filename = f"{base_filename}-ast.png"
+        plot_astrometric_residuals(zpntest, data, plot_filename, arrow_scale=300)
+
+    # Error model analysis removed - now done in transients.py with full catalog
 
     return zpntest
 

@@ -4,7 +4,101 @@ from astropy.time import Time
 from astropy.coordinates import SkyCoord, AltAz, EarthLocation
 import astropy.units as u
 
+class FitData:
+    """
+    A wrapper for photometric fit data that behaves like a tuple but allows attribute access.
+
+    DESIGN PHILOSOPHY:
+    FitData represents an immutable snapshot of photometric data at a specific mask state.
+    It provides a clean interface for fitting functions while maintaining tuple compatibility
+    for legacy code. This class intentionally does NOT hold references to PhotometryData
+    to avoid complex masking state dependencies.
+
+    KEY DESIGN DECISIONS:
+    - Immutable: Once created, data cannot change (no mask switching surprises)
+    - Simple: Just data arrays + attribute access + tuple compatibility
+    - Focused: Only handles fitting interface, not data management
+    - Lightweight: Minimal overhead, created and discarded as needed
+
+    ANTI-PATTERNS TO AVOID:
+    - Making this a "view" of PhotometryData (breaks with mask switching)
+    - Adding data management features (that's PhotometryData's job)
+    - Lazy evaluation of properties (creates hidden state dependencies)
+
+    USAGE PATTERN:
+    fd = data.get_fitdata(...)     # Create snapshot with current mask
+    ffit.fit(fd.fotparams)         # Use for fitting
+    # fd is discarded, create new one after mask changes
+    """
+
+    def __init__(self, field_names, *arrays):
+        self._arrays = arrays
+        self._field_names = field_names
+        # Create attribute access for named fields
+        for i, name in enumerate(field_names):
+            if i < len(arrays):
+                setattr(self, name, arrays[i])
+
+    def __getitem__(self, index):
+        """Allow tuple-like indexing for backward compatibility."""
+        return self._arrays[index]
+
+    def __len__(self):
+        """Return number of arrays."""
+        return len(self._arrays)
+
+    def __iter__(self):
+        """Allow tuple unpacking for backward compatibility."""
+        return iter(self._arrays)
+
+    @property
+    def fotparams(self):
+        """Return tuple in the format expected by fotfit.model()."""
+        # fotfit expects: mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y, airmass_abs
+        # dophot3 passes: (y, adif, coord_x, coord_y, color1, color2, color3, color4, img, x, dy, image_x, image_y, airmass)
+        return (self.y, self.adif, self.coord_x, self.coord_y, self.color1, self.color2,
+                self.color3, self.color4, self.img, self.x, self.dy, self.image_x, self.image_y, self.airmass)
+
+    @property
+    def astparams(self):
+        """Return tuple in the format expected by zpntest.model(), zpntest.fit(), etc."""
+        # zpntest expects: image_x, image_y, ra, dec, image_dxy
+        return (self.image_x, self.image_y, self.ra, self.dec, self.image_dxy)
+
 class PhotometryData:
+    """
+    Manages photometric data with complex masking and filtering operations.
+
+    DESIGN PHILOSOPHY:
+    PhotometryData handles the complex data management aspects: storage, masking,
+    filtering, coordinate transformations, and metadata. It provides methods to
+    create immutable FitData snapshots for fitting operations.
+
+    KEY RESPONSIBILITIES:
+    - Data storage and organization (_data, _meta dictionaries)
+    - Complex masking operations (multiple named masks, mask switching)
+    - Data filtering and validation
+    - Coordinate transformations and airmass calculations
+    - Metadata management
+
+    MASKING WORKFLOW COMPLEXITY:
+    The masking system supports non-linear workflows like:
+    1. data.use_mask('photometry') → get data → fit
+    2. Calculate residuals on ALL data (different mask!)
+    3. data.add_mask('combined', new_mask) → switch → refit
+    4. Multiple concurrent mask states for different purposes
+
+    SEPARATION OF CONCERNS:
+    PhotometryData (data management) ↔ FitData (fitting interface)
+    This separation prevents architectural fusion attempts that would create
+    subtle bugs due to mask state dependencies and concurrent access patterns.
+
+    WHY NOT FUSION WITH FitData?
+    - PhotometryData: Complex, stateful, handles data management
+    - FitData: Simple, immutable, handles fitting interface
+    - Fusion would create timing bugs with mask switching
+    - Current design follows Unix philosophy: "Do one thing well"
+    """
     def __init__(self):
         self._data = {}
         self._meta = {}
@@ -53,6 +147,7 @@ class PhotometryData:
         # Calculate total objects after converting to arrays
         self._total_objects = len(next(iter(self._data.values())))
         # total_objects = sum(self._image_counts.values())
+
         # Create default mask of appropriate length
         self.add_mask('default', np.ones(self._total_objects, dtype=bool))
         self.use_mask('default')
@@ -100,11 +195,8 @@ class PhotometryData:
         #    color_mask &= (self._data['color1'] + self._data['color2'])/2 <= options.redlim
         #if options.bluelim is not None:
         #    color_mask &=  (self._data['color1'] + self._data['color2'])/2 >= options.bluelim
-        if options.redlim is not None and options.bluelim is not None:
-            color_mask = ((self._data['color1'] + self._data['color2'])/2 <= options.redlim) & \
-                         ((self._data['color1'] + self._data['color2'])/2 >= options.bluelim) & \
-                         (self._data['color3'] > 5)
-            self.apply_mask(color_mask)
+        # Color filtering is now handled at catalog input stage in make_pairs_to_fit()
+        pass
 
     def get_arrays(self, *names):
         """Get arrays applying the current mask."""
@@ -132,6 +224,20 @@ class PhotometryData:
                 raise KeyError(f"Column '{name}' not found in data. Available columns: {', '.join(self._data.keys())}")
 
         return tuple(arrays)
+
+    def get_fitdata(self, *names):
+        """
+        Create an immutable FitData snapshot of the requested data columns.
+
+        This method creates a FitData object containing the current masked state
+        of the requested columns. The resulting FitData is independent of this
+        PhotometryData object and will not change if masks are switched later.
+
+        Returns:
+            FitData: Immutable snapshot with attribute access and tuple compatibility
+        """
+        arrays = self.get_arrays(*names)
+        return FitData(names, *arrays)
 
     def apply_mask(self, mask, name=None):
         """Apply a new mask, ensuring proper length."""
@@ -182,7 +288,7 @@ class PhotometryData:
     def __repr__(self):
         return f"PhotometryData with columns: {list(self._data.keys())}, current filter: {self._current_filter}, current mask: {self._current_mask}"
 
-def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None):
+def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None, target_match=None):
     """
     Efficiently create pairs of data to be fitted.
 
@@ -218,9 +324,6 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None)
         coord_y = (det_data[:, 1] - det.meta['CTRY']) / 1024
 
         filter_mags = {}
-        for filter_name in cat.filters:
-            if filter_name in options.filter_schemas[det.meta['PHSCHEMA']]:
-                filter_mags[filter_name] = cat_data[filter_name]
 
         magcat = cat_data[det.meta['PHFILTER']]
         maglim = options.maglim or det.meta['MAGLIM']
@@ -228,18 +331,79 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None)
         if options.brightlim:
             mag_mask &= magcat >= options.brightlim
 
+        # Apply color limits using max/min of first three colors from catalog
+        # This targets problematic objects with extreme colors (e.g. i-z < -0.5)
+        if options.redlim is not None or options.bluelim is not None:
+            schema = options.filter_schemas[det.meta['PHSCHEMA']]
+
+            # Compute colors from catalog data
+            color1 = cat_data[schema[0]] - cat_data[schema[1]]  # e.g., g-r
+            color2 = cat_data[schema[1]] - cat_data[schema[2]]  # e.g., r-i
+            color3 = cat_data[schema[2]] - cat_data[schema[3]]  # e.g., i-z
+
+            # Use max/min of first three colors for red/blue limits
+            color_extreme = np.maximum(np.maximum(color1, color2), color3)
+            color_blue = np.minimum(np.minimum(color1, color2), color3)
+
+            # Start with current magnitude mask
+            color_mask = np.ones(len(cat_data), dtype=bool)
+
+            # Apply red limit if specified
+            if options.redlim is not None:
+                color_mask &= (color_extreme <= options.redlim)
+
+            # Apply blue limit if specified
+            if options.bluelim is not None:
+                color_mask &= (color_blue >= options.bluelim)
+
+            # Combine with magnitude mask
+            total_before = np.sum(mag_mask)
+            mag_mask &= color_mask
+            total_after = np.sum(mag_mask)
+            n_removed = total_before - total_after
+
+            if n_removed > 0:
+                print(f"Color filtering: {n_removed} objects removed ({n_removed/total_before*100:.1f}%)")
+                if options.redlim is not None:
+                    print(f"  Red limit: {options.redlim} (reddest color <= {options.redlim})")
+                if options.bluelim is not None:
+                    print(f"  Blue limit: {options.bluelim} (bluest color >= {options.bluelim})")
+
+        # Exclude target object from calibration if requested
+        logging.info(f"Target exclusion enabled: {options.exclude_target}, target found: {'Yes' if target_match is not None else 'No'}")
+        if options.exclude_target and target_match is not None:
+            idlimit = options.idlimit if options.idlimit else 2.0
+            target_x, target_y = target_match['X_IMAGE'], target_match['Y_IMAGE']
+            det_x, det_y = det_data[:, 0], det_data[:, 1]
+            distances = np.sqrt((det_x - target_x)**2 + (det_y - target_y)**2)
+            target_indices = distances < idlimit
+
+            n_target_removed = np.sum(target_indices & mag_mask)
+            if n_target_removed > 0:
+                mag_mask &= ~target_indices
+                print(f"Target exclusion: {n_target_removed} target object(s) excluded from calibration")
+                print(f"  Target position: ({target_x:.1f}, {target_y:.1f}), search radius: {idlimit:.1f} px")
+
         n_matched_stars = np.sum(mag_mask)
+
+        # Store filter data before applying magnitude mask
+        for filter_name in cat.filters:
+            if filter_name in options.filter_schemas[det.meta['PHSCHEMA']]:
+                if filter_name in cat_data.columns:
+                    # Apply magnitude mask to get filter data for matched stars only
+                    filter_mags[filter_name] = cat_data[filter_name][mag_mask]
 
         temp_dy = det_data[:, 3][mag_mask]
         temp_dy_no_zero = np.sqrt(np.power(temp_dy,2)+0.0004)
 
         _dx = det_data[:, 4][mag_mask]
         _dy = det_data[:, 5][mag_mask]
-        _image_dxy = np.sqrt(np.power(_dx,2) + np.power(_dy,2) + 0.0025)
+        _image_dxy = np.sqrt(np.power(_dx,2) + np.power(_dy,2) + 0.000025)
 
         data.extend(
             y=det_data[:, 2][mag_mask],
-            adif=airmass[mag_mask] - det.meta['AIRMASS'],
+            adif=airmass[mag_mask] - det.meta['AIRMASS'],  # Keep existing relative airmass
+            airmass=airmass[mag_mask],  # Add new absolute airmass column
             coord_x=coord_x[mag_mask],
             coord_y=coord_y[mag_mask],
             img=np.full(n_matched_stars, det.meta['IMGNO']),
@@ -254,7 +418,7 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None)
         )
 
         for filter_name, mag_values in filter_mags.items():
-            data.add_filter_column(filter_name, mag_values[mag_mask])
+            data.add_filter_column(filter_name, mag_values)
 
         if det.meta['PHFILTER'] in filter_mags:
             data.set_current_filter(det.meta['PHFILTER'])
