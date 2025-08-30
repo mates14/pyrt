@@ -176,7 +176,8 @@ class fotfit(termfit.termfit):
             np.full(shape, img),
             np.zeros(shape),  # y (not used in flat field calculation)
             np.ones(shape), # err (set to 1, not used in model calculation)
-            x_fine, y_fine
+            x_fine, y_fine,
+            np.ones(shape)   # airmass_abs (set to 1 for flat field)
             )
 
         # Use the existing model function to calculate the flat field
@@ -190,7 +191,7 @@ class fotfit(termfit.termfit):
 
     def model(self, values, data):
         """Optimized photometric response model"""
-        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y = data
+        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y, airmass_abs = data
         values = np.asarray(values)
         img = np.int64(img)
 
@@ -243,7 +244,7 @@ class fotfit(termfit.termfit):
                 frac_y = cat_y - np.floor(cat_y)
                 model[img_mask] += value * np.sin(np.pi * frac_x[img_mask]) * np.sin(np.pi * frac_y[img_mask])
             elif term_to_process[0] == 'P':
-                components = {'A': airmass, 'C': color1, 'D': color2, 'E': color3, 'F': color4,
+                components = {'A': airmass_abs, 'B': airmass, 'C': color1, 'D': color2, 'E': color3, 'F': color4,
                               'R': radius2, 'X': coord_x, 'Y': coord_y, 'N': mct }
                 pterm = np.full_like(model, value)
                 n = 1
@@ -304,18 +305,24 @@ class fotfit(termfit.termfit):
 
     def residuals0(self, values, data):
         """pure residuals to compute sigma and similar things"""
-        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y = data
+        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y, airmass_abs = data
         return np.abs(y - self.model(values, data))
 
-    def residuals(self, values, data):
-        """residuals for fitting with error weighting and delinearization"""
-        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y = data
-        # Which power of the err is best here? Higher power prioritizes bright stars.
+    def fit_residuals(self, values, data):
+        """residuals for fitting with robust weighting - prioritizes bright stars"""
+        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y, airmass_abs = data
+        # Higher power of err prioritizes bright stars during fitting
         dist = np.abs((y - self.model(values, data))/np.power(err,2.5))
         if self.delin:
             return self.cauchy_delin(dist)
         else:
             return dist
+
+    def residuals(self, values, data):
+        """proper chi-squared residuals for statistics calculation"""
+        mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y, airmass_abs = data
+        # Standard 1/sigma weighting for proper chi-squared statistics
+        return (y - self.model(values, data)) / err
 
     def oneline(self):
         """Enhanced model string with filter information"""
