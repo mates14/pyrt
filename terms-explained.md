@@ -104,18 +104,21 @@ Any polynomial combination is possible: `PC`, `P2C`, `PD`, `PC2D`, `PCDF`, etc.
 - **`SC`** = Sophisticated universal color term for unknown responses
 
 #### Atmospheric Variables
-- **A** = Airmass (differential relative to image center)
+- **A** = Airmass (absolute - total atmospheric path length)
+- **B** = Airmass (relative to image center - differential extinction)
 - **N** = Instrumental magnitude (for nonlinearity)
 
 Examples:
-- **`PA`** = Linear airmass correction (⚠️ correlates with PX/PY - needs large fields + good airmass coverage)
-- **`PAC`** = Atmospheric color term (needs very large sky coverage)
+- **`PA`** = Linear absolute airmass correction (for all-sky work)
+- **`PAC`** = **Atmospheric reddening** - how atmosphere differentially absorbs colors (red vs blue)
+- **`PB`** = Linear relative airmass correction (⚠️ correlates with PX/PY - needs large fields + good airmass coverage)
+- **`PBC`** = Relative airmass color term
 
 #### ⚠️ Nonlinearity Warning
 - **`PN`, `P2N`** = Polynomial nonlinearity terms - **DISCOURAGED!** Tends to fail spectacularly
 - **`.l`** = Better approach → `RC`, `RO`, `RS` terms designed specifically for nonlinearity
 
-**Note**: Only differential airmass (relative to image center) is implemented. PA terms practically always correlate with PX/PY spatial terms, so they're only useful for large field images with multi-image photometry covering good airmass range.
+**Note**: Both absolute (A) and relative (B) airmass are available. PB terms practically always correlate with PX/PY spatial terms, so they're only useful for large field images with multi-image photometry covering good airmass range. PA terms are designed for all-sky work and single-zeropoint modeling (-Z option).
 
 ### Special Terms
 - **`.l`** → `RC`, `RS`, `RO` (nonlinearity corrections)
