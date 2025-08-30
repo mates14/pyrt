@@ -149,10 +149,14 @@ def parse_arguments(args=None):
     parser.add_argument("-W", "--save-model", help="Write model into a file", type=str)
     parser.add_argument("-y", "--fit-xy", action='store_true', help="Fit xy tilt for each image separately (i.e. terms PX/PY)")
     parser.add_argument("-z", "--refit-zpn", action='store_true', help="Refit the ZPN radial terms")
-    parser.add_argument("-Z", "--szp", action='store_true', help="use SZP while fitting astrometry")
+    parser.add_argument("-Z", "--single-zeropoint", action='store_true', help="Use single common zeropoint instead of per-image zeropoints (enables all-sky fitting)")
+    parser.add_argument("--szp", action='store_true', help="use SZP while fitting astrometry")
     parser.add_argument("--target-photometry", action='store_true', 
                         default=config.get('target_photometry', 'True'),
                         help="Enable direct photometry of RTS2 target coordinates (default: True)")
+    parser.add_argument("--exclude-target", action='store_true',
+                        default=config.get('exclude_target', 'True'),
+                        help="Exclude the target object from photometric calibration (useful for variable sources) (default: True)")
 
     parser.add_argument("-v", "--verbose", action="store_true",
                         default=config.get('verbose', 'False'), help="Print debugging info")
@@ -166,7 +170,7 @@ def parse_arguments(args=None):
     args.filter_schemas = config['filter_schemas']
 
     # Convert string 'True'/'False' to boolean for action="store_true" arguments
-    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'use_stepwise', 'stars', 'autoupdate', 'target_photometry']:
+    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'use_stepwise', 'stars', 'autoupdate', 'target_photometry', 'exclude_target', 'single_zeropoint']:
         setattr(args, arg, str(getattr(args, arg)).lower() == 'true')
 
     return args
