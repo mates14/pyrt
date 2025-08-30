@@ -548,7 +548,7 @@ for arg in options.files:
     def compute_object_specific_idlimit(det_meta, errx2, erry2, n_sigma=3.0):
         """Compute identification limit for specific object based on its centroiding error"""
 
-        # Get astrometric variance from metadata
+        # Use ASTVAR-based approach (legacy method)
         astvar = det_meta.get('ASTVAR', None)
 
         if astvar is not None and astvar > 0:
@@ -556,13 +556,13 @@ for arg in options.files:
             sigma_centroiding = np.sqrt(errx2 + erry2)
             sigma_total = sigma_centroiding * np.sqrt(astvar)
             id_radius = n_sigma * sigma_total
-
             return id_radius
         else:
-            # Fallback to FWHM if no astrometric variance
+            # Ultimate fallback to FWHM if no astrometric variance
             return det_meta.get('FWHM', 1.2)
 
     # Check if using user-specified idlimit or object-specific approach
+    # Note: ERRS0/ERRSC header values removed - error model now computed fresh in transients.py
     use_object_specific = not options.idlimit and det.meta.get('ASTVAR', None) is not None
 
     if options.idlimit:
@@ -581,7 +581,10 @@ for arg in options.files:
 
         if options.verbose:
             astvar = det.meta.get('ASTVAR')
-            print("Using object-specific identification (ASTVAR=%.1f)"%(astvar))
+            if astvar:
+                print("Using legacy object-specific identification (ASTVAR=%.1f)"%(astvar))
+            else:
+                print("Using object-specific identification with fresh error model")
             print("Conservative search radius: %.3f pixels (95th percentile)"%(idlimit))
             print("Sample radii: min=%.3f, max=%.3f, median=%.3f"%(
                 np.min(sample_radii), np.max(sample_radii), np.median(sample_radii)))
@@ -613,6 +616,113 @@ for arg in options.files:
     tree = KDTree(X)
     nearest_ind, nearest_dist = tree.query_radius(Y, r=idlimit, return_distance=True, count_only=False)
 
+    # ===  FULL-CATALOG ERROR MODEL ANALYSIS  ===
+    # Analyze error model using complete detection catalog (not just astrometry subset)
+    def analyze_full_catalog_error_model(det, imgwcs, cat_coords, matched_indices, options):
+        """
+        Analyze astrometric error model using full detection catalog
+        Returns updated error model parameters or None if analysis fails
+        """
+        try:
+            from error_model import ErrorModelFit
+
+            # Get all matched detections (with valid catalog counterparts)
+            matched_detections = []
+            astrometric_residuals = []
+            centering_errors = []
+
+            for i, (detection, matches) in enumerate(zip(det, matched_indices)):
+                if len(matches) > 0:  # Has catalog match
+                    # Apply quality filters to avoid bogus identifications
+                    # Only use >3σ detections
+                    mag_err = detection.get('MAGERR_AUTO', 1.0)
+                    if mag_err > 1.091/5.0 and mag_err< 1.091/200:  # <3σ detection (1.091 = 1/ln(2.5))
+                        continue
+
+                    # Get best match (closest)
+                    best_match_idx = matches[0]  # matches are sorted by distance
+
+                    # Calculate astrometric residual
+                    det_x, det_y = detection['X_IMAGE'], detection['Y_IMAGE']
+                    cat_ra, cat_dec = cat_coords['radeg'][best_match_idx], cat_coords['decdeg'][best_match_idx]
+
+                    # Convert catalog position to image coordinates
+                    try:
+                        cat_x, cat_y = imgwcs.all_world2pix(cat_ra, cat_dec, 1)
+                        residual = np.sqrt((det_x - cat_x)**2 + (det_y - cat_y)**2)
+
+                        # Get centering error
+                        errx2 = detection.get('ERRX2_IMAGE', 0.01)
+                        erry2 = detection.get('ERRY2_IMAGE', 0.01)
+                        centering_err = np.sqrt(errx2 + erry2)
+
+                        matched_detections.append(detection)
+                        astrometric_residuals.append(residual)
+                        centering_errors.append(centering_err)
+
+                    except Exception:
+                        continue  # Skip problematic coordinates
+
+            if len(astrometric_residuals) < 20:  # Need minimum sample size
+                if options.verbose:
+                    print(f"Insufficient matches ({len(astrometric_residuals)}) for error model analysis")
+                return None
+
+            # Convert to numpy arrays
+            residuals = np.array(astrometric_residuals)
+            centering = np.array(centering_errors)
+
+            if options.verbose:
+                print(f"Analyzing error model with {len(residuals)} matched objects")
+                print(f"Residual range: {np.min(residuals):.3f} - {np.max(residuals):.3f} pixels")
+                print(f"Centering error range: {np.min(centering):.4f} - {np.max(centering):.4f} pixels")
+
+            # Fit error model using robust binned median approach
+            error_model = ErrorModelFit()
+
+            # Use the robust binned median fitting (no outlier iterations needed)
+            radii = np.ones_like(residuals) * 1000.0  # Default radius for all objects
+            success = error_model.fit_error_model_with_centering(
+                residuals, centering, radii, initial_terms=['S0', 'SC'])
+
+            if not success:
+                return None
+
+            # Report results
+            if options.verbose:
+                s0_val = error_model.termval('S0')
+                sc_val = error_model.termval('SC')
+                print(f"\nFull-catalog error model results:")
+                print(f"  S0 (base systematic): {s0_val:.6f} pixels²")
+                print(f"  SC (centering scaling): {sc_val:.6f}")
+                print(f"  Base error: {np.sqrt(s0_val):.3f} pixels")
+                print(f"  Objects used: {len(residuals)} (robust binned medians)")
+                print(f"  WSSR/NDF: {error_model.wssrndf:.3f}")
+
+            return error_model
+
+        except Exception as e:
+            if options.verbose:
+                print(f"Full-catalog error analysis failed: {e}")
+            return None
+
+    # Perform full-catalog error analysis
+    full_error_model = None
+    if options.verbose or True:  # Always analyze for now
+        full_error_model = analyze_full_catalog_error_model(det, imgwcs, cat, nearest_ind, options)
+
+        # Update the compute_object_specific_idlimit function to use new model if available
+        if full_error_model is not None:
+            def compute_updated_idlimit(errx2, erry2, n_sigma=3.0):
+                centering_err = np.sqrt(errx2 + erry2)
+                predicted_error = full_error_model.predict_error_with_centering(
+                    centering_err, 1.0)[0]  # radius=1 (no radial term)
+                return n_sigma * predicted_error
+        else:
+            # Fallback to original function
+            def compute_updated_idlimit(errx2, erry2, n_sigma=3.0):
+                return compute_object_specific_idlimit(det.meta, errx2, erry2, n_sigma)
+
     # Apply object-specific filtering if enabled
     if use_object_specific:
         filtered_ind = []
@@ -620,10 +730,14 @@ for arg in options.files:
         n_filtered = 0
 
         for i, (detection, ind_list, dist_list) in enumerate(zip(det, nearest_ind, nearest_dist)):
-            # Calculate object-specific radius
+            # Calculate object-specific radius using updated error model if available
             errx2 = detection['ERRX2_IMAGE']
             erry2 = detection['ERRY2_IMAGE']
-            obj_idlimit = compute_object_specific_idlimit(det.meta, errx2, erry2, n_sigma=3.0)
+
+            if full_error_model is not None:
+                obj_idlimit = compute_updated_idlimit(errx2, erry2, n_sigma=3.0)
+            else:
+                obj_idlimit = compute_object_specific_idlimit(det.meta, errx2, erry2, n_sigma=3.0)
 
             # Filter matches within object-specific radius
             valid_mask = dist_list <= obj_idlimit
@@ -637,7 +751,10 @@ for arg in options.files:
 
         if options.verbose:
             print("Object cross-id took %.3fs"%(time.time()-start))
-            print("Filtered %d matches using object-specific radii"%(n_filtered))
+            if full_error_model is not None:
+                print("Filtered %d matches using full-catalog error model"%(n_filtered))
+            else:
+                print("Filtered %d matches using object-specific radii"%(n_filtered))
     else:
         if options.verbose: print("Object cross-id took %.3fs"%(time.time()-start))
 
