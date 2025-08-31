@@ -172,47 +172,6 @@ class termfit:
 
         return output
 
-    def format_grouped_terms(self, terms_list=None):
-        """Format terms with nice grouping for per-image and global terms"""
-        if terms_list is None:
-            # Use all terms from the object
-            all_terms = list(zip(self.fixterms + self.fitterms, self.fixvalues + self.fitvalues))
-            all_errors = [0.0] * len(self.fixterms) + list(self.fiterrors) if hasattr(self, 'fiterrors') else [0.0] * len(all_terms)
-            term_data = [(term, value, error) for (term, value), error in zip(all_terms, all_errors)]
-        else:
-            # Use provided terms list (for selected_terms display)
-            term_data = [(term, None, None) for term in terms_list]
-
-        # Group terms by type
-        global_terms = set()
-        per_image_base_terms = set()  # Track unique base terms for per-image terms
-
-        for term, value, error in term_data:
-            if ':' in term and term.split(':')[-1].isdigit():
-                # Per-image term - only track the base term once
-                base_term = term.rsplit(':', 1)[0]
-                per_image_base_terms.add(base_term)
-            else:
-                # Global term
-                global_terms.add(term)
-
-        # Format output
-        output_lines = []
-
-        # Show global terms first
-        if global_terms:
-            output_lines.append("Global terms:")
-            for term in sorted(global_terms):
-                output_lines.append(f"  {term}")
-
-        # Show per-image terms in a compact format
-        if per_image_base_terms:
-            output_lines.append("Per-image terms:")
-            for base_term in sorted(per_image_base_terms):
-                output_lines.append(f"  {base_term} (for each image)")
-
-        return "\n".join(output_lines)
-
     def fit_residuals(self, values, data):
         """Residuals used for fitting - defaults to residuals() method"""
         return self.residuals(values, data)
