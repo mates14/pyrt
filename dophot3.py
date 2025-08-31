@@ -328,10 +328,6 @@ def perform_photometric_fitting(data, options, metadata):
     if selected_terms:
         # Filter out Z:n terms from grouped display (they're shown in 2D table)
         non_z_terms = [t for t in selected_terms if not (t.startswith('Z:') or t == 'Z')]
-#        if non_z_terms:
-            #            print(f"Selected terms: {ffit.format_grouped_terms(non_z_terms)}")
-#        else:
-#            print("Selected terms: Only zeropoints (shown in table above)")
     else:
         print("No terms selected")
 
