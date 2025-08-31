@@ -381,4 +381,147 @@ The result? You spend more time doing science and less time fighting with softwa
 
 ---
 
+## The Unified System: One Pond, Many Lily Pads 🐸
+
+*Teaching small frogs about how all the different ways of getting photometric terms work together harmoniously*
+
+### The Universal Truth: All Sources Are Created Equal
+
+dophot3 has learned to treat **all sources of photometric information identically**. Whether your terms come from:
+
+- **RESPONSE headers** (embedded in FITS files from previous runs)
+- **Model files** (`-M model.ecsv`)
+- **Command line assignments** (`-U '#PC=0.12'`)
+
+...they all flow into the **same unified system** and get treated **exactly the same way**.
+
+### The Three-Step Dance
+
+Every dophot3 run follows the same elegant choreography:
+
+#### Step 1: Gather Initial Values from Everywhere
+```bash
+# From RESPONSE header: Z=23.56, PXY=0.14, P2X=0.32, P3X=-0.14
+# From model file: PE=0.05, PAE=-0.09, PC=0.12
+# From command line: -U '#PD=0.03,P2R=0.01'
+
+# Result: One combined pool of initial values
+combined_initial_values = {
+    'Z': 23.56, 'PXY': 0.14, 'P2X': 0.32, 'P3X': -0.14,
+    'PE': 0.05, 'PAE': -0.09, 'PC': 0.12, 'PD': 0.03, 'P2R': 0.01
+}
+```
+
+#### Step 2: Source-Agnostic Pre-Selection
+```bash
+# Smart warm start: ANY term with initial values gets pre-selected
+# Doesn't matter if it came from RESPONSE, model, or command line!
+
+stepwise_candidates = ['P3Y', 'P4X', 'PR', 'P2R']
+pre_selected_terms = ['PXY', 'P2X', 'P3X', 'PC', 'P2R']  # Have initial values
+
+print("Pre-selected term: PXY = 0.14")  # From RESPONSE
+print("Pre-selected term: PC = 0.12")   # From model
+print("Pre-selected term: P2R = 0.01")  # From command line
+```
+
+#### Step 3: Unified Refinement
+The stepwise regression doesn't know or care where terms came from - it just optimizes the best photometric model using all available information.
+
+### Real-World Scenarios
+
+#### Scenario 1: D50 Workflow Speed Boost 🚀
+```bash
+# First image: Cold start (5.2 seconds)
+dophot3 img001.fits -U '.p3,.r3'
+# → Fits from scratch, saves RESPONSE header in FITS file
+
+# Second image: Warm start (1.2 seconds)
+dophot3 img002.fits -U '.p3,.r3'
+# → Loads RESPONSE automatically, pre-selects proven terms
+# → 4x speedup from intelligent warm starting!
+```
+
+#### Scenario 2: Model Training Strategy 🧠
+```bash
+# Step 1: Train comprehensive model
+dophot3 training_set*.fits -y -U '@.p4,@.r3,@PC,@PD' -W survey_model.ecsv
+
+# Step 2: Apply to individual images
+dophot3 target001.fits -M survey_model.ecsv -U '@.p2'
+# → Loads survey_model terms as initial values
+# → Adds .p2 as stepwise candidates
+# → Gets best of both: proven complex model + local optimization
+```
+
+#### Scenario 3: Mixed Source Harmony 🎵
+```bash
+# Complex multi-source fitting
+dophot3 -M base_model.ecsv -U '#PC=0.123,@.p3' archive_imgs/*.fits
+# → Model file provides: PE, PAE, color terms, radial corrections
+# → Command line fixes: PC at precisely calibrated value
+# → RESPONSE headers provide: per-image zeropoints and spatial terms
+# → All sources merge seamlessly into one coherent model
+```
+
+### The Frog's Wisdom: No More Lily Pad Confusion!
+
+**Old way** (before unification):
+- RESPONSE headers → mysterious different behavior
+- Model files → different initialization
+- Command line → yet another pathway
+- Small frogs got confused about which lily pad to jump to! 🐸❓
+
+**New way** (unified system):
+- **One pond, one system** → all sources flow into same initial values pool
+- **Source-agnostic warm start** → any term with initial value gets pre-selected
+- **Intelligent merging** → no conflicts, no duplications, no surprises
+- **Frog-friendly** → always behaves exactly the same way! 🐸✨
+
+### Advanced Frog Techniques
+
+#### The Model Evolution Pattern
+```bash
+# Generation 1: Learn from data
+dophot3 survey_night1*.fits -U '@.p3,@.r2,@PC' -W night1_model.ecsv
+
+# Generation 2: Build on knowledge
+dophot3 survey_night2*.fits -M night1_model.ecsv -U '@.p3,@PD' -W night2_model.ecsv
+# → Inherits night1 terms + explores new ones
+
+# Generation 3: Production ready
+dophot3 new_targets*.fits -M night2_model.ecsv
+# → Fast, robust, proven calibration
+```
+
+#### The Response Chain Technique
+```bash
+# Each image builds on the last
+dophot3 img001.fits -U '.p3,.r3'           # → RESPONSE saved in img001
+dophot3 img002.fits -U '.p3,.r3'           # → Loads img001 RESPONSE
+dophot3 img003.fits -U '.p3,.r3,@PC'       # → Loads img002 + explores color
+# → Natural evolution of photometric model through observation sequence
+```
+
+### The Philosophy: Unified Simplicity
+
+The unified system embodies a simple truth: **the source shouldn't matter, only the science**.
+
+Whether your photometric information comes from:
+- Previous successful calibrations (RESPONSE)
+- Carefully constructed reference models (model files)
+- Precise laboratory measurements (command line values)
+
+...it should all work together seamlessly to give you the **best possible photometric calibration**.
+
+No more mental juggling of "which technique do I use for this?" - just **one unified approach** that intelligently combines all available knowledge.
+
+### Small Frog Summary 🐸
+
+*"The wise pond-master taught us: Whether knowledge comes from yesterday's lily pad jumps (RESPONSE), the elder frog's wisdom (model files), or today's fresh observations (command line), all wisdom flows into the same pond. The unified system remembers everything and helps every frog jump more accurately!"*
+
+**Translation for astronomers**: Source-agnostic initialization + intelligent warm starting = faster, more robust photometric calibration that just works.
+
+---
+
 *"The best software is invisible - it does exactly what you expect and gets out of your way."*
