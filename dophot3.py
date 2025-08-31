@@ -206,31 +206,62 @@ def perform_photometric_fitting(data, options, metadata):
     # Create a dictionary to store initial values from loaded model
     initial_values = {}
     if options.model:
-        load_model_from_file(ffit, options.model)
+        ffit.readmodel(options.model)
         # Store initial values from the loaded model
         for term, value in zip(ffit.fixterms + ffit.fitterms,
                              ffit.fixvalues + ffit.fitvalues):
             initial_values[term] = value
+        print(f"Model imported from {options.model}")
         print(f"Loaded initial values from model for terms: {list(initial_values.keys())}")
+
+    # Load from RESPONSE header if no model file and single image
+    elif len(metadata) == 1 and 'RESPONSE' in metadata[0]:
+        response_string = metadata[0]['RESPONSE']
+        # Parse RESPONSE manually to get initial values and put them in ffit for stepwise to see
+        for chunk in response_string.split(","):
+            if '=' not in chunk:
+                continue
+            term, strvalue = chunk.split("=")
+            if term in ['FILTER', 'SCHEMA']:
+                continue
+            try:
+                value = float(strvalue)
+                initial_values[term] = value
+                # Don't add to ffit - let the unified system handle all terms identically
+            except ValueError:
+                continue
+        print(f"Loaded initial values from RESPONSE header for terms: {list(initial_values.keys())}")
+        print(f"RESPONSE: {response_string}")
 
     # Perform initial fit with just the zeropoints
     fd = data.get_fitdata('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3', 'color4', 'img', 'x', 'dy', 'image_x', 'image_y', 'airmass')
 
-    # Build forced zeropoint terms from computed values
-    z_terms = []
+    # Add zeropoint terms to initial values only if not already present
     if options.single_zeropoint:
-        # Use single common zeropoint for all-sky fitting
-        avg_zp = np.mean(zeropoints)
-        z_terms.append(f"&Z={avg_zp:.6f}")
-        print(f"Single zeropoint mode: Z={avg_zp:.6f} (average of {len(zeropoints)} individual estimates)")
+        if 'Z' not in initial_values:
+            avg_zp = np.mean(zeropoints)
+            initial_values['Z'] = avg_zp
+            print(f"Single zeropoint mode: Using computed Z={avg_zp:.6f} as initial value")
+        else:
+            print(f"Single zeropoint mode: Using loaded Z={initial_values['Z']:.6f}")
     else:
-        # Use per-image zeropoints (traditional mode)
+        # Use per-image zeropoints
         for i, zp in enumerate(zeropoints, 1):
-            # Always use per-image format for consistency, even with single image
-            z_terms.append(f"&Z:{i}={zp}")  # Always: &Z:1=20.1, &Z:2=20.3, etc.
+            zp_term = f"Z:{i}"
+            if zp_term not in initial_values:
+                initial_values[zp_term] = zp
+        loaded_zp_terms = [k for k in initial_values.keys() if k.startswith('Z:')]
+        computed_zp_terms = [f"Z:{i}" for i in range(1, len(zeropoints) + 1)]
+        print(f"Multi-image zeropoints: computed {computed_zp_terms}, loaded {loaded_zp_terms}")
 
-    # PREPEND zeropoint terms to user terms
-    terms_parts = z_terms.copy()
+    # Build terms string starting with zeropoint terms
+    terms_parts = []
+    if options.single_zeropoint:
+        terms_parts.append("&Z")  # Always direct (forced) term
+    else:
+        # Add per-image zeropoint terms
+        zp_terms = [f"&Z:{i}" for i in range(1, len(zeropoints) + 1)]
+        terms_parts.extend(zp_terms)
 
     # Add per-image PX/PY terms if fit_xy is enabled (compact form)
     if options.fit_xy:
@@ -297,11 +328,10 @@ def perform_photometric_fitting(data, options, metadata):
     if selected_terms:
         # Filter out Z:n terms from grouped display (they're shown in 2D table)
         non_z_terms = [t for t in selected_terms if not (t.startswith('Z:') or t == 'Z')]
-        if non_z_terms:
-            print("Selected terms:")
-            print(ffit.format_grouped_terms(non_z_terms))
-        else:
-            print("Selected terms: Only zeropoints (shown in table above)")
+#        if non_z_terms:
+            #            print(f"Selected terms: {ffit.format_grouped_terms(non_z_terms)}")
+#        else:
+#            print("Selected terms: Only zeropoints (shown in table above)")
     else:
         print("No terms selected")
 
