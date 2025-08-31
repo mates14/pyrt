@@ -398,19 +398,38 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
     data.add_mask('photometry', initial_mask)
     best_wssrndf = initial_wssrndf
 
-    # Load initial values from model if available
-    initial_values = {}
-    if options.model:
-        for term, value in zip(ffit.fixterms + ffit.fitterms,
-                             ffit.fixvalues + ffit.fitvalues):
-            initial_values[term] = value
+    # Merge initial values from fotfit (from any source: -M, RESPONSE, command line)
+    fotfit_initial_values = {}
+    for term, value in zip(ffit.fixterms + ffit.fitterms,
+                         ffit.fixvalues + ffit.fitvalues):
+        fotfit_initial_values[term] = value
+
+    # Combine all initial value sources
+    combined_initial_values = {}
+    if 'initial_values_for_direct' in locals():
+        combined_initial_values.update(initial_values_for_direct)
+    combined_initial_values.update(fotfit_initial_values)
+    if hasattr(options, '_combined_initial_values'):
+        combined_initial_values.update(options._combined_initial_values)
+
+    # Move ANY terms with initial values from remaining to selected (source-agnostic warm start)
+    for term in list(remaining_terms):
+        if term in combined_initial_values:
+            selected_terms.append(term)
+            remaining_terms.remove(term)
+            print(f"Pre-selected term: {term} = {combined_initial_values[term]:.6f}")
+
+    # Refit with all selected terms (including pre-selected terms) if we added any
+    if any(term in combined_initial_values for term in selected_terms):
+        best_wssrndf, initial_mask = try_term_robust(ffit, None, selected_terms, fd.fotparams, combined_initial_values)
+        data.add_mask('photometry', initial_mask)
 
     max_iterations = 100  # Prevent infinite loops
     iteration = 0
     improvement_threshold = 0.001  # Minimum relative improvement to accept a term
 
     while iteration < max_iterations:
-#        print(f"At beginning: wssrndf={best_wssrndf}")
+#        print(f"=== Cycle {iteration}: WSSRNDF={best_wssrndf:.6f}, Selected={len(selected_terms)} terms, Remaining={len(remaining_terms)} candidates ===")
         iteration += 1
         made_change = False
 
@@ -422,7 +441,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
         with concurrent.futures.ProcessPoolExecutor() as executor:
             # Submit all term trials in parallel
             future_to_term = {
-                executor.submit(try_term_robust, ffit, term, selected_terms, fd.fotparams, initial_values): term
+                executor.submit(try_term_robust, ffit, term, selected_terms, fd.fotparams, combined_initial_values): term
                 for term in remaining_terms
             }
 
@@ -453,68 +472,59 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
             # Apply the new mask to data
             data.apply_mask(best_new_mask, 'photometry')
 
-#            print(f"Before removal step: wssrndf={best_wssrndf}")
-            # Backward step - check if any terms can be removed in parallel
-            # Only consider removing terms that are not in always_selected
-            removable_terms = [t for t in selected_terms if t not in always_selected]
-            if len(removable_terms) > 0:  # Keep at least one term, but respect always_selected
-                worst_term = None
-                smallest_degradation = float('inf')
+        # Backward step - always try removing terms (independent of forward step)
+        # Only consider removing terms that are not in always_selected
+        removable_terms = [t for t in selected_terms if t not in always_selected]
+#        print(f"--- Backward step: Trying to remove from {len(removable_terms)} removable terms: {removable_terms}")
+        if len(removable_terms) > 0:  # Try removing terms if any are removable
+            worst_term = None
+            smallest_degradation = float('inf')
 
-                with concurrent.futures.ProcessPoolExecutor() as executor:
-                    # Submit all term removal trials in parallel (only for removable terms)
-                    futures = [
-                        executor.submit(try_remove_term_parallel,
-                                     term, selected_terms,
-                                     ffit, fd.fotparams, initial_values)
-                        for term in removable_terms
-                    ]
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                # Submit all term removal trials in parallel (only for removable terms)
+                futures = [
+                    executor.submit(try_remove_term_parallel,
+                                 term, selected_terms,
+                                 ffit, fd.fotparams, combined_initial_values)
+                    for term in removable_terms
+                ]
 
-                    # Process results as they complete
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            term, new_wssrndf = future.result()
-                            degradation = 1 - best_wssrndf/new_wssrndf
+                # Process results as they complete
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        term, new_wssrndf = future.result()
+                        degradation = 1 - best_wssrndf/new_wssrndf
+#                        print(f"-- For term {term} got degradation {degradation}")
 
-                            if degradation < improvement_threshold and degradation < smallest_degradation:
-                                smallest_degradation = degradation
+                        if degradation < smallest_degradation:
+                            smallest_degradation = degradation
+                            if degradation < improvement_threshold:
                                 worst_term = term
                                 worst_new_wssrndf = new_wssrndf
-                        except Exception as e:
-                            print(f"Error trying to remove term: {str(e)}")
+                    except Exception as e:
+                        print(f"Error trying to remove term: {str(e)}")
 
-#                print(f"Before actually removing: wssrndf={best_wssrndf}")
-                # Remove term if its contribution is minimal
-                if worst_term:
-                    print(f"Removing term {worst_term} (degradation: {smallest_degradation:.1%})")
-                    ffit.removeterm(worst_term)
-#                    ffit.fit(fdata)
-                    best_wssrndf = worst_new_wssrndf
-#                    best_wssrndf = ffit.wssrndf
-                    selected_terms.remove(worst_term)
-                    remaining_terms.append(worst_term)
-                    made_change = True
-                    #selected_terms.remove(worst_term)
-                    #remaining_terms.append(worst_term)
-                    #made_change = True
-
-                    # Update model without the removed term
-                    #ffit.fixall()
-                    #setup_terms(ffit, selected_terms, initial_values)
-                    #ffit.fit(fdata)
-                    #best_wssrndf = ffit.wssrndf
-                    # Next improvement should be calculated relative to this value
-                    #last_stable_wssrndf = best_wssrndf
+            # Remove term if its contribution is minimal
+            if worst_term:
+                print(f"Removing term {worst_term} (improvement: {-smallest_degradation:.1%})")
+                ffit.removeterm(worst_term)
+                best_wssrndf = worst_new_wssrndf
+                selected_terms.remove(worst_term)
+                remaining_terms.append(worst_term)
+                made_change = True
+#            else:
+#                print(f"--- No terms removed (best candidate improvement: {-smallest_degradation:.3%} vs threshold: {-improvement_threshold:.1%})")
 
 
 #        print(f"At the end: wssrndf={best_wssrndf}")
         # Stop if no changes were made in this iteration
         if not made_change:
+#            print(f"=== Converged after {iteration} cycles: No forward or backward changes possible ===")
             break
 
     # Final fit with all selected terms
     ffit.fixall()
-    setup_terms(ffit, selected_terms, initial_values)
+    setup_terms(ffit, selected_terms, combined_initial_values)
     ffit.fit(fd.fotparams)
 
     return selected_terms, ffit.wssrndf
