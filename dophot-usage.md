@@ -41,7 +41,126 @@ The output `.ecsv` file is **self-contained and reusable**:
 - **Workflow:** SExtractor finds objects → IRAF measures them precisely (or SExtractor does both if using -I)
 - **Telescope agnostic:** Works with any observatory (though you might encounter squeaks with unusual setups)
 
-Now that you understand the basics, let's explore the exciting new features...
+Now that you understand the basics, let's explore the fitting modes...
+
+---
+
+## Single Image vs Multi-Image Fitting: Choose Your Strategy
+
+Our frog deserves to know that dophot3 can work in two distinct modes, each with its own strengths and purpose.
+
+### Single Image Mode: Precision Photometry
+
+**Perfect for:** Regular photometry of individual objects, building photometric databases
+
+**How it works:**
+```bash
+# Basic single image fitting
+dophot3.py your_image.fits -U '.p3,.r3'
+```
+
+This is the **D50 telescope workflow** - we actually run the code **twice**:
+1. **First fit:** Primarily for astrometric solution refinement
+2. **Second fit:** The definitive photometric calibration
+
+**What gets fitted:**
+- **Model terms** specified with `--terms` (`-U`) - your favorite `.p3,.r3` covers spatial distortions up to 3rd degree plus radial effects
+- **Direct terms** marked with `&` (always included regardless of statistics)
+- **Stepwise terms** marked with `@` (let the fit decide what's significant)
+- **Default terms** (no prefix) follow the `--use-stepwise` parameter setting
+
+**Frog-level explanation:** "When studying one lily pad in detail, you can measure everything about that specific pad very precisely, but you can't learn much about how lily pads differ from each other."
+
+### Multi-Image Mode: Advanced Calibration
+
+**Perfect for:** Color responses, airmass effects, complex flatfield modeling, survey work
+
+**How it works:**
+```bash
+# Multiple images with per-image terms - synthetic flatfield with response tilt variation
+dophot3.py image1.fits image2.fits image3.fits -U '.p3,.r3,*PX,*PY,SC'
+
+# The above is so common it has a shortcut: --fit-xy (-y)
+dophot3.py image1.fits image2.fits image3.fits -y -U '.p3,.r3,SC'
+
+# Global zeropoint for survey work
+dophot3.py survey*.fits -Z -U '.p3,.r3,PA'
+```
+
+**Key advantages:**
+1. **Per-image terms** (marked with `*`) model effects that vary between exposures:
+   - `*PX,*PY` = Response tilt variations per-image (so common it has `-y` shortcut)
+   - `*P2R` = Radial distortion per-image (dew formation, thermal changes)
+   - **Most common use:** Multi-image synthetic flatfield with slight response tilt correction
+
+2. **Global vs per-image zeropoints:**
+   - **Default:** Each image gets its own zeropoint (handles varying conditions)
+   - **`--single-zeropoint` (`-Z`):** One global zeropoint + atmospheric modeling (PA terms)
+
+3. **Better constraint of complex effects:**
+   - **Color responses** need multiple filters across multiple images
+   - **Airmass coefficients** need range of observing conditions
+   - **Synthetic flatfield** expressions benefit from large sample sizes
+
+**Frog-level explanation:** "When studying an entire pond, you can learn the universal rules that apply to all lily pads (like how they all react to temperature), plus measure how individual pads vary from the average (like which corner gets more sunlight)."
+
+### Choosing the Right Mode
+
+| Situation | Mode | Recommended Terms | Why |
+|-----------|------|------------------|-----|
+| **Single target photometry** | Single image | `.p3,.r3` | Focus on local precision |
+| **Variable star monitoring** | Single image | `.p2,PC` | Consistent calibration per epoch |
+| **Survey photometry** | Multi-image + `-Z` | `PA,.p3,.r3` | Global photometric system |
+| **Color calibration** | Multi-image | `PC,PD,.p2` | Need multiple filters/conditions |
+| **Challenging weather** | Multi-image + `-y` | `.p2,SC` | Per-image cloud corrections |
+
+### The General Purpose Philosophy
+
+dophot3 is a **general purpose tool** - the term combination and usage mode vary depending on your specific situation. The system provides the building blocks; you choose how to combine them based on your science goals and observing conditions.
+
+**Important note:** While we speak of "modes," these are modes of **usage**, not different code paths. The photometry fitting code itself doesn't distinguish between single and multiple images - it simply fits all identified objects whether they come from one image or many. The only differences are marginal:
+
+1. **Zeropoint naming:** Single image gets `Z`, multiple images get `Z:1`, `Z:2`, etc.
+2. **Astrometric refitting:** Currently only implemented for single images (skipped for multi-image inputs)
+
+### Advanced Workflow: Train Once, Apply Many
+
+A powerful strategy combines both approaches: **use multi-image fitting to create a robust photometric model, then apply that model to individual images**.
+
+```bash
+# Step 1: Train the model using many images with good statistics
+dophot3.py training_set*.fits -y -U '.p3,.r3,SC,PC' -W advanced_model.ecsv
+
+# Step 2: Apply the trained model to single images
+dophot3.py target_image.fits -M advanced_model.ecsv
+```
+
+**Why this works:**
+- **Training phase:** Multi-image fit constrains complex terms that need large samples (color responses, high-order spatial terms)
+- **Application phase:** Single images benefit from advanced corrections they couldn't determine alone
+- **Computational efficiency:** A 1000-image super-fit would never finish - better to train on a selected representative group
+- **Pipeline-ready:** The `-M` option supports filter-specific models for automated processing without overwhelming the system
+
+**Filter-specific model logic:**
+```bash
+# If you specify a base model name:
+dophot3.py image_g.fits -M /path/to/model
+
+# The system tries:
+# 1. /path/to/model (exact path)
+# 2. /path/to/model-g.mod (filter-specific version)
+```
+
+This enables **catalog→physical color transformations** and other filter-dependent calibrations in automated pipelines.
+
+**Real-world scenarios:**
+- **Large surveys:** Instead of fitting 1000 images simultaneously (computationally impossible), select 20-50 representative images for model training
+- **Pipeline operations:** Load pre-computed models to avoid complex fitting that could overwhelm automated systems
+- **Time-critical processing:** Model loading finishes much faster than full fitting when rapid results are needed
+
+**Frog-level explanation:** "You can't study every lily pad in the entire pond at once - that would take forever and probably crash your lily-pad-ometer! Instead, pick a good sample of lily pads to learn the rules, then apply those rules quickly to each individual pad you encounter."
+
+Whether you're building a photometric database one image at a time or processing an entire night's survey data, the frog's wisdom applies: "Choose your pond size to match your lily pad research goals." 🐸
 
 ---
 
