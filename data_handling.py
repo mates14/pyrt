@@ -311,14 +311,44 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None,
         # X,Y for catalog for their catalog RA&Dec
         cat_x, cat_y = imgwcs.all_world2pix(cat_data['radeg'], cat_data['decdeg'], 1)
 
-        loc = EarthLocation(lat=det.meta['LATITUDE']*u.deg,
-                            lon=det.meta['LONGITUD']*u.deg,
-                            height=det.meta['ALTITUDE']*u.m)
-        time = Time(det.meta['JD'], format='jd')
-        coords = SkyCoord(ra*u.deg, dec*u.deg)
-        altaz = coords.transform_to(AltAz(obstime=time, location=loc))
-        # FIXME: this is not a correct formula!
-        airmass = altaz.secz.value
+        # Calculate airmass if we have reliable time and location info
+        try:
+            # Check if we have the required information for airmass calculation
+            required_keys = ['LATITUDE', 'LONGITUD', 'ALTITUDE', 'JD']
+            missing_keys = [key for key in required_keys if key not in det.meta or det.meta[key] is None]
+
+            if missing_keys:
+                print(f"Missing airmass calculation info: {missing_keys} - using default airmass arrays")
+                # Use default airmass: absolute=1.0, relative=0.0 for all objects
+                airmass = np.ones_like(ra)  # Absolute airmass = 1.0 (zenith)
+            else:
+                loc = EarthLocation(lat=det.meta['LATITUDE']*u.deg,
+                                    lon=det.meta['LONGITUD']*u.deg,
+                                    height=det.meta['ALTITUDE']*u.m)
+                time = Time(det.meta['JD'], format='jd')
+                coords = SkyCoord(ra*u.deg, dec*u.deg)
+                altaz = coords.transform_to(AltAz(obstime=time, location=loc))
+
+                # Use Rosenberg (1966) airmass formula - more accurate than simple secz
+                # airmass = 1/(cos(zenith) + 0.025*exp(-11*cos(zenith)))
+                zenith_angle = np.pi/2.0 - altaz.alt.rad
+                cos_zenith = np.cos(zenith_angle)
+                airmass = 1.0 / (cos_zenith + 0.025 * np.exp(-11.0 * cos_zenith))
+
+                # Check for invalid airmass values (below horizon gives negative secz)
+                invalid_mask = (airmass < 0) | (airmass > 10) | np.isnan(airmass)
+                if np.any(invalid_mask):
+                    print(f"Found {np.sum(invalid_mask)} invalid airmass values - setting to 1.0")
+                    airmass[invalid_mask] = 1.0
+
+        except Exception as e:
+            print(f"Airmass calculation failed: {e} - using default airmass=1.0")
+            airmass = np.ones_like(ra)
+
+        # Ensure det.meta['AIRMASS'] is consistent with our airmass calculation approach
+        # If we used default airmass=1.0, also set the reference airmass to 1.0
+        if np.all(airmass == 1.0):
+            det.meta['AIRMASS'] = 1.0  # This ensures adif = airmass - det.meta['AIRMASS'] = 0.0 everywhere
 
         coord_x = (det_data[:, 0] - det.meta['CTRX']) / 1024
         coord_y = (det_data[:, 1] - det.meta['CTRY']) / 1024
