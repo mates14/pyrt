@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 #import scipy
 import numpy as np
 import argparse
+import json
 
 import scipy.optimize as fit
 from sklearn.neighbors import KDTree,BallTree
@@ -178,11 +179,12 @@ def readOptions(args=sys.argv[1:]):
   parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
 # Transients specific:
   parser.add_argument("-E", "--early", help="Limit transients to t-t0 < 0.5 d", action='store_true')
-  parser.add_argument("-f", "--frame", help="Image frame width to be ignored in pixels (default=10)", type=float)
+  parser.add_argument("-f", "--frame", help="Image frame width to be ignored in pixels (default=32)", type=float, default=32)
   parser.add_argument("-g", "--regs", action='store_true', help="Save per image regs")
-  parser.add_argument("-s", "--siglim", help="Sigma limit for detections to be taken into account.", type=float)
+  parser.add_argument("-w", "--web-output", help="Save web-friendly JSON output to specified file", type=str)
+  parser.add_argument("-s", "--siglim", help="Sigma limit for detections to be taken into account.", type=float, default=3)
   parser.add_argument("-m", "--min-found", help="Minimum number of occurences to consider candidate valid", type=int, default=4)
-  parser.add_argument("-u", "--usno", help="Use USNO catalog.", action='store_true')
+  parser.add_argument("-u", "--usno", help="Use USNO catalog.", action='store_true', default=True)
   parser.add_argument("-q", "--usnox", help="Use USNO catalog extra.", action='store_true')
 # General for more tools:
   parser.add_argument("-l", "--maglim", help="Do not get any more than this mag from the catalog to compare.", type=float)
@@ -413,8 +415,8 @@ def simple_color_model(line, data):
             [0],        # img
             [0.0],      # y (unused)
             [1.0],      # err (unused)
-            [0.5],      # cat_x (center)
-            [0.5]       # cat_y (center)
+            [0],      # cat_x (center)
+            [0]       # cat_y (center)
         ])
 
         # Calculate model at reference conditions (neutral)
@@ -430,8 +432,8 @@ def simple_color_model(line, data):
             [0],        # img
             [0.0],      # y (unused)
             [1.0],      # err (unused)
-            [0.5],      # cat_x (center)
-            [0.5]       # cat_y (center)
+            [0],      # cat_x (center)
+            [0]       # cat_y (center)
         ])
 
         actual_model = ffit.model(ffit.fixvalues, actual_data)[0]
@@ -471,13 +473,6 @@ imgno = 0
 
 # Initialize trajectory tracking for moving objects
 object_trails = []
-
-if options.frame is not None: frame=options.frame
-else: frame=10
-
-if options.siglim is not None: siglim = options.siglim
-else: siglim = 5
-
 
 for arg in options.files:
 
@@ -777,6 +772,9 @@ for arg in options.files:
         regfile = os.path.splitext(arg)[0] + "-tr.reg"
         some_file = open(regfile, "w+")
         some_file.write("# Region file format: DS9 version 4.1\nglobal color=green dashlist=8 3 width=3 font=\"helvetica 10 normal roman\" select=1 highlite=1 dash=0 fixed=0 edit=1 move=1 delete=1 include=1 source=1\n")
+
+    # Initialize web output data structure
+    web_objects = [] if options.web_output else None
     # make pairs to be fitted
     for i, d in zip(nearest_ind, det):
 
@@ -795,7 +793,8 @@ for arg in options.files:
             mag3 = cat[k]['Sloan_z']
             mag4 = cat[k]['J']
 
-            magcat = mag1
+            magcat = mag1 # that's Sloan_r
+            # in case of any other photometri schema this will not work
             cm = simple_color_model( det.meta['RESPONSE'],
                 (0,
                 np.float64(mag0-mag1),
@@ -814,7 +813,7 @@ for arg in options.files:
         # 1. objekt je v katalogu a neni detekovan (timto zpusobem to nedam)
 
         # 2. objekt neni v katalogu (= kandidat)
-        if bestmag == 0 and errdet < 1.091/siglim:
+        if bestmag == 0 and errdet < 1.091/options.siglim:
 #            print("!",bestmag,magdet,errdet,d["FWHM_IMAGE"]/det.meta['FWHM'] )
 #            print("!",i)
             if options.regs and (not options.usno) and d['MAG_CALIB'] < options.maglim:
@@ -826,7 +825,29 @@ for arg in options.files:
 #                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
                     some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(d["X_IMAGE"], d["Y_IMAGE"],10*d["FWHM_IMAGE"]))
 
-            if d['X_IMAGE'] < frame or d['Y_IMAGE']<frame or d['X_IMAGE'] > d.meta['IMGAXIS1']-frame or d['Y_IMAGE']>d.meta['IMGAXIS2']-frame:
+            # Web output for uncatalogued objects
+            if web_objects is not None and d['MAG_CALIB'] < options.maglim:
+                fwhm_ratio = d["FWHM_IMAGE"] / det.meta['FWHM']
+                if fwhm_ratio > 1.5 or fwhm_ratio < 1/1.5:
+                    obj_type, color, status = "poor_fwhm", "#8B4513", f"Poor FWHM (ratio={fwhm_ratio:.2f})"
+                else:
+                    obj_type, color, status = "uncatalogued", "#FF0000", "Not in catalog (transient?)"
+
+                web_objects.append({
+                    'x_image': float(d["X_IMAGE"]),
+                    'y_image': float(d["Y_IMAGE"]),
+                    'ra': float(d['ALPHA_J2000']),
+                    'dec': float(d['DELTA_J2000']),
+                    'mag': float(d['MAG_CALIB']),
+                    'mag_err': float(d['MAGERR_CALIB']),
+                    'fwhm': float(d["FWHM_IMAGE"]),
+                    'fwhm_ratio': fwhm_ratio,
+                    'type': obj_type,
+                    'color': color,
+                    'status': status
+                })
+
+            if d['X_IMAGE'] < options.frame or d['Y_IMAGE']<options.frame or d['X_IMAGE'] > d.meta['IMGAXIS1']-options.frame or d['Y_IMAGE']>d.meta['IMGAXIS2']-options.frame:
                 continue
 
             candx.append(d["X_IMAGE"])
@@ -841,21 +862,74 @@ for arg in options.files:
             continue
 
         # 3. objekt je jasnejsi nez v katalogu (= kandidat)
-        if match is not None and match > siglim and errdet<1.091/siglim and mdiff>0.05:
+        if match is not None and match > options.siglim and errdet<1.091/options.siglim and mdiff>0.05:
 #            print("+",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet,mdiff)
             if options.regs:
                 some_file.write("circle(%.7f,%.7f,%.3f\") # color=yellow\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
 
+            # Web output for brighter objects
+            if web_objects is not None:
+                web_objects.append({
+                    'x_image': float(d["X_IMAGE"]),
+                    'y_image': float(d["Y_IMAGE"]),
+                    'ra': float(d['ALPHA_J2000']),
+                    'dec': float(d['DELTA_J2000']),
+                    'mag': float(d['MAG_CALIB']),
+                    'mag_err': float(d['MAGERR_CALIB']),
+                    'catalog_mag': float(bestmag),
+                    'mag_diff': float(bestmag - magdet),
+                    'sigma_diff': float(match),
+                    'fwhm': float(d["FWHM_IMAGE"]),
+                    'type': 'brighter',
+                    'color': '#FFFF00',
+                    'status': f'Brighter than catalog ({match:.1f}σ, Δmag={bestmag-magdet:.2f})'
+                })
+
         # 4. objekt je slabsi nez v katalogu (= zajimavost)
-        if match is not None and match < -siglim and errdet<1.091/siglim and mdiff>0.05:
+        if match is not None and match < -options.siglim and errdet<1.091/options.siglim and mdiff>0.05:
 #            print("-",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet,mdiff)
             if options.regs:
                 some_file.write("circle(%.7f,%.7f,%.3f\") # color=blue\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
 
+            # Web output for fainter objects
+            if web_objects is not None:
+                web_objects.append({
+                    'x_image': float(d["X_IMAGE"]),
+                    'y_image': float(d["Y_IMAGE"]),
+                    'ra': float(d['ALPHA_J2000']),
+                    'dec': float(d['DELTA_J2000']),
+                    'mag': float(d['MAG_CALIB']),
+                    'mag_err': float(d['MAGERR_CALIB']),
+                    'catalog_mag': float(bestmag),
+                    'mag_diff': float(bestmag - magdet),
+                    'sigma_diff': float(match),
+                    'fwhm': float(d["FWHM_IMAGE"]),
+                    'type': 'fainter',
+                    'color': '#0000FF',
+                    'status': f'Fainter than catalog ({abs(match):.1f}σ, Δmag={bestmag-magdet:.2f})'
+                })
+
         # 5. objekt odpovida katalogu (nic)
-        if match is not None and (( match > -siglim and (bestmag-magdet)/errdet < siglim) or mdiff<0.05 ) and errdet<1.091/siglim:
+        if match is not None and (( match > -options.siglim and (bestmag-magdet)/errdet < options.siglim) or mdiff<0.05 ) and errdet<1.091/options.siglim:
             if options.regs:
                 some_file.write("circle(%.7f,%.7f,%.3f\") # color=green\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
+
+            # Web output for normal objects
+            if web_objects is not None:
+                web_objects.append({
+                    'x_image': float(d["X_IMAGE"]),
+                    'y_image': float(d["Y_IMAGE"]),
+                    'ra': float(d['ALPHA_J2000']),
+                    'dec': float(d['DELTA_J2000']),
+                    'mag': float(d['MAG_CALIB']),
+                    'mag_err': float(d['MAGERR_CALIB']),
+                    'catalog_mag': float(bestmag),
+                    'mag_diff': float(bestmag - magdet),
+                    'fwhm': float(d["FWHM_IMAGE"]),
+                    'type': 'normal',
+                    'color': '#00FF00',
+                    'status': f'Matches catalog (Δmag={bestmag-magdet:.2f})'
+                })
     #        print("o",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet)
 
     print('Comparison to Atlas produced ',len(candx),' candidates')
@@ -955,6 +1029,42 @@ for arg in options.files:
 
     if options.regs:
         some_file.close()
+
+    # Write web JSON output for this image
+    if options.web_output and web_objects is not None:
+        # Create web-friendly output structure
+        web_data = {
+            'success': True,
+            'image_file': arg,
+            'summary': {
+                'total_objects': len(web_objects),
+                'uncatalogued': len([o for o in web_objects if o['type'] == 'uncatalogued']),
+                'poor_fwhm': len([o for o in web_objects if o['type'] == 'poor_fwhm']),
+                'brighter': len([o for o in web_objects if o['type'] == 'brighter']),
+                'fainter': len([o for o in web_objects if o['type'] == 'fainter']),
+                'normal': len([o for o in web_objects if o['type'] == 'normal'])
+            },
+            'objects': web_objects,
+            'metadata': {
+                'siglim': options.siglim,
+                'frame_width': options.frame,
+                'maglim': options.maglim,
+                'image_fwhm': float(det.meta.get('FWHM', 0)),
+                'pixel_scale': float(det.meta.get('PIXEL', 0)),
+                'image_center_ra': float(det.meta.get('CTRRA', 0)),
+                'image_center_dec': float(det.meta.get('CTRDEC', 0))
+            }
+        }
+
+        # Write JSON output
+        web_filename = options.web_output.replace("{file}", os.path.splitext(os.path.basename(arg))[0])
+        with open(web_filename, 'w') as web_file:
+            json.dump(web_data, web_file, indent=2)
+
+        if options.verbose:
+            print(f"Web JSON output written to: {web_filename}")
+            print(f"Objects by type: {web_data['summary']}")
+
     cand = astropy.table.Table([candra,canddec,candtime,candexp,candmag,canddmag,candfw,np.int64(np.ones(len(candra)))], \
         names=['ALPHA_J2000','DELTA_J2000','JD','EXPTIME','MAG_CALIB','MAGERR_CALIB','FWHM_IMAGE','NUM'])
 #    print("file", os.path.splitext(arg)[0], len(cand), "candidates")
