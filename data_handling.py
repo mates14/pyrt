@@ -3,6 +3,7 @@ import logging
 from astropy.time import Time
 from astropy.coordinates import SkyCoord, AltAz, EarthLocation
 import astropy.units as u
+from airmass import altitude_to_airmass
 
 class FitData:
     """
@@ -330,10 +331,7 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None,
                 altaz = coords.transform_to(AltAz(obstime=time, location=loc))
 
                 # Use Rosenberg (1966) airmass formula - more accurate than simple secz
-                # airmass = 1/(cos(zenith) + 0.025*exp(-11*cos(zenith)))
-                zenith_angle = np.pi/2.0 - altaz.alt.rad
-                cos_zenith = np.cos(zenith_angle)
-                airmass = 1.0 / (cos_zenith + 0.025 * np.exp(-11.0 * cos_zenith))
+                airmass = altitude_to_airmass(altaz.alt.rad)
 
                 # Check for invalid airmass values (below horizon gives negative secz)
                 invalid_mask = (airmass < 0) | (airmass > 10) | np.isnan(airmass)

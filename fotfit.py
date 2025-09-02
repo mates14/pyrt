@@ -7,6 +7,7 @@ Photometric response fitter
 
 import numpy as np
 import termfit
+import logging
 from astropy.table import Table
 
 # wishlist :)
@@ -119,27 +120,109 @@ class fotfit(termfit.termfit):
         return ret
 
     def zero_val(self):
-        """Extract zeropoint values and errors from Z:n terms
+        """Calculate effective zeropoint values by evaluating model at reference conditions
 
-        Returns the stored zeropoint values directly (should be astronomical values ~25 mag).
+        This works universally whether you have individual Z:n terms or a global model.
+        For each image, evaluates the model at:
+        - Image center coordinates (0, 0)
+        - Actual airmass for that image
+        - Zero colors
+        - 0 magnitude star
+
+        Returns
+        -------
+        zeropoint_values : array
+            Effective zeropoint for each image
+        zeropoint_errors : array
+            Zeropoint uncertainties (from Z:n terms if available, otherwise 0.0)
         """
+        # First, collect explicit Z:n terms and their errors for fallback
+        zn_errors = {}
+        for i, term in enumerate(self.fitterms):
+            if term.startswith('Z:') and term.split(':')[-1].isdigit():
+                img_num = int(term.split(':')[-1]) - 1  # Convert to 0-based indexing
+                try:
+                    zn_errors[img_num] = self.fiterrors[i] if hasattr(self, 'fiterrors') else 0.0
+                except (IndexError, AttributeError):
+                    zn_errors[img_num] = 0.0
+
+        # Find global zeropoint error for cases without individual Z:n terms
+        global_zp_error = 0.0
+        for i, term in enumerate(self.fitterms):
+            if term in ['Z', 'ZERO', 'ZP']:  # Common names for global zeropoint
+                try:
+                    global_zp_error = self.fiterrors[i] if hasattr(self, 'fiterrors') else 0.0
+                except (IndexError, AttributeError):
+                    global_zp_error = 0.0
+                break
+
+        # Determine number of images from terms or assume 1
+        max_img = 1  # Start with 1 image minimum
+        for term in self.fitterms + self.fixterms:
+            if ':' in term and term.split(':')[-1].isdigit():
+                img_num = int(term.split(':')[-1])
+                max_img = max(max_img, img_num)
+
+        num_images = max_img
         zeropoint_values = []
         zeropoint_errors = []
 
-        # Find Z:n terms in fitted terms
-        for i, term in enumerate(self.fitterms):
-            if term.startswith('Z:') and term.split(':')[-1].isdigit():
-                zeropoint_values.append(self.fitvalues[i])
-                try:
-                    zeropoint_errors.append(self.fiterrors[i] if hasattr(self, 'fiterrors') else 0.0)
-                except (IndexError, AttributeError):
-                    zeropoint_errors.append(0.0)
+        for img in range(num_images):
+            # Create reference data vector for image center, 0-mag star
+            # Data format: mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y, airmass_abs
 
-        # Also check fixed terms for Z:n
-        for i, term in enumerate(self.fixterms):
-            if term.startswith('Z:') and term.split(':')[-1].isdigit():
-                zeropoint_values.append(self.fixvalues[i])
-                zeropoint_errors.append(0.0)  # Fixed terms have 0 error
+            # Use image's actual airmass if available, otherwise use 1.0
+            airmass_val = 1.0  # Default
+            airmass_abs_val = 1.0  # Default
+
+            # Try to get airmass from image-specific terms or metadata
+            for i, term in enumerate(self.fixterms + self.fitterms):
+                if term == f'AIRMASS:{img+1}':
+                    # Found image-specific airmass
+                    if i < len(self.fixterms):
+                        airmass_val = airmass_abs_val = self.fixvalues[i]
+                    else:
+                        val_idx = i - len(self.fixterms)
+                        airmass_val = airmass_abs_val = self.fitvalues[val_idx]
+                    break
+
+            # Model expects 14 parameters: mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y, airmass_abs
+            # Make arrays with single values to match model expectations
+            try:
+                single_val_data = (
+                    np.array([0.0]),                    # mc: 0-magnitude star
+                    np.array([airmass_val]),            # airmass
+                    np.array([0.0]),                    # coord_x: image center (normalized)
+                    np.array([0.0]),                    # coord_y: image center (normalized)
+                    np.array([0.0]), np.array([0.0]),   # colors
+                    np.array([0.0]), np.array([0.0]),   # colors
+                    np.array([img]),                    # img: image index
+                    np.array([0.0]),                    # y: not used
+                    np.array([1.0]),                    # err: not used
+                    np.array([0.0]),                    # cat_x: image center
+                    np.array([0.0]),                    # cat_y: image center
+                    np.array([airmass_abs_val])         # airmass_abs
+                )
+
+                zp_val = self.model(np.array(self.fitvalues), single_val_data)
+
+                # Handle scalar or array return
+                logging.debug(f"Model returned: {zp_val} (type: {type(zp_val)})")
+                if hasattr(zp_val, '__len__') and len(zp_val) > 0:
+                    zeropoint_values.append(float(zp_val[0]))
+                else:
+                    zeropoint_values.append(float(zp_val))
+
+            except Exception as e:
+                # Fallback if model evaluation fails
+                logging.warning(f"Model evaluation failed for img {img}: {e}")
+                zeropoint_values.append(25.0)
+
+            # Get error: use Z:n error if available, otherwise global error
+            if img in zn_errors:
+                zeropoint_errors.append(zn_errors[img])
+            else:
+                zeropoint_errors.append(global_zp_error)
 
         return np.array(zeropoint_values), np.array(zeropoint_errors)
 
