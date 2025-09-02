@@ -176,6 +176,14 @@ class termfit:
         """Residuals used for fitting - defaults to residuals() method"""
         return self.residuals(values, data)
 
+    def calculate_ndf(self, data, stat_residuals):
+        """Calculate degrees of freedom - can be overridden by subclasses
+
+        Default implementation assumes 1D fitting where each residual
+        represents one constraint
+        """
+        return len(stat_residuals) - len(self.fitvalues)
+
     def fit(self, data):
         """fit data to the defined model"""
         self.delin=False
@@ -185,11 +193,11 @@ class termfit:
         self.fitvalues = []
         for x in res.x:
             self.fitvalues += [ x ]
-        # Calculate degrees of freedom
-        self.ndf = len(data[0]) - len(self.fitvalues)
-
         # Use residuals() method for statistics calculation (proper chi-squared)
         stat_residuals = self.residuals(self.fitvalues, data)
+
+        # Calculate degrees of freedom
+        self.ndf = self.calculate_ndf(data, stat_residuals)
         self.wssr = np.sum(stat_residuals**2)  # Proper weighted sum of squares
         self.variance = np.std(stat_residuals)  # Standard deviation of normalized residuals
 

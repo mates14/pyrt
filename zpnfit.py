@@ -452,3 +452,11 @@ class zpnfit(termfit.termfit):
         if self.delin:
             return self.cauchy_delin(dist)
         return dist
+
+    def calculate_ndf(self, data, stat_residuals):
+        """Override NDF calculation for 2D astrometric fitting
+
+        For astrometric fitting, each star provides 2 constraints (x,y)
+        even though we return 1 residual per star
+        """
+        return 2 * len(stat_residuals) - len(self.fitvalues)
