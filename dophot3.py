@@ -460,11 +460,14 @@ def write_results(data, ffit, options, alldet, target, zpntest):
     zero, zerr = ffit.zero_val()
 
     for img, det in enumerate(alldet):
+        zero_idx = min(img, len(zero) - 1)
+        zerr_idx = min(img, len(zerr) - 1)
+
         start = time.time()
         if options.astrometry:
             try:
-                astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "LIMMAG", 0, value=zero[img]+det.meta['LIMFLX3'])
-                astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "MAGZERO", 0, value=zero[img])
+                astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "LIMMAG", 0, value=zero[zero_idx]+det.meta['LIMFLX3'])
+                astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "MAGZERO", 0, value=zero[zero_idx])
                 astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "RESPONSE", 0, value=ffit.oneline_for_image(img + 1))
             except Exception as e:
                 logging.warning(f"Writing LIMMAG/MAGZERO/RESPONSE to an astrometrized image failed: {e}")
@@ -485,24 +488,24 @@ def write_results(data, ffit, options, alldet, target, zpntest):
                 det['Y_IMAGE'], # y for pixel structure
                 det.meta['AIRMASS']) # airmass (absolute)
             )
-        det['MAGERR_CALIB'] = np.sqrt(np.power(det['MAGERR_AUTO'],2)+np.power(zerr[img],2))
+        det['MAGERR_CALIB'] = np.sqrt(np.power(det['MAGERR_AUTO'],2)+np.power(zerr[zerr_idx],2))
 
         # our zeropoint is a magnitude that 10000 counts are, motivation:
         # solving nonlinearity introduced poor fix for this value during fit
-        det.meta['MAGZERO'] = zero[img]
-        det.meta['DMAGZERO'] = zerr[img]
-        det.meta['MAGLIMIT'] = det.meta['LIMFLX3']+zero[img]  # Now using astronomical zeropoint directly
+        det.meta['MAGZERO'] = zero[zero_idx]
+        det.meta['DMAGZERO'] = zerr[zerr_idx]
+        det.meta['MAGLIMIT'] = det.meta['LIMFLX3']+zero[zero_idx]  # Now using astronomical zeropoint directly
         det.meta['WSSRNDF'] = ffit.wssrndf
 
         det.meta['RESPONSE'] = ffit.oneline_for_image(img + 1)
 
-        if (zerr[img] < 0.2) or (options.reject is None):
+        if (zerr[zerr_idx] < 0.2) or (options.reject is None):
             det.write(fn, format="ascii.ecsv", overwrite=True)
         else:
             if options.verbose:
                 logging.warning("rejected (too large uncertainty in zeropoint)")
             with open("rejected", "a+") as out_file:
-                out_file.write(f"{det.meta['FITSFILE']} {ffit.wssrndf:.6f} {zerr[img]:.3f}\n")
+                out_file.write(f"{det.meta['FITSFILE']} {ffit.wssrndf:.6f} {zerr[zerr_idx]:.3f}\n")
             sys.exit(0)
         logging.info(f"Saving ECSV output took {time.time()-start:.3f}s")
 
@@ -513,7 +516,8 @@ def write_results(data, ffit, options, alldet, target, zpntest):
         if options.weight: save_weight_image(det, ffData, options, zpntest)
         if options.flat: save_flat_image(det, ffData, zpntest)
 
-        write_output_line(det, options, zero[img], zerr[img], ffit, target[img])
+        target_idx = min(img, len(target) - 1) if hasattr(target, '__len__') else img
+        write_output_line(det, options, zero[zero_idx], zerr[zerr_idx], ffit, target[target_idx])
 
 def mesh_create_flat_field_data(det, ffit):
     """
