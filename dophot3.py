@@ -36,7 +36,7 @@ from data_handling import PhotometryData, make_pairs_to_fit, compute_zeropoints_
 from match_stars import process_image_with_dynamic_limits
 from stepwise_regression import perform_stepwise_regression, parse_terms, expand_pseudo_term
 
-from plotting import create_residual_plots
+from plotting import create_residual_plots, create_correction_volume_plots
 from filter_matching import determine_filter
 
 if sys.version_info[0]*1000+sys.version_info[1]<3008:
@@ -200,8 +200,7 @@ def perform_photometric_fitting(data, options, metadata):
     # Initialize fitting object
     ffit = fotfit.fotfit(fit_xy=options.fit_xy)
 
-    # Set initial zeropoints and use the best filter
-    ffit.zero = zeropoints
+    # Note: ffit.zero is obsolete - zeropoints are now handled as regular terms (Z or Z:1, Z:2, etc.)
 
     # Create a dictionary to store initial values from loaded model
     initial_values = {}
@@ -303,26 +302,21 @@ def perform_photometric_fitting(data, options, metadata):
         ffit.fixterm(fixed_terms, values=fixed_values)
 
     # Handle the unified fitting approach
-    if stepwise_terms or direct_terms:
-        print(f"Using unified stepwise approach:")
-        print(f"  - Always selected (direct): {direct_terms}")
-        print(f"  - Stepwise candidates: {stepwise_terms}")
+    print(f"Using unified stepwise approach:")
+    print(f"  - Always selected (direct): {direct_terms}")
+    print(f"  - Stepwise candidates: {stepwise_terms}")
 
-        # Pass combined initial values to stepwise regression
-        options._combined_initial_values = combined_initial_values
+    # Pass combined initial values to stepwise regression
+    options._combined_initial_values = combined_initial_values
 
-        # Perform stepwise regression with always-selected direct terms
-        selected_stepwise_terms, final_wssrndf = perform_stepwise_regression(
-            data, ffit, stepwise_terms, options, metadata, always_selected=direct_terms
-        )
+    # Perform stepwise regression with always-selected direct terms
+    # This handles all cases: with stepwise terms, without stepwise terms, or only direct terms
+    selected_stepwise_terms, final_wssrndf = perform_stepwise_regression(
+        data, ffit, stepwise_terms, options, metadata, always_selected=direct_terms
+    )
 
-        # The result already includes both direct terms (always selected) and stepwise terms
-        selected_terms = selected_stepwise_terms
-    else:
-        # No terms specified - just fit zeropoints and fixed terms
-        print("No variable terms specified - fitting zeropoints and fixed terms only")
-        ffit.fit(fd.fotparams)
-        selected_terms = []
+    # The result already includes both direct terms (always selected) and stepwise terms
+    selected_terms = selected_stepwise_terms
 
     print(f"Final fit variance: {ffit.wssrndf}")
     if selected_terms:
@@ -757,6 +751,7 @@ def main():
         start = time.time()
         base_filename = os.path.splitext(det.meta['detf'])[0]
         create_residual_plots(data, base_filename, ffit, zpntest, 'photometry')
+        create_correction_volume_plots(data, base_filename, ffit)
         logging.info(f"Generating plots took {time.time()-start:.3f}s")
 
     if not options.remove_spatial:

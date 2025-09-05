@@ -329,7 +329,7 @@ def try_term_robust(ffit, term, current_terms, fdata, initial_values=None):
         residuals = new_ffit.residuals(new_ffit.fitvalues, thread_data)
 
         # Create new mask for points within 5-sigma
-        new_mask = np.abs(residuals) < 5 * new_ffit.wssrndf
+        new_mask = np.abs(residuals) < 3 * np.sqrt(new_ffit.wssrndf)
 
         # Check for convergence
         if np.array_equal(new_mask, current_mask) or new_ffit.wssrndf >= prev_wssrndf:
@@ -343,8 +343,8 @@ def try_term_robust(ffit, term, current_terms, fdata, initial_values=None):
 def try_remove_term_parallel(term_to_remove, current_terms, ffit, fdata, initial_values):
     """Try removing a term in parallel context"""
     test_terms = [t for t in current_terms if t != term_to_remove]
-    new_wssrndf, _ = try_term_robust(ffit, None, test_terms, fdata, initial_values)
-    return term_to_remove, new_wssrndf
+    new_wssrndf, new_mask = try_term_robust(ffit, None, test_terms, fdata, initial_values)
+    return term_to_remove, new_wssrndf, new_mask
 
 def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, always_selected=None):
     """
@@ -479,6 +479,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
         if len(removable_terms) > 0:  # Try removing terms if any are removable
             worst_term = None
             smallest_degradation = float('inf')
+            worst_new_mask = None
 
             with concurrent.futures.ProcessPoolExecutor() as executor:
                 # Submit all term removal trials in parallel (only for removable terms)
@@ -492,7 +493,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
                 # Process results as they complete
                 for future in concurrent.futures.as_completed(futures):
                     try:
-                        term, new_wssrndf = future.result()
+                        term, new_wssrndf, new_mask = future.result()
                         degradation = 1 - best_wssrndf/new_wssrndf
 #                        print(f"-- For term {term} got degradation {degradation}")
 
@@ -501,6 +502,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
                             if degradation < improvement_threshold:
                                 worst_term = term
                                 worst_new_wssrndf = new_wssrndf
+                                worst_new_mask = new_mask
                     except Exception as e:
                         print(f"Error trying to remove term: {str(e)}")
 
@@ -512,6 +514,9 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
                 selected_terms.remove(worst_term)
                 remaining_terms.append(worst_term)
                 made_change = True
+                
+                # Update the photometry mask after term removal
+                data.apply_mask(worst_new_mask, 'photometry')
 #            else:
 #                print(f"--- No terms removed (best candidate improvement: {-smallest_degradation:.3%} vs threshold: {-improvement_threshold:.1%})")
 
@@ -522,9 +527,15 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
 #            print(f"=== Converged after {iteration} cycles: No forward or backward changes possible ===")
             break
 
-    # Final fit with all selected terms
+    # Final fit with all selected terms using current photometry mask
     ffit.fixall()
     setup_terms(ffit, selected_terms, combined_initial_values)
-    ffit.fit(fd.fotparams)
+    
+    # Get current masked data for final fit
+    data.use_mask('photometry')
+    final_fd = data.get_fitdata('y', 'adif', 'coord_x', 'coord_y', 'color1',
+                               'color2', 'color3', 'color4', 'img', 'x', 'dy',
+                               'image_x', 'image_y', 'airmass')
+    ffit.fit(final_fd.fotparams)
 
     return selected_terms, ffit.wssrndf
