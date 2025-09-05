@@ -78,7 +78,7 @@ def fix_time(hdr, target_photometry=True, verbose=False):
     mjd_ctime = np.nan # MJD
 
     # This keyword is mandatory in an astronomical FITS image header
-    with suppress(KeyError): do_ctime = Time(hdr['DATE-OBS']).to_value('unix')
+    with suppress(KeyError,ValueError): do_ctime = Time(hdr['DATE-OBS']).to_value('unix')
     if verbose and np.isnan(do_ctime): print("No DATE-OBS? That's BAD!")
 
     with suppress(KeyError): jd_ctime = (hdr['JD_START'] - 2440587.5) * 86400
@@ -102,25 +102,25 @@ def fix_time(hdr, target_photometry=True, verbose=False):
     jd_do = jd_ctime - do_ctime
     mjd_do = mjd_ctime - do_ctime
 
-    if not np.isnan(ux_jd ) and  ux_jd > 0.001 and verbose: print(f"ux/jd  time info differ by {ux_jd}s!")
-    if not np.isnan(ux_mjd) and ux_mjd > 0.001 and verbose: print(f"ux/mjd time info differ by {ux_mjd}s!")
-    if not np.isnan(ux_do ) and  ux_do > 0.001 and verbose: print(f"ux/do  time info differ by {ux_do}s!")
-    if not np.isnan(jd_mjd) and jd_mjd > 0.001 and verbose: print(f"jd/mjd time info differ by {jd_mjd}s!")
-    if not np.isnan(jd_do ) and  jd_do > 0.001 and verbose: print(f"jd/do  time info differ by {jd_do}s!")
-    if not np.isnan(mjd_do) and mjd_do > 0.001 and verbose: print(f"mjd/do time info differ by {mjd_do}s!")
+    if not np.isnan(ux_jd ) and np.abs( ux_jd) > 0.001 and verbose: print(f"ux/jd  time info differ by {ux_jd:.3f}s!")
+    if not np.isnan(ux_mjd) and np.abs(ux_mjd) > 0.001 and verbose: print(f"ux/mjd time info differ by {ux_mjd:.3f}s!")
+    if not np.isnan(ux_do ) and  np.abs(ux_do) > 0.001 and verbose: print(f"ux/do  time info differ by {ux_do:.3f}s!")
+    if not np.isnan(jd_mjd) and np.abs(jd_mjd) > 0.001 and verbose: print(f"jd/mjd time info differ by {jd_mjd:.3f}s!")
+    if not np.isnan(jd_do ) and  np.abs(jd_do) > 0.001 and verbose: print(f"jd/do  time info differ by {jd_do:.3f}s!")
+    if not np.isnan(mjd_do) and np.abs(mjd_do) > 0.001 and verbose: print(f"mjd/do time info differ by {mjd_do:.3f}s!")
 
     ctime = np.nan
     if not np.isnan(ux_ctime) and np.isnan(ctime):
-        if verbose: print(f"JD set based on CTIME+USEC={ux_ctime:.6f}")
+        if verbose: print(f"CTIME set based on CTIME+USEC to CTIME={ux_ctime:.6f}")
         ctime = ux_ctime
     if not np.isnan(do_ctime) and np.isnan(ctime):
-        if verbose: print(f"JD set based on DATE-OBS={do_ctime:.6f}")
+        if verbose: print(f"CTIME set based on DATE-OBS to CTIME={do_ctime:.6f}")
         ctime = do_ctime
     if not np.isnan(mjd_ctime) and np.isnan(ctime):
-        if verbose: print(f"JD set based on MJD-OBS={do_ctime:.6f}")
+        if verbose: print(f"CTIME set based on MJD-OBS to CTIME={do_ctime:.6f}")
         ctime = mjd_ctime
     if not np.isnan(jd_ctime) and np.isnan(ctime):
-        if verbose: print(f"JD set based on the original JD={do_ctime:.6f}")
+        if verbose: print(f"CTIME set based on the JD to CTIME={do_ctime:.6f}")
         ctime = jd_ctime
 
     # old comment: this is a wrong but by far the most reliable solution (wrong:leap secs?)
@@ -128,6 +128,7 @@ def fix_time(hdr, target_photometry=True, verbose=False):
     # Actually, the only time dophot uses is CTIME, so I wiped from here all other time keyword messing
     if not np.isnan(ctime):
         hdr['JD'] = 2440587.5 + ctime/86400.
+        if verbose: print(f"JD set based on the CTIME to JD={hdr['JD']:.6f}")
 
     # if I do not set this, the following WCS load will complain
     hdr['MJD-OBS'] = hdr['JD'] - 2400000.5
@@ -283,9 +284,14 @@ def fix_filter(hdr, verbose=False, opt_filter=None):
         if fits_fltr == "r": fits_fltr = "Sloan_r"
         if fits_fltr == "i": fits_fltr = "Sloan_i"
         if fits_fltr == "z": fits_fltr = "Sloan_z"
+        if fits_fltr == "UKIRT Z": fits_fltr = "UKIRT_z"
+        if fits_fltr == "SDSS g\'": fits_fltr = "Sloan_g"
+        if fits_fltr == "SDSS r\'": fits_fltr = "Sloan_r"
+        if fits_fltr == "SDSS i\'": fits_fltr = "Sloan_i"
         if fits_fltr == "UNK": fits_fltr = "N"
         if fits_fltr == "C": fits_fltr = "N"
         if fits_fltr == "clear": fits_fltr = "N"
+        if fits_fltr == "Clear": fits_fltr = "N"
 
     hdr['FILTER'] = fits_fltr
     if verbose: print(f"Filter changed from {old_fltr} to {fits_fltr}")
