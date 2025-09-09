@@ -64,7 +64,7 @@ def print_image_line(det, flt, Zo, Zoe, target=None, idnum=0):
         tarstatus="ok"
 
     print("%s %14.6f %14.6f %s %3.0f %6.3f %4d %7.3f %6.3f %7.3f %6.3f %7.3f %s %d %s %s"%(
-        det.meta['FITSFILE'], det.meta['JD'], det.meta['JD']+det.meta['EXPTIME']/86400.0, flt, det.meta['EXPTIME'],
+        det.meta['FITSFILE'], det.meta['JD'], det.meta['JD']+det.meta['EXPTIME']/86400.0/2, flt, det.meta['EXPTIME'],
         det.meta['AIRMASS'], idnum, Zo, Zoe, (det.meta['LIMFLX10']+Zo),
         (det.meta['LIMFLX3']+Zo), tarmag, tarerr, 0, det.meta['OBSID'], tarstatus))
 
@@ -590,7 +590,7 @@ def write_output_line(det, options, zero, zerr, ffit, target):
         tarid = det.meta.get('BGSIGMA', 0)
         obsid = det.meta.get('CCD_TEMP', 0)
 
-    chartime = det.meta['JD'] + det.meta['EXPTIME'] / 2
+    chartime = det.meta['JD'] + det.meta['EXPTIME'] / 2.0 / 86400.0
     if options.date == 'char':
         chartime = det.meta.get('CHARTIME', chartime)
     elif options.date == 'bjd':

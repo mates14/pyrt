@@ -367,6 +367,7 @@ class Catalog(astropy.table.Table):
                 cmd =   f'atlas {self._query_params.ra} {self._query_params.dec} '\
                         f'-rect {self._query_params.width},{self._query_params.height} '\
                         f'-dir {directory} -mlim {self._query_params.mlim:.2f} -ecsv '
+                logging.info(f"CAT: {cmd}")
                 result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
                 with open(tmp.name, "w") as f:

@@ -182,7 +182,7 @@ def readOptions(args=sys.argv[1:]):
   parser.add_argument("-f", "--frame", help="Image frame width to be ignored in pixels (default=32)", type=float, default=32)
   parser.add_argument("-g", "--regs", action='store_true', help="Save per image regs")
   parser.add_argument("-w", "--web-output", help="Save web-friendly JSON output to specified file", type=str)
-  parser.add_argument("-s", "--siglim", help="Sigma limit for detections to be taken into account.", type=float, default=3)
+  parser.add_argument("-s", "--siglim", help="Sigma limit for detections to be taken into account.", type=float, default=5)
   parser.add_argument("-m", "--min-found", help="Minimum number of occurences to consider candidate valid", type=int, default=4)
   parser.add_argument("-u", "--usno", help="Use USNO catalog.", action='store_true', default=True)
   parser.add_argument("-q", "--usnox", help="Use USNO catalog extra.", action='store_true')
@@ -548,7 +548,15 @@ for arg in options.files:
 
         if astvar is not None and astvar > 0:
             # Object-specific approach using centroiding errors
-            sigma_centroiding = np.sqrt(errx2 + erry2)
+            # Handle invalid error values (NaN, negative, or zero)
+            if np.isnan(errx2) or np.isnan(erry2) or errx2 < 0 or erry2 < 0:
+                sigma_centroiding = 0.001  # fallback for invalid errors
+            else:
+                sigma_centroiding = np.sqrt(errx2 + erry2)
+                # Handle zero centroiding errors (perfect centroiding) with minimum threshold
+                if sigma_centroiding <= 0:
+                    sigma_centroiding = 0.001  # minimum 0.001 pixel centroiding uncertainty
+            
             sigma_total = sigma_centroiding * np.sqrt(astvar)
             id_radius = n_sigma * sigma_total
             return id_radius
@@ -701,10 +709,131 @@ for arg in options.files:
                 print(f"Full-catalog error analysis failed: {e}")
             return None
 
+    # ===  MAGNITUDE ERROR MODEL ANALYSIS  ===
+    def analyze_magnitude_error_model(det, imgwcs, cat_coords, matched_indices, options):
+        """
+        Analyze magnitude error model using matched catalog stars
+        Returns updated magnitude error model or None if analysis fails
+        """
+        try:
+            from magnitude_error_model import MagnitudeErrorModelFit
+
+            # Get all matched detections with valid catalog counterparts
+            photometric_residuals = []
+            reported_mag_errors = []
+            observed_magnitudes = []
+            radial_distances = []
+
+            for i, (detection, matches) in enumerate(zip(det, matched_indices)):
+                if len(matches) > 0:  # Has catalog match
+                    # Apply quality filters
+                    mag_err = detection.get('MAGERR_CALIB', 1.0)
+                    if mag_err > 1.091/5.0 or mag_err < 1e-6:  # Skip poor detections
+                        continue
+
+                    # Get best match (closest)
+                    best_match_idx = matches[0]
+
+                    # Get photometric data
+                    obs_mag = detection['MAG_CALIB']
+
+                    # Calculate catalog magnitude with color correction
+                    mag0 = cat_coords['Sloan_g'][best_match_idx]
+                    mag1 = cat_coords['Sloan_r'][best_match_idx]  # Default to r-band
+                    mag2 = cat_coords['Sloan_i'][best_match_idx]
+                    mag3 = cat_coords['Sloan_z'][best_match_idx]
+                    mag4 = cat_coords['J'][best_match_idx]
+
+                    # Apply filter selection and color correction
+                    phfilter = det.meta.get('PHFILTER', 'r').lower()
+                    if phfilter in ['r', 'sloan_r']:
+                        magcat = mag1
+                    elif phfilter in ['g', 'sloan_g']:
+                        magcat = mag0
+                    elif phfilter in ['i', 'sloan_i']:
+                        magcat = mag2
+                    elif phfilter in ['z', 'sloan_z']:
+                        magcat = mag3
+                    elif phfilter in ['j']:
+                        magcat = mag4
+                    else:
+                        magcat = mag1  # Default to r
+
+                    # Apply color correction
+                    cm = simple_color_model(det.meta['RESPONSE'],
+                        (0,
+                        np.float64(mag0-mag1),
+                        np.float64(mag1-mag2),
+                        np.float64(mag2-mag3),
+                        np.float64(mag3-mag4)))
+
+                    cat_mag = magcat + cm
+                    residual = obs_mag - cat_mag
+
+                    # Calculate radial distance from image center
+                    det_x, det_y = detection['X_IMAGE'], detection['Y_IMAGE']
+                    center_x = det.meta.get('IMAGEW', 2048) / 2.0
+                    center_y = det.meta.get('IMAGEH', 2048) / 2.0
+                    radius = np.sqrt((det_x - center_x)**2 + (det_y - center_y)**2)
+
+                    photometric_residuals.append(residual)
+                    reported_mag_errors.append(mag_err)
+                    observed_magnitudes.append(obs_mag)
+                    radial_distances.append(radius)
+
+            if len(photometric_residuals) < 20:  # Need minimum sample size
+                if options.verbose:
+                    print(f"Insufficient matches ({len(photometric_residuals)}) for magnitude error model analysis")
+                return None
+
+            # Convert to numpy arrays
+            residuals = np.array(photometric_residuals)
+            mag_errors = np.array(reported_mag_errors)
+            magnitudes = np.array(observed_magnitudes)
+            radii = np.array(radial_distances)
+
+            if options.verbose:
+                print(f"Analyzing magnitude error model with {len(residuals)} matched objects")
+                print(f"Residual range: {np.min(residuals):.3f} - {np.max(residuals):.3f} mag")
+                print(f"Reported error range: {np.min(mag_errors):.4f} - {np.max(mag_errors):.4f} mag")
+                print(f"RMS residual: {np.sqrt(np.mean(residuals**2)):.4f} mag")
+
+            # Fit magnitude error model
+            mag_error_model = MagnitudeErrorModelFit()
+            success = mag_error_model.fit_magnitude_error_model(
+                residuals, mag_errors, magnitudes, radii,
+                initial_terms=['M0', 'MM', 'MB'])
+
+            if not success:
+                return None
+
+            # Report results
+            if options.verbose:
+                m0_val = mag_error_model.termval('M0')
+                mm_val = mag_error_model.termval('MM')
+                mb_val = mag_error_model.termval('MB')
+                print(f"\nMagnitude error model results:")
+                print(f"  M0 (base systematic): {m0_val:.6f} mag²")
+                print(f"  MM (error scaling): {mm_val:.3f}")
+                print(f"  MB (brightness term): {mb_val:.6f} mag/mag")
+                print(f"  Base error: {np.sqrt(m0_val):.4f} mag")
+                print(f"  Error scaling factor: {mm_val:.2f} (errors {('underestimated' if mm_val > 1 else 'overestimated')})")
+                print(f"  Objects used: {len(residuals)}")
+                print(f"  WSSR/NDF: {mag_error_model.wssrndf:.3f}")
+
+            return mag_error_model
+
+        except Exception as e:
+            if options.verbose:
+                print(f"Magnitude error analysis failed: {e}")
+            return None
+
     # Perform full-catalog error analysis
     full_error_model = None
+    magnitude_error_model = None
     if options.verbose or True:  # Always analyze for now
         full_error_model = analyze_full_catalog_error_model(det, imgwcs, cat, nearest_ind, options)
+        magnitude_error_model = analyze_magnitude_error_model(det, imgwcs, cat, nearest_ind, options)
 
         # Update the compute_object_specific_idlimit function to use new model if available
         if full_error_model is not None:
@@ -793,7 +922,29 @@ for arg in options.files:
             mag3 = cat[k]['Sloan_z']
             mag4 = cat[k]['J']
 
-            magcat = mag1 # that's Sloan_r
+            # Check PHFILTER and PHSCHEMA for consistency
+            phfilter = d.meta.get('PHFILTER', 'r').lower()
+            phschema = d.meta.get('PHSCHEMA', 'sloanj').lower()
+
+            # Warn about non-sloanj schemas
+            if phschema != 'sloanj' and options.verbose:
+                print(f"WARNING: PHSCHEMA='{phschema}' is not 'sloanj' - results may be inconsistent")
+
+            # Select catalog magnitude based on filter
+            if phfilter in ['r', 'sloan_r']:
+                magcat = mag1  # Sloan_r
+            elif phfilter in ['g', 'sloan_g']:
+                magcat = mag0  # Sloan_g
+            elif phfilter in ['i', 'sloan_i']:
+                magcat = mag2  # Sloan_i
+            elif phfilter in ['z', 'sloan_z']:
+                magcat = mag3  # Sloan_z
+            elif phfilter in ['j']:
+                magcat = mag4  # J band
+            else:
+                if options.verbose:
+                    print(f"WARNING: Unknown PHFILTER='{phfilter}', defaulting to Sloan_r")
+                magcat = mag1  # Default to Sloan_r
             # in case of any other photometri schema this will not work
             cm = simple_color_model( det.meta['RESPONSE'],
                 (0,
@@ -802,12 +953,26 @@ for arg in options.files:
                 np.float64(mag2-mag3),
                 np.float64(mag3-mag4)))
 
-            mpar = (magcat-cm-magdet)/np.sqrt(errdet*errdet+0.01*0.01)
+            # Use improved magnitude error if available
+            if magnitude_error_model is not None:
+                # Calculate radial distance for this object
+                det_x, det_y = d['X_IMAGE'], d['Y_IMAGE']
+                center_x = d.meta.get('IMAGEW', 2048) / 2.0
+                center_y = d.meta.get('IMAGEH', 2048) / 2.0
+                radius = np.sqrt((det_x - center_x)**2 + (det_y - center_y)**2)
+
+                # Get improved error estimate
+                improved_error = magnitude_error_model.predict_magnitude_error(errdet, magdet, radius)
+                error_for_comparison = max(improved_error, 0.01)  # Minimum floor
+            else:
+                error_for_comparison = np.sqrt(errdet*errdet+0.01*0.01)
+
+            mpar = (magcat+cm-magdet)/error_for_comparison
             if np.abs(mpar) < bestmatch:
                 bestmatch = np.abs(mpar)
-                bestmag = magcat-cm
+                bestmag = magcat + cm
                 match = mpar
-                mdiff = np.abs(magcat-cm-magdet)
+                mdiff = np.abs(magcat+cm-magdet)
 
         # pet moznosti:
         # 1. objekt je v katalogu a neni detekovan (timto zpusobem to nedam)
@@ -1270,7 +1435,8 @@ for oo,i in zip(mags,range(0,len(mags))):
         if num_found < options.min_found: continue
 
         status = list("!!!!") # start with good (movement in pixels, movement significant, magvar > 3)
-        nstat = 10.0 # (2 points for each property)
+        ot_ness = 10.0 # (2 points for each property)
+        mp_ness = 10.0 # Minor planet score: high for moving, stable photometry, continuous, good PSF
         t0=np.min(old['JD'])/2+np.max(old['JD'])/2
         dt=np.max(old['JD'])-np.min(old['JD'])  # Time span in days
         x = (oo['JD']-t0) * 24.0  # Convert days to hours for proper motion fitting
@@ -1334,14 +1500,14 @@ for oo,i in zip(mags,range(0,len(mags))):
 
         # Calculate motion significance
         motion_significance = dpos / sigma if sigma > 0 else 0
+        print(f"motion variance={motion_significance}")
 
+        ot_ness /= motion_significance  # Additional penalty for fast movers
         # Use statistical motion significance instead of pixel-based thresholds
         if motion_significance > 2.0:  # Significant motion detected
             status[0] = "p"
-            nstat /= motion_significance  # Penalty scales with significance
         if motion_significance > 5.0:  # Very significant motion
             status[0] = "P"
-            nstat /= motion_significance  # Additional penalty for fast movers
         if dpos > 2*sigma: # is the movement significant?
             status[1] = "m"
 #            nstat -= 1
@@ -1355,22 +1521,46 @@ for oo,i in zip(mags,range(0,len(mags))):
             cov=None
             fiterrors=None
 
-        mag0 = np.sum(oo['MAG_CALIB']*oo['MAGERR_CALIB'])/np.sum(oo['MAGERR_CALIB'])
-        magvar = np.sqrt(np.average(np.power( (oo['MAG_CALIB']-mag0)/oo['MAGERR_CALIB'] ,2)))
+        # Compute weighted mean magnitude and variance
+        if use_weighted:
+            # Use the same weights as positional analysis
+            mag_weights = 1.0 / (oo['MAGERR_CALIB']**2)  # Weight by photometric precision
+            mag0 = np.sum(oo['MAG_CALIB'] * mag_weights) / np.sum(mag_weights)
+            mag_residuals = oo['MAG_CALIB'] - mag0
+            magvar, chi2_red_mag = compute_weighted_variance(mag_residuals, mag_weights, n_params=1)
+            print(f"magnitude variance={magvar} (weighted, chi2_red={chi2_red_mag:.2f})")
+        else:
+            # Fallback to original calculation
+            mag0 = np.sum(oo['MAG_CALIB']*oo['MAGERR_CALIB'])/np.sum(oo['MAGERR_CALIB'])
+            magvar = np.sqrt(np.average(np.power( (oo['MAG_CALIB']-mag0)/oo['MAGERR_CALIB'] ,2)))
+            print(f"magnitude variance={magvar} (unweighted)")
         # Fix double-penalty bug with elif
+
+        ot_ness *= magvar #**2
         if magvar < 2:
             status[2] = "V"
-            nstat *= magvar**2
         elif magvar < 3:
             status[2] = "v"
-            nstat *= magvar**2
 
         variability=0
         for mag1,mag2,err1,err2 in zip(oo['MAG_CALIB'][:-1],oo['MAG_CALIB'][1:],oo['MAGERR_CALIB'][:-1],oo['MAGERR_CALIB'][1:]):
 #            print (f"mag={mag1},{mag2},{err1},{err2}")
-            variability += abs(mag1-mag2)/np.sqrt(err1*err1+err2*err2)
+            # Use improved magnitude error model if available
+            if magnitude_error_model is not None:
+                # Get improved error estimates (use average radius since we don't have pixel coords)
+                improved_err1 = magnitude_error_model.predict_magnitude_error(err1, mag1, 1000.0)
+                improved_err2 = magnitude_error_model.predict_magnitude_error(err2, mag2, 1000.0)
+                # Ensure minimum error floor
+                improved_err1 = max(improved_err1, 0.001)
+                improved_err2 = max(improved_err2, 0.001)
+                variability += abs(mag1-mag2)/np.sqrt(improved_err1*improved_err1+improved_err2*improved_err2)
+            else:
+                # Fallback to raw errors with minimum floor
+                err1_corrected = max(err1, 0.001)
+                err2_corrected = max(err2, 0.001)
+                variability += abs(mag1-mag2)/np.sqrt(err1_corrected*err1_corrected+err2_corrected*err2_corrected)
 
-#        print(f"variability={variability}")
+        print(f"variability (before normalizing)={variability}")
 
 # det.meta['FWHM'] musi byt nahrazeny prumerem snimku nebo lepe to udelat uplne jinak
 #        if fwhm_mean < det.meta['FWHM']/2 or fwhm_mean > det.meta['FWHM']*2:
@@ -1378,16 +1568,68 @@ for oo,i in zip(mags,range(0,len(mags))):
 #        if fwhm_mean < det.meta['FWHM']/1.5 or fwhm_mean > det.meta['FWHM']*1.5:
 #            status[3]="f"
         variability = variability * num_found/(num_found-1) / magvar
-        nstat /= variability**2
+        print(f"variability={variability}")
+        ot_ness /= variability #**2
+
+        # MINOR PLANET SCORING (mp_ness)
+        # Award for: movement, stable photometry, continuous observations, good PSF
+        # Penalize for: stationary, high variability, gaps, bad PSF
+        
+        # 1. Movement scoring (opposite of ot_ness)
+        if motion_significance > 5.0:  # Very significant motion - excellent for MP
+            mp_ness *= motion_significance * 2.0
+        elif motion_significance > 2.0:  # Significant motion - good for MP
+            mp_ness *= motion_significance
+        else:  # Low motion - penalize for MP
+            mp_ness /= max(0.1, motion_significance)
+        
+        # 2. Photometric stability (opposite of ot_ness - reward stable, penalize variable)
+        if magvar < 1.5:  # Very stable - excellent for MP
+            mp_ness *= 4.0 / (magvar + 0.1)
+        elif magvar < 3.0:  # Moderately stable - good for MP
+            mp_ness *= 2.0 / (magvar + 0.1)
+        else:  # Too variable - penalize for MP
+            mp_ness /= (magvar * magvar)
+        
+        # 3. Photometric continuity (penalize gaps in observations)
+        time_gaps = np.diff(np.sort(oo['JD'])) * 24.0  # Hours between observations
+        max_gap = np.max(time_gaps) if len(time_gaps) > 0 else 0
+        avg_gap = np.mean(time_gaps) if len(time_gaps) > 0 else 0
+        
+        # Penalize large gaps (MP should be continuously observable)
+        if max_gap > 12.0:  # Gap > 12 hours
+            mp_ness /= (max_gap / 12.0)**2
+        elif max_gap > 6.0:  # Gap > 6 hours
+            mp_ness /= (max_gap / 6.0)
+        
+        # 4. PSF quality (reward consistent, stellar PSF)
+        # Check FWHM consistency across detections
+        fwhm_std = np.std(oo["FWHM_IMAGE"])
+        fwhm_consistency = fwhm_std / fwhm_mean if fwhm_mean > 0 else 1.0
+        
+        if fwhm_consistency < 0.1:  # Very consistent PSF
+            mp_ness *= 3.0
+        elif fwhm_consistency < 0.2:  # Reasonably consistent PSF
+            mp_ness *= 1.5
+        else:  # Inconsistent PSF - penalize
+            mp_ness /= (fwhm_consistency * 10.0)
+        
+        # 5. Detection continuity bonus (reward complete detection sequences)
+        expected_detections = len(imgtimes)  # Total number of images
+        detection_fraction = num_found / expected_detections
+        if detection_fraction > 0.8:  # Found in >80% of images
+            mp_ness *= 2.0
+        elif detection_fraction > 0.6:  # Found in >60% of images
+            mp_ness *= 1.5
 
         variance_method = "weighted" if use_weighted else "robust"
-        print("".join(status), f"num:{num_found} mag:{mag0:.2f} magvar:{magvar:.1f}/{variability:.1f}, mean_pos:{a0:.5f},{d0:.5f}, movement: {da*np.cos(d0*np.pi/180.0):.3f},{dd:.3f}, motion_sigma: {sigma:.2f}, significance: {motion_significance:.1f}σ, sigma: {sa:.2f},{sd:.2f} ({variance_method}) fwhm_mean: {fwhm_mean}")
-        newtrans = [np.int64(i),np.int64(num_found),a0,d0,da,dd,motion_significance,sa,sd,sigma*3600,mag0,magvar,nstat]
+        print("".join(status), f"num:{num_found} mag:{mag0:.2f} magvar:{magvar:.1f}/{variability:.1f}, mean_pos:{a0:.5f},{d0:.5f}, movement: {da*np.cos(d0*np.pi/180.0):.3f},{dd:.3f}, motion_sigma: {sigma:.2f}, significance: {motion_significance:.1f}σ, sigma: {sa:.2f},{sd:.2f} ({variance_method}) fwhm_mean: {fwhm_mean}, ot_ness: {ot_ness:.2f}, mp_ness: {mp_ness:.2f}")
+        newtrans = [np.int64(i),np.int64(num_found),a0,d0,da,dd,motion_significance,sa,sd,sigma*3600,mag0,magvar,ot_ness,mp_ness]
         transtmp.append(newtrans)
 
 trans=astropy.table.Table(np.array(transtmp),\
-        names=['INDEX','NUM','ALPHA_J2000','DELTA_J2000','ALPHA_MOV','DELTA_MOV','DPOS','ALPHA_SIG','DELTA_SIG','SIGMA','MAG_CALIB','MAG_VAR','NSTAT'],\
-        dtype=['int64','int64','float64','float64','float32','float32','float32','float32','float32','float32','float32','float32','float32'])
+        names=['INDEX','NUM','ALPHA_J2000','DELTA_J2000','ALPHA_MOV','DELTA_MOV','DPOS','ALPHA_SIG','DELTA_SIG','SIGMA','MAG_CALIB','MAG_VAR','OT_NESS','MP_NESS'],\
+        dtype=['int64','int64','float64','float64','float32','float32','float32','float32','float32','float32','float32','float32','float32','float32'])
 print("*** TRANS START ***")
 trans.write("transients.ecsv", format='ascii.ecsv', overwrite=True)
 print(trans)
@@ -1410,19 +1652,27 @@ for oo in trans:
 
 #    print(f"any         ra/dec {np.average(oo['ALPHA_J2000']):.7f} {np.average(oo['DELTA_J2000']):.7f} num: {len(trail_detections):.0f} motion: {motion_significance:.1f}σ")
 
-    # Color-code based on motion significance
-    if oo['NSTAT'] > 2.0:  # (GRB candidates nstat="GRBness")
+    # Improved classification using both OT_NESS and MP_NESS
+    ot_score = oo['OT_NESS']
+    mp_score = oo['MP_NESS']
+    
+    # Classification logic: prioritize highest score
+    if ot_score > 10.0 and ot_score > mp_score:  # High OT_NESS = likely OT/GRB
         color = "red"
         object_type = "OT"
-        print(f"OT?     ra/dec {np.average(oo['ALPHA_J2000']):.7f} {np.average(oo['DELTA_J2000']):.7f} num: {len(trail_detections):.0f} ({motion_significance:.1f}σ motion)")
-    elif motion_significance > 2.0:  # Some motion
-        color = "yellow"
+        print(f"OT      ra/dec {np.average(oo['ALPHA_J2000']):.7f} {np.average(oo['DELTA_J2000']):.7f} num: {len(trail_detections):.0f} ({motion_significance:.1f}σ motion, ot_ness={ot_score:.1f}, mp={mp_score:.1f})")
+    elif mp_score > 10.0 and mp_score > ot_score:  # High MP_NESS = likely minor planet
+        color = "yellow" 
         object_type = "MP"
-        print(f"moving  ra/dec {np.average(oo['ALPHA_J2000']):.7f} {np.average(oo['DELTA_J2000']):.7f} num: {len(trail_detections):.0f} ({motion_significance:.1f}σ motion)")
-    else:  # no motion
+        print(f"MP      ra/dec {np.average(oo['ALPHA_J2000']):.7f} {np.average(oo['DELTA_J2000']):.7f} num: {len(trail_detections):.0f} ({motion_significance:.1f}σ motion, ot_ness={ot_score:.1f}, mp={mp_score:.1f})")
+    elif motion_significance > 2.0:  # Moving but unclear classification
+        color = "orange"
+        object_type = "MV"
+        print(f"moving  ra/dec {np.average(oo['ALPHA_J2000']):.7f} {np.average(oo['DELTA_J2000']):.7f} num: {len(trail_detections):.0f} ({motion_significance:.1f}σ motion, ot_ness={ot_score:.1f}, mp={mp_score:.1f})")
+    else:  # Stationary or low scores
         color = "cyan"
         object_type = "??"
-        print(f"other   ra/dec {np.average(oo['ALPHA_J2000']):.7f} {np.average(oo['DELTA_J2000']):.7f} num: {len(trail_detections):.0f} ({motion_significance:.1f}σ motion)")
+        print(f"other   ra/dec {np.average(oo['ALPHA_J2000']):.7f} {np.average(oo['DELTA_J2000']):.7f} num: {len(trail_detections):.0f} ({motion_significance:.1f}σ motion, ot_ness={ot_score:.1f}, mp={mp_score:.1f})")
 
     # Write to reg file with appropriate color
     some_file.write(f"circle({np.average(oo['ALPHA_J2000']):.7f},{np.average(oo['DELTA_J2000']):.7f},{5*idlimit*d.meta['PIXEL']:.3f}\") # color={color} text={{{object_type} id:{oo['INDEX']},mag:{oo['MAG_CALIB']:.1f},var:{oo['MAG_VAR']:.1f},pos:{motion_significance:.1f}σ}}\n")
@@ -1440,8 +1690,8 @@ try:
 except:
     title = "Transients"
 
-# Count valid transients (NSTAT > 2.0, at least 4 points out of 6)
-valid_transients = [oo for oo in trans if oo['NSTAT'] > 2.0]
+# Count valid transients (OT_NESS > 2.0 or MP_NESS > 10.0)
+valid_transients = [oo for oo in trans if oo['OT_NESS'] > 2.0 or oo['MP_NESS'] > 10.0]
 
 if len(valid_transients) > 0:
     print(f"Creating matplotlib plot for {len(valid_transients)} valid transients...")

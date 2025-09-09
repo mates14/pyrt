@@ -18,6 +18,7 @@ def read_options(args=sys.argv[1:]):
     parser.add_argument("-a", "--aperture", help="Override an automated aperture choice", type=float)
     parser.add_argument("-I", "--noiraf", help="Do not use IRAF", action='store_true')
     parser.add_argument("-b", "--background", help="Save the background check image", action='store_true')
+    parser.add_argument("-B", "--background-subtract", help="Save background, subtract it from image, and remove background file", action='store_true')
     parser.add_argument("--target-photometry", action='store_true', default=True,
                         help="Enable direct photometry of RTS2 target coordinates (default: True)")
     parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
@@ -220,6 +221,7 @@ def process_photometry(file: str,
                       noiraf: bool = False,
                       aperture: Optional[float] = None,
                       background: bool = False,
+                      background_subtract: bool = False,
                       target_photometry: bool = True,
                       verbose: bool = False) -> astropy.table.Table:
     """Main photometry processing function that can be called programmatically"""
@@ -227,7 +229,7 @@ def process_photometry(file: str,
     det = call_sextractor(file, 2.0)
     new_fwhm = get_fwhm_from_detections(det)
     if not np.isnan(new_fwhm):
-        det = call_sextractor(file, new_fwhm, bg=background)
+        det = call_sextractor(file, new_fwhm, bg=background or background_subtract)
 
     print("W/H:",det.meta['IMAGEW'],det.meta['IMAGEH'])
 
@@ -329,11 +331,31 @@ def main():
                                noiraf=options.noiraf,
                                aperture=options.aperture,
                                background=options.background,
+                               background_subtract=options.background_subtract,
                                target_photometry=options.target_photometry,
                                verbose=True)
 
         tbl.write(base+".cat", format="ascii.ecsv", overwrite=True)
         print(f'OBJECTS={len(tbl)}')
+
+        # Handle background subtraction if -B option is used
+        if options.background_subtract:
+            background_file = base + "-bg.fits"
+            output_file = base + "s.fits"
+            
+            # Use imarith to subtract background from original image
+            imarith_cmd = f"imarith {file} - {background_file} {output_file}"
+            print(f"Subtracting background: {imarith_cmd}")
+            result = subprocess.run(imarith_cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                print(f"Background subtracted image saved as: {output_file}")
+                # Remove the background file as requested
+                if os.path.exists(background_file):
+                    os.remove(background_file)
+                    print(f"Background file {background_file} removed")
+            else:
+                print(f"Error running imarith: {result.stderr}")
 
 if __name__ == "__main__":
     main()

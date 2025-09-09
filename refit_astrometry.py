@@ -8,7 +8,7 @@ import zpnfit
 import logging
 import matplotlib.pyplot as plt
 
-def plot_astrometric_residuals(zpntest, data, filename="astrometric_residuals.png", arrow_scale=300):
+def plot_astrometric_residuals(zpntest, data, filename="astrometric_residuals.png", arrow_scale=2.5):
     """
     Create diagnostic plot showing astrometric residuals as arrows
 
@@ -41,9 +41,18 @@ def plot_astrometric_residuals(zpntest, data, filename="astrometric_residuals.pn
         # Plot stars as blue dots
         ax.scatter(ad.image_x, ad.image_y, c='blue', s=20, alpha=0.6, label='Detected positions')
 
+        # Get image dimensions automatically
+        x_min, x_max = np.min(ad.image_x) - 50, np.max(ad.image_x) + 50
+        y_min, y_max = np.min(ad.image_y) - 50, np.max(ad.image_y) + 50
+
+        med_size = np.sqrt(np.power(np.median(np.abs(dy)),2)+np.power(np.median(np.abs(dx)),2)) # ~0.5 pixel
+        img_size = np.sqrt(np.power(x_max - x_min,2)+np.power(y_max - y_min,2)) # 1024 pixel, the arrow typical scale requested is arrow_scale (in % of image size) so:
+        scaling = arrow_scale * img_size / 100 / med_size  # i.e. ->  for 5% should be x_scaling=0.05*1024/med_size_x ->
+        print(f"The arrow scaling factor if {scaling} ({arrow_scale},{img_size},{med_size})")
+
         # Plot residual arrows (scaled for visibility)
         # Use better quiver parameters for small residuals
-        ax.quiver(ad.image_x, ad.image_y, dx * arrow_scale, dy * arrow_scale,
+        ax.quiver(ad.image_x, ad.image_y, dx * scaling, dy * scaling,
                  residual_mag, scale_units='xy', scale=1, angles='xy',
                  cmap='viridis', alpha=0.8, width=0.002, headwidth=3, headlength=4)
 
@@ -144,13 +153,15 @@ def refit_astrometry(det, data, options):
     except KeyError:
         camera = "C0"
 
+    logging.info(f"CAMERA is {camera}")
     if options.szp:
         zpntest = zpnfit.zpnfit(proj="AZP")
         zpntest.fitterm(["PV2_1"], [1])
 #        zpntest.fitterm(["PV2_2"], [1e-6])
 
     # Initialize ZPN fit object based on camera type
-    elif camera in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S"]:
+    elif camera in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
+        logging.info(f"ZPN projectin activated")
         zpntest = zpnfit.zpnfit(proj="ZPN")
         zpntest.fixterm(["PV2_1"], [1])
     elif camera in ["CAM-ZEA"]:
@@ -199,7 +210,7 @@ def refit_astrometry(det, data, options):
     if options.plot:
         base_filename = os.path.splitext(det.meta['FITSFILE'])[0]
         plot_filename = f"{base_filename}-ast.png"
-        plot_astrometric_residuals(zpntest, data, plot_filename, arrow_scale=300)
+        plot_astrometric_residuals(zpntest, data, plot_filename, arrow_scale=2.5)
 
     # Error model analysis removed - now done in transients.py with full catalog
 
@@ -252,6 +263,16 @@ def setup_camera_params(zpntest, camera, refit_zpn):
         else:
             zpntest.fixterm(["PV2_3", "PV2_5"], [8.255, 343.8])
             zpntest.fixterm(["CRPIX1", "CRPIX2"], [2124.0,2039.0])
+
+    if camera == "SROT1":
+        if refit_zpn:
+            logging.info(f"SROT1 setup being loaded (active)")
+            zpntest.fitterm(["PV2_3", "PV2_5"], [38.561185, 3461.163423])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], [1882.796706,2055.012734])
+        else:
+            logging.info(f"SROT1 setup being loaded (passive)")
+            zpntest.fixterm(["PV2_3", "PV2_5"], [38.561185, 3461.163423])
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], [1882.796706,2055.012734])
 
     if camera in ( "makak2",  "makak"):
         if refit_zpn:

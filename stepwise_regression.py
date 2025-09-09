@@ -427,6 +427,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
     max_iterations = 100  # Prevent infinite loops
     iteration = 0
     improvement_threshold = 0.001  # Minimum relative improvement to accept a term
+    total_checks = 0  # Track total number of model evaluations
 
     while iteration < max_iterations:
 #        print(f"=== Cycle {iteration}: WSSRNDF={best_wssrndf:.6f}, Selected={len(selected_terms)} terms, Remaining={len(remaining_terms)} candidates ===")
@@ -438,27 +439,33 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
         best_improvement = 0
         best_new_mask = None
 
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            # Submit all term trials in parallel
-            future_to_term = {
-                executor.submit(try_term_robust, ffit, term, selected_terms, fd.fotparams, combined_initial_values): term
-                for term in remaining_terms
-            }
+        if remaining_terms:
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                # Submit all term trials in parallel
+                future_to_term = {
+                    executor.submit(try_term_robust, ffit, term, selected_terms, fd.fotparams, combined_initial_values): term
+                    for term in remaining_terms
+                }
 
-            # Process results as they complete
-            for future in concurrent.futures.as_completed(future_to_term):
-                term = future_to_term[future]
-                try:
-                    new_wssrndf, new_mask = future.result()
-                    improvement = 1 - new_wssrndf/best_wssrndf
+                # Process results as they complete
+                completed_forward = 0
+                for future in concurrent.futures.as_completed(future_to_term):
+                    completed_forward += 1
+                    total_checks += 1
+                    print(f"\rStepwise regression: pass {iteration}, checking {completed_forward}/{len(remaining_terms)} terms for addition, total checks {total_checks}", end="", flush=True)
+                    
+                    term = future_to_term[future]
+                    try:
+                        new_wssrndf, new_mask = future.result()
+                        improvement = 1 - new_wssrndf/best_wssrndf
 
-                    if improvement > improvement_threshold and improvement > best_improvement:
-                        best_improvement = improvement
-                        best_new_term = term
-                        best_new_mask = new_mask
-                        best_new_wssrndf = new_wssrndf
-                except Exception as e:
-                    print(f"Error trying term {term}: {str(e)}")
+                        if improvement > improvement_threshold and improvement > best_improvement:
+                            best_improvement = improvement
+                            best_new_term = term
+                            best_new_mask = new_mask
+                            best_new_wssrndf = new_wssrndf
+                    except Exception as e:
+                        print(f"\nError trying term {term}: {str(e)}", flush=True)
 
 #        print(f"After search for new: wssrndf={best_wssrndf}")
         # Add best term if found
@@ -491,7 +498,12 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
                 ]
 
                 # Process results as they complete
+                completed_backward = 0
                 for future in concurrent.futures.as_completed(futures):
+                    completed_backward += 1
+                    total_checks += 1
+                    print(f"\rStepwise regression: pass {iteration}, checking {completed_backward}/{len(removable_terms)} terms for removal, total checks {total_checks}", end="", flush=True)
+                    
                     try:
                         term, new_wssrndf, new_mask = future.result()
                         degradation = 1 - best_wssrndf/new_wssrndf
@@ -504,7 +516,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
                                 worst_new_wssrndf = new_wssrndf
                                 worst_new_mask = new_mask
                     except Exception as e:
-                        print(f"Error trying to remove term: {str(e)}")
+                        print(f"\nError trying to remove term: {str(e)}", flush=True)
 
             # Remove term if its contribution is minimal
             if worst_term:
@@ -526,6 +538,9 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
         if not made_change:
 #            print(f"=== Converged after {iteration} cycles: No forward or backward changes possible ===")
             break
+
+    # Final newline to complete the progress display
+    print()
 
     # Final fit with all selected terms using current photometry mask
     ffit.fixall()
