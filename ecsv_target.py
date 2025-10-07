@@ -65,7 +65,7 @@ def format_output_line(ecsv_file, meta, target, wssrndf=None):
     """Format the output line in the same style as dophot."""
     # Extract metadata
     jd = meta.get('JD', 0.0)
-    chartime = jd + meta.get('EXPTIME', 0) / 2
+    chartime = jd + meta.get('EXPTIME', 0) / 2.0 / 86400.0
     filt = meta.get('FILTER', 'None')
     exptime = meta.get('EXPTIME', 0)
     airmass = meta.get('AIRMASS', 0.0)
@@ -85,7 +85,7 @@ def format_output_line(ecsv_file, meta, target, wssrndf=None):
         out_line = f"{ecsv_file} {jd:.6f} {chartime:.6f} {filt} {exptime:3.0f} {airmass:6.3f} {idnum:4d} {magzero:7.3f} {dmagzero:6.3f} {limflx3+magzero:7.3f} {wssrndf:6.3f} {mag:7.3f} {mag_err:6.3f} {tarid} {obsid} ok"
     else:
         # Target not found
-        out_line = f"{ecsv_file} {jd:.6f} {chartime:.6f} {filt} {exptime:3.0f} {airmass:6.3f} {idnum:4d} {magzero:7.3f} {dmagzero:6.3f} {limflx3+magzero:7.3f} {wssrndf:6.3f}  99.999  99.999 {tarid} {obsid} not_found"
+        out_line = f"{ecsv_file} {jd:.6f} {chartime:.6f} {filt} {exptime:3.0f} {airmass:6.3f} {idnum:4d} {magzero:7.3f} {dmagzero:6.3f} {limflx3+magzero:7.3f} {wssrndf:6.3f}  -       -      {tarid} {obsid} not_found"
 
     return out_line
 

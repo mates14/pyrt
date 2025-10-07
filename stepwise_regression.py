@@ -474,7 +474,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
             remaining_terms.remove(best_new_term)
             best_wssrndf = best_new_wssrndf  # Simply use the new value
             made_change = True
-            print(f"Added term {best_new_term} (improvement: {best_improvement:.1%}). New wssrndf: {best_wssrndf}")
+            print(f" Added term {best_new_term} (improvement: {best_improvement:.1%}). New wssrndf: {best_wssrndf}")
 
             # Apply the new mask to data
             data.apply_mask(best_new_mask, 'photometry')
@@ -520,7 +520,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
 
             # Remove term if its contribution is minimal
             if worst_term:
-                print(f"Removing term {worst_term} (improvement: {-smallest_degradation:.1%})")
+                print(f" Removing term {worst_term} (improvement: {-smallest_degradation:.1%})")
                 ffit.removeterm(worst_term)
                 best_wssrndf = worst_new_wssrndf
                 selected_terms.remove(worst_term)

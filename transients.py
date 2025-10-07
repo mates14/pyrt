@@ -598,7 +598,7 @@ for arg in options.files:
 
     # ===  identification with KDTree  ===
     Y = np.array([det['X_IMAGE'], det['Y_IMAGE']]).transpose()
-
+    
     start = time.time()
     try:
         Xt = np.array(imgwcs.all_world2pix(cat['radeg'], cat['decdeg'],1))
@@ -616,7 +616,9 @@ for arg in options.files:
     if len(X) < 1:
         print("len(X)<1, wtf!? %d"%(len(x)))
         continue
+    start = time.time()
     tree = KDTree(X)
+    print("Build KDTree took %.3fs"%(time.time()-start))
     nearest_ind, nearest_dist = tree.query_radius(Y, r=idlimit, return_distance=True, count_only=False)
 
     # ===  FULL-CATALOG ERROR MODEL ANALYSIS  ===
@@ -1238,7 +1240,7 @@ for arg in options.files:
     # remove doubles!
 #            tree = KDTree( np.array([cand['ALPHA_J2000'], cand['DELTA_J2000']]).transpose())
             tree = BallTree( np.array([cand['ALPHA_J2000']*np.pi/180, cand['DELTA_J2000']*np.pi/180]).transpose(), metric='haversine')
-            nearest_ind, nearest_dist = tree.query_radius( np.array([cand['ALPHA_J2000']*np.pi/180, cand['DELTA_J2000']*np.pi/180]).transpose() , r=d.meta['PIXEL']*idlimit/3600.*2*np.pi/180, return_distance=True, count_only=False)
+            nearest_ind, nearest_dist = tree.query_radius( np.array([cand['ALPHA_J2000']*np.pi/180, cand['DELTA_J2000']*np.pi/180]).transpose() , r=d.meta['PIXEL']*1.0/3600.*np.pi/180, return_distance=True, count_only=False)
             i=0;
             doubles=[]
             for g,h in zip(nearest_ind,nearest_dist):

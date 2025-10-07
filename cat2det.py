@@ -324,7 +324,7 @@ def process_detections(det: astropy.table.Table,
 
     # copy most of the sensible keywords from img to det
     for i,j in c.items():
-        if i in ('NAXIS', 'NAXIS1', 'NAXIS2', 'BITPIX'): continue
+        if i in ('NAXIS', 'NAXIS1', 'NAXIS2', 'BITPIX','FWHM'): continue
         if len(i)>8: continue
         if "." in i: continue
         det.meta[i] = j
@@ -403,6 +403,7 @@ def process_detections(det: astropy.table.Table,
     try:  # Normally we should have a FWHM value from phcat in the photometry file
         fwhm = det.meta['FWHM']
     except: # if not try some alternatives
+        print(f"FWHM not found in .cat file, that's strange! Trying something else.")
         try:
             fwhm = c['FWHM']
             if verbose:
