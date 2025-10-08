@@ -141,7 +141,7 @@ Adding `*` to any term makes it **per-image**:
 
 ### The `-y` Option: Legacy Made Easy
 
-The `-y` option is a time-honored tradition that means "fit pointing corrections per-image":
+The `-y` option is a time-honored tradition that means "fit transparency gradients per-image":
 
 ```bash
 dophot3 -y images*.fits     # Old reliable way
