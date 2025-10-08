@@ -84,8 +84,11 @@ def find_target(det, imgwcs, idlimit=2.0):
     Returns:
         object: Matched detection or None if not found
     """
-    if det.meta['OBJRA'] < -99 or det.meta['OBJDEC'] < -99:
-        logging.info("Target was not defined")
+    try:
+        if det.meta['OBJRA'] < -99 or det.meta['OBJDEC'] < -99:
+            logging.info("Target was not defined")
+            return None
+    except:
         return None
 
     logging.info(f"Target coordinates: {det.meta['OBJRA']:.6f} {det.meta['OBJDEC']:+.6f}")
