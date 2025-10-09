@@ -307,6 +307,7 @@ class Catalog(astropy.table.Table):
             raise ValueError(f"Unknown catalog: {self._catalog_name}")
 
         config = self.KNOWN_CATALOGS[self._catalog_name]
+        logging.info(f"Querying catalog: {self._catalog_name} ({config.get('description', 'no description')})")
         result: Optional[astropy.table.Table] = None
 
         # Get catalog data

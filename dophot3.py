@@ -160,7 +160,7 @@ def perform_photometric_fitting(data, options, metadata):
     if final_filter != metadata[0]['PHFILTER']:
         try:
             from filter_matching import get_catalog_filters, find_compatible_schema
-            catalog_name = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
+            catalog_name = 'makak' if options.makak else options.catalog
             available_filters = get_catalog_filters(catalog_name)
 
             if final_filter in available_filters:
@@ -639,7 +639,7 @@ def main():
             logging.warning(f"I do not know what to do with {arg}")
             continue
 
-        catalog_name = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
+        catalog_name = 'makak' if options.makak else options.catalog
         determine_filter(det, options, catalog_name)
         logging.info(f'Reference filter is {det.meta["PHFILTER"]}, '
                 f'Schema: {det.meta["PHSCHEMA"]}, '

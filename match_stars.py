@@ -205,7 +205,7 @@ def get_catalog_with_dynamic_limit(det, estimated_zp, options):
 
     # Get catalog with calculated magnitude limit
     enlarge = options.enlarge if options.enlarge is not None else 1.0
-    catalog_name = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
+    catalog_name = 'makak' if options.makak else options.catalog
 
     cat = Catalog(
         ra=det.meta['CTRRA'],
@@ -292,12 +292,12 @@ def process_image_with_dynamic_limits(det, options):
             height=enlarge*det.meta['FIELD'],
             # Use bright stars for initial estimate
             mlim=options.maglim or recommended_mag,
-            catalog='makak' if options.makak else (options.catalog or 'atlas@localhost')
+            catalog='makak' if options.makak else options.catalog
         )
 
         # Check if catalog is empty (e.g., SDSS outside coverage area)
         if len(cat) == 0:
-            logging.warning(f"Empty catalog from {options.catalog or 'atlas@localhost'} - no reference stars available")
+            logging.warning(f"Empty catalog from {options.catalog} - no reference stars available")
             return None, None, None, None
 
         if options.maglim is None:
@@ -324,7 +324,7 @@ def process_image_with_dynamic_limits(det, options):
             logging.info(f"Detection limit: {detection_limit:.2f}, using catalog limit: {maglim:.2f}")
 
             # Get catalog with calculated magnitude limit
-            catalog_name = 'makak' if options.makak else (options.catalog or 'atlas@localhost')
+            catalog_name = 'makak' if options.makak else options.catalog
 
             cat = Catalog(
                 ra=det.meta['CTRRA'],

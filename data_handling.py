@@ -513,7 +513,7 @@ def compute_zeropoints_all_filters(data, metadata, options):
     import logging
 
     # Get all available catalog filters for comprehensive testing
-    catalog_name = 'makak' if getattr(options, 'makak', False) else (getattr(options, 'catalog', None) or 'atlas@localhost')
+    catalog_name = 'makak' if getattr(options, 'makak', False) else getattr(options, 'catalog', None)
     try:
         from filter_matching import get_catalog_filters
         all_catalog_filters = list(get_catalog_filters(catalog_name).keys())
