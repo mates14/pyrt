@@ -8,13 +8,7 @@ import subprocess
 
 import numpy as np
 
-import astropy
-import astropy.io.fits
 import astropy.wcs
-import astropy.table
-import astropy.units as u
-from astropy.time import Time
-from astropy.coordinates import SkyCoord, AltAz, EarthLocation
 
 import concurrent.futures
 from copy import deepcopy

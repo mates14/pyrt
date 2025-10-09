@@ -50,21 +50,21 @@ The pipeline integrates several specialized tools, each doing what it does best:
 ## Architecture
 
 ```
-FITS Image → astrometry.net → WCS-solved FITS
+                                FITS Image
                                     ↓
-                          ┌─────────┴─────────┐
-                          │  dophot3 pipeline │
-                          └─────────┬─────────┘
+                              astrometry.net 
+                                    ↓
+                             WCS-solved  FITS
                                     ↓
               phcat.py: SExtractor + IRAF [or SExtractor-only]
                                     ↓
-              cat2det.py: prepare detection table
+                    cat2det.py: prepare detection table
                                     ↓
-              dophot3: photometric calibration + astrometric refinement
+        dophot3: photometric calibration + astrometric refinement
                                     ↓
-                          Calibrated catalog (.ecsv)
+                       Calibrated catalog (.ecsv)
                                     ↓
-                          [photo-db archiving - not in repo yet]
+                 [photo-db archiving - not in repo yet]
 ```
 
 ### Components

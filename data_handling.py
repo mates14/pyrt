@@ -1,9 +1,6 @@
 import numpy as np
 import logging
-from astropy.time import Time
-from astropy.coordinates import SkyCoord, AltAz, EarthLocation
-import astropy.units as u
-from airmass import altitude_to_airmass
+from airmass import calculate_airmass_array
 
 class FitData:
     """
@@ -323,15 +320,15 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None,
                 # Use default airmass: absolute=1.0, relative=0.0 for all objects
                 airmass = np.ones_like(ra)  # Absolute airmass = 1.0 (zenith)
             else:
-                loc = EarthLocation(lat=det.meta['LATITUDE']*u.deg,
-                                    lon=det.meta['LONGITUD']*u.deg,
-                                    height=det.meta['ALTITUDE']*u.m)
-                time = Time(det.meta['JD'], format='jd')
-                coords = SkyCoord(ra*u.deg, dec*u.deg)
-                altaz = coords.transform_to(AltAz(obstime=time, location=loc))
-
-                # Use Rosenberg (1966) airmass formula - more accurate than simple secz
-                airmass = altitude_to_airmass(altaz.alt.rad)
+                # Calculate airmass using coordinate transformation
+                # (slow astropy imports happen inside this function only when called)
+                airmass = calculate_airmass_array(
+                    ra, dec,
+                    det.meta['LATITUDE'],
+                    det.meta['LONGITUD'],
+                    det.meta['ALTITUDE'],
+                    det.meta['JD']
+                )
 
                 # Check for invalid airmass values (below horizon gives negative secz)
                 invalid_mask = (airmass < 0) | (airmass > 10) | np.isnan(airmass)
