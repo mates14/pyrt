@@ -3,7 +3,15 @@ Python photometric reduction tools - a suite centered around the dophot3 calibra
 
 ## Overview
 
-This photometric pipeline provides **universal, automatic, and reliable** absolute photometric calibration for astronomical observations. Currently in production at D50 and other observatories, the calibrated photometry is archived in a PostgreSQL+q3c database (photo-db, not yet included in this repository) with cone-search capabilities. The system feeds into transient search engines for automated discovery, and is used for variable star monitoring and other time-domain science.
+This is a **full image calibration tool** that provides universal, automatic, and reliable calibration for astronomical observations. It performs:
+
+- **Photometric calibration**: Converts instrumental magnitudes to calibrated photometry using all-sky reference catalogs
+- **Astrometric refinement**: Significantly improves WCS solutions beyond initial astrometry.net results
+
+Currently in production use at:
+- **D50 and SBT telescopes**: Automated processing pipeline
+- **Makak**: Wide-field sky monitoring camera ([lascaux.asu.cas.cz/m/makak](https://lascaux.asu.cas.cz/m/makak)) providing real-time photometric quality measurements at Ondřejov Observatory
+- **General-purpose**: Tool for calibrating diverse astronomical images, handling even challenging data
 
 **Getting Started**: Just give it an astrometry.net-solved FITS file:
 ```bash
