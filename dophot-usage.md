@@ -292,7 +292,7 @@ dophot3 -Z -U 'PAC,PB,PC,&.p3' allsky*.fits
 
 ## Putting It All Together: Real-World Examples
 
-### Example 1: Survey Photometry with Problem Objects
+### Example 1: Avoid extreme color objects for calibration of a survey
 ```bash
 # Remove extreme colors, exclude targets, use single zeropoint
 dophot3 -B -0.5 -R 1.2 -Z -U 'PAC,PC,&.p2' survey*.fits
