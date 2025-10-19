@@ -272,10 +272,10 @@ def create_correction_volume_plots(data, output_base, ffit):
     # This is the difference between model at fractional vs integer positions
     ax = fig.add_subplot(gs[3:6, 3:6])
     
-    # Create fotparams with integer-rounded coordinates
+    # Create fotparams with integer-floored coordinates
     rounded_fotparams = list(fd.fotparams)
-    rounded_fotparams[2] = np.round(fd.coord_x)  # Round coord_x to integers
-    rounded_fotparams[3] = np.round(fd.coord_y)  # Round coord_y to integers
+    rounded_fotparams[2] = np.floor(fd.coord_x)  # Floor coord_x to integers
+    rounded_fotparams[3] = np.floor(fd.coord_y)  # Floor coord_y to integers
     
     # Calculate model with rounded coordinates
     model_rounded = ffit.model(np.array(ffit.fitvalues), rounded_fotparams)

@@ -22,7 +22,7 @@ gain = 2.3
 use_stepwise = True
 target_photometry = True
 terms = .p3,.r3
-catalog = atlas@vizier
+catalog = atlas@localhost
 
 [FILTER_SCHEMAS]
 JohnsonU = Johnson_U, Johnson_B, Johnson_V, Johnson_R, Johnson_I
