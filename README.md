@@ -148,6 +148,7 @@ This three-level system provides a domain-specific language matching how astrono
 - **Automated Quality Control**: Automatic frame assessment and bad frame rejection
 - **Production Deployments**: D50, FRAM, SBT, Makak all-sky monitor, Mini/Mega Tortora
 - **Atmospheric Monitoring**: Makak system provides additional atmospheric calibration data
+- **High-Performance Image Combination**: mProjectPX wrapper provides ~100x speedup for ZPN projection reprojection by converting to TAN+SIP approximation before using Montage's fast mProjectPP tool
 
 ## Reference
 
