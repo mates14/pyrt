@@ -12,6 +12,7 @@ import astropy.table
 import astropy.io.fits
 
 from typing import Optional, Tuple
+from file_utils import get_sextractor_binary
 
 def read_options(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
@@ -88,7 +89,10 @@ def call_sextractor(file, fwhm, bg=False):
 
     do_matrix(base+".conv", fwhm)
 
-    os.system(f"sex -c {base}.sex {file}")
+    sex_binary = get_sextractor_binary()
+    if sex_binary is None:
+        raise RuntimeError("No SExtractor binary found. Please install sex, sextractor, or source-extractor")
+    os.system(f"{sex_binary} -c {base}.sex {file}")
     det = astropy.io.ascii.read(base+".cat", format='sextractor')
     os.system(f'rm {base}.cat {base}.conv {base}.sex {base}.param')
 
