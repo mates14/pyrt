@@ -222,17 +222,15 @@ def open_files(arg, verbose=False):
 
     if det is None: # os.system does not raise an exception if it fails
         #cmd = f"sscat-noradec {arg}"
-        cmd = f"phcat.py {arg}"
-        if verbose: print(f"Running {cmd}")
-        os.system(cmd)
+        try:
+            cmd = f"phcat.py {arg}"
+            if verbose: print(f"Running {cmd}")
+            os.system(cmd)
+        except:
+            print(f"Warning: Tried and failed to execute {cmd}")
+            
         detf, det = try_ecsv(os.path.splitext(arg)[0] + ".cat",verbose)
         if det is None: detf, det = try_sex(arg + ".xat", verbose)
-
-    if det is None:
-        cmd = f"mkcat {arg}"
-        if verbose: print(f"Running {cmd}")
-        os.system(cmd)
-        detf, det = try_sex(os.path.splitext(arg)[0] + ".cat", verbose)
 
     if det is None or img is None:
         print(f"Error: Cannot couple fits image and sextractor list for argument {arg}")
