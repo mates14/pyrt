@@ -93,7 +93,7 @@ def get_base_filter(det, options, catalog_name):
     Returns:
         tuple: (base_filter_name, photometric_system, schema_name)
     '''
-    
+
     # Get available filters for this catalog
     available_filters = get_catalog_filters(catalog_name)
     if not available_filters:
@@ -102,6 +102,8 @@ def get_base_filter(det, options, catalog_name):
 
     # Map current filter name to catalog filter
     filter_name = det.meta.get('FILTER', 'Sloan_r')
+
+    basemag = None  # Initialize to None to avoid UnboundLocalError
 
     if filter_name in available_filters:
         basemag = available_filters[filter_name]
@@ -122,6 +124,14 @@ def get_base_filter(det, options, catalog_name):
             closest = find_closest_filter_by_wavelength(target_wavelength, available_filters)
             if closest:
                 basemag = closest
+
+    # If we still don't have a filter match, fall back to a default
+    if basemag is None:
+        logging.warning(f"Cannot determine filter from header value '{filter_name}' (corrupted or unknown)")
+        logging.warning(f"Falling back to default filter. Use --filter-check=discover to determine actual filter")
+        # Use first available filter as fallback
+        basemag = list(available_filters.values())[0]
+        logging.warning(f"Using fallback filter: {basemag.name} ({basemag.system} system)")
 
     # Find compatible schema that includes basemag
     schema_name = find_compatible_schema(available_filters, options.filter_schemas, basemag.name)
