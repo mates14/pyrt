@@ -1,0 +1,1384 @@
+#!/usr/bin/python3
+"""
+combine-images: Intelligent FITS image combination with photometric weighting
+
+This tool combines multiple FITS images using sophisticated weighting based on
+photometric calibration, with automatic outlier rejection and optimal WCS frame
+calculation.
+
+Usage Modes:
+-----------
+
+1. Automatic weighted mode (default):
+   Performs outlier rejection, calculates optimal WCS frame, computes S/N-based
+   weights, and combines images. Requires MAGZERO keyword in FITS headers.
+
+   Example:
+       combine-images input*.fits
+       combine-images -o output.fits input*.fits
+
+2. Uniform weighting mode:
+   Equal weight for all images. No photometric calibration required.
+
+   Example:
+       combine-images -u input*.fits
+
+3. Manual mode (expert control):
+   Skip automatic steps when you have pre-selected frames or a specific target
+   WCS (useful for inter-instrument subtraction, precise alignment, etc.)
+
+   Example:
+       combine-images --skeleton custom.hdr --no-selection input*.fits
+
+4. Skeleton-only mode:
+   Calculate optimal WCS frame and write skeleton header without combining.
+
+   Example:
+       combine-images --skeleton-only skel.hdr input*.fits
+
+Key Features:
+-------------
+- **Intelligent outlier rejection**: Spatial clustering to remove misaligned frames
+- **Optimal WCS calculation**: Finds the best-fit coordinate frame covering all inputs
+- **Photometric weighting**: Signal-to-noise optimization for best combined S/N
+- **Uniform weighting**: Optional equal weighting for uncalibrated data
+- **Smart MAGZERO handling**: Skips files without calibration, suggests --uniform
+- **Time-variable source support**: GRB mode with power-law brightness evolution
+- **Weight map handling**: Supports per-pixel weighting (vignetting correction)
+- **Parallel processing**: Multi-core image projection and reprojection
+- **Characteristic time**: Proper time tagging for transient observations
+- **Metadata preservation**: Propagates observing conditions to output
+
+Weighting Algorithms:
+--------------------
+
+Photometric weighting (default):
+  For each image, calculates optimal weight based on:
+  - Expected source brightness (from MAGZERO and exposure time)
+  - Background noise (measured from image statistics)
+  - Signal-to-noise contribution to final combination
+
+  Files without MAGZERO are skipped and reported. If all files lack MAGZERO,
+  the tool suggests using --uniform mode.
+
+  For time-variable sources (GRB mode), adjusts expected brightness using
+  power-law decay model: mag(t) = mag0 + decay * log10(t/t0)
+
+Uniform weighting (--uniform):
+  All images receive equal weight. Useful for:
+  - Uncalibrated data without MAGZERO
+  - Quick combinations without optimization
+  - Testing and debugging
+
+Spatial weighting:
+  Per-pixel weight maps (WGHTFILE keyword) are combined with scalar weights
+  to handle vignetting, bad pixel masks, or other spatially-varying effects.
+
+Technical Details:
+------------------
+- Uses Montage toolkit (mProjectPP/mProjectPX) for accurate reprojection
+- Handles complex projections via mProjectPX (ZPN → TAN+SIP conversion)
+- Parallel processing for large image sets
+- Proper error propagation (GAIN, RNOISE)
+- Characteristic time calculation for transients
+- Safe handling of missing calibration data
+"""
+
+import os
+import sys
+import numpy as np
+from astropy.io import fits
+from astropy.wcs import WCS
+import argparse
+from pathlib import Path
+import subprocess
+import tempfile
+import multiprocessing as mp
+import datetime
+
+# This is to silence a particular annoying warning (MJD not present in a fits file)
+import warnings
+from astropy.wcs import FITSFixedWarning
+warnings.simplefilter('ignore', category=FITSFixedWarning)
+
+# Keywords to copy from input files to output
+COPY_KEYWORDS = [
+    'CTIME', 'USEC', 'JD', 'DATE-OBS',
+    'TARGET', 'TARSEL', 'TARTYPE', 'OBSID', 'IMGID', 'PROC', 'CCD_NAME',
+    'MOONDIST', 'MOONRA', 'MOONDEC', 'MOONPHA', 'MOONALT', 'MOONAZ',
+    'EXPOSURE', 'EXPTIME', 'INSTRUME', 'TELESCOP', 'ORIGIN', 'FOC_NAME',
+    'SCRIPREP', 'SCRIPT', 'SCR_COMM', 'COMM_NUM', 'CCD_TYPE', 'CCD_SER', 'CCD_CHIP',
+    'IMAGETYP', 'OBJECT', 'SLITPOSX', 'SLITPOSY',
+    'BINNING', 'BINX', 'BINY', 'CCD_TEMP', 'COOLING', 'CCD_SET', 'SHUTTER',
+    'CHAN', 'CHAN1', 'FTSHUT', 'ACQMODE', 'ACCCYCLE', 'ACCNUM', 'KINCYCLE', 'KINNUM',
+    'IMGFREQ', 'ACQTIME', 'USEFT', 'FILTCR', 'ADCMODE', 'EMON', 'ADCHANEL', 'OUTAMP',
+    'HSPEED', 'PREAMP', 'GAIN', 'VSPEED', 'SAMPLI', 'EMADV', 'GAINMODE', 'BASECLAM',
+    'FAN', 'FILTA',
+    'MNT_NAME', 'LATITUDE', 'LONGITUD', 'ALTITUDE', 'AMBTEMP', 'DUT1',
+    'ORIRA', 'ORIDEC', 'OEPOCH', 'PMRA', 'PMDEC', 'OFFSRA', 'OFFSDEC', 'DRATERA', 'DRATEDEC',
+    'TRACKING', 'SKYSPDRA', 'OBJRA', 'OBJDEC', 'TARRA', 'TARDEC', 'CORR_RA', 'CORR_DEC',
+    'TELRA', 'TELDEC', 'JD_HELIO', 'U_TELRA', 'U_TELDEC', 'TEL_ALT', 'TEL_AZ', 'PARKTIME',
+    'AIRMASS', 'HA', 'LST', 'MOVE_NUM', 'CORR_IMG', 'MNT_ROTA', 'MNT_FLIP',
+    'IH', 'ID', 'NP', 'CH', 'ME', 'MA', 'HDCD', 'HDSD', 'HHSH', 'HHCH', 'HDSH', 'HDCH',
+    'RA_TPOS', 'RA_APOS', 'RA_FAULT', 'DEC_TPOS', 'DEC_APOS', 'MNT_INFO',
+    'SUN_ALT', 'SUN_AZ', 'CAM_FILT', 'AVERAGE', 'STDEV', 'FILTER',
+    'RA_ERR', 'DEC_ERR', 'POS_ERR', 'FWHM', 'ELLIP', 'BGSIGMA', 'MAGZERO', 'DMAGZERO'
+]
+
+# ============================================================================
+# WCS Frame Calculation Functions (from fits_overlap)
+# ============================================================================
+
+def process_single_file_coverage(args):
+    """Process a single FITS file and return its coverage mask.
+
+    Args:
+        args: tuple containing (filename, ref_wcs, ref_shape)
+    Returns:
+        numpy array containing the coverage mask
+    """
+    fname, ref_wcs, ref_shape = args
+    with fits.open(fname) as hdul:
+        img_wcs = WCS(hdul[0].header)
+        img_shape = hdul[0].data.shape
+        return create_coverage_mask(ref_wcs, img_wcs, ref_shape, img_shape)
+
+def create_coverage_mask(ref_wcs, img_wcs, shape, img_shape):
+    """Create a coverage mask by checking if reference points fall within image footprint."""
+    ny, nx = shape
+    y, x = np.mgrid[:ny, :nx]
+    world_coords = ref_wcs.pixel_to_world(x, y)
+    img_pixels = img_wcs.world_to_pixel(world_coords)
+    mask = (img_pixels[0] >= 0) & (img_pixels[0] < img_shape[1]) & \
+           (img_pixels[1] >= 0) & (img_pixels[1] < img_shape[0])
+    return mask.astype(int)
+
+def create_reference_wcs(input_files, sampling_factor=8, scale_factor=1.5):
+    """Create a reference TAN projection WCS based on input images.
+
+    Args:
+        input_files: List of input FITS files
+        sampling_factor: Factor by which to increase pixel size
+        scale_factor: Factor by which to increase field size
+
+    Returns:
+        WCS object with TAN projection and shape tuple
+    """
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+
+    centers = []
+    scales = []
+    fields = []
+
+    for fname in input_files:
+        with fits.open(fname) as hdul:
+            w = WCS(hdul[0].header)
+            ny, nx = hdul[0].data.shape
+
+            center_x, center_y = nx/2, ny/2
+            rd = w.all_pix2world([[center_x, center_y], [0, 0], [center_x, center_y+1]], 0)
+
+            center = SkyCoord(rd[0][0]*u.deg, rd[0][1]*u.deg, frame='fk5')
+            corner = SkyCoord(rd[1][0]*u.deg, rd[1][1]*u.deg, frame='fk5')
+            pixel_point = SkyCoord(rd[2][0]*u.deg, rd[2][1]*u.deg, frame='fk5')
+
+            field_size = center.separation(corner) * 2
+            pixel_size = pixel_point.separation(center)
+
+            centers.append(center)
+            scales.append(pixel_size.deg)
+            fields.append(field_size.deg)
+
+    ra = np.mean([c.ra.deg for c in centers])
+    dec = np.mean([c.dec.deg for c in centers])
+    pixel_scale = np.max(scales) * sampling_factor
+
+    w = WCS(naxis=2)
+    w.wcs.ctype = ['RA---TAN', 'DEC--TAN']
+    w.wcs.crval = [ra, dec]
+    w.wcs.cdelt = [pixel_scale, pixel_scale]
+
+    base_size_deg = np.median(fields)
+    pixel_scale = np.median(scales) * sampling_factor
+
+    ra_min = np.min([c.ra.deg for c in centers])
+    ra_max = np.max([c.ra.deg for c in centers])
+    dec_min = np.min([c.dec.deg for c in centers])
+    dec_max = np.max([c.dec.deg for c in centers])
+
+    mean_dec = np.radians(np.mean([dec_min, dec_max]))
+    ra_spread = (ra_max - ra_min) * np.cos(mean_dec)
+    dec_spread = dec_max - dec_min
+
+    total_ra_size = (base_size_deg + ra_spread)
+    total_dec_size = (base_size_deg + dec_spread)
+
+    size_ra = int(total_ra_size / pixel_scale)
+    size_dec = int(total_dec_size / pixel_scale)
+
+    size_ra = max(64, size_ra)
+    size_dec = max(64, size_dec)
+
+    w.wcs.crpix = [size_ra/2, size_dec/2]
+
+    return w, (size_dec, size_ra)
+
+def find_maximal_rectangle(matrix, mode='in'):
+    """Find the largest rectangular region in a matrix."""
+    if mode == 'out':
+        working_matrix = matrix > 0
+    else:
+        working_matrix = matrix == np.max(matrix)
+
+    if not working_matrix.any():
+        return (0, 0, 0, 0)
+
+    rows, cols = working_matrix.shape
+    height = np.zeros((rows + 1, cols), dtype=int)
+    max_area = 0
+    max_rect = (0, 0, 0, 0)
+
+    for i in range(rows):
+        for j in range(cols):
+            if working_matrix[i, j]:
+                height[i + 1, j] = height[i, j] + 1
+            else:
+                height[i + 1, j] = 0
+
+        stack = []
+        j = 0
+        while j < cols:
+            start = j
+            while stack and height[i + 1, stack[-1]] > height[i + 1, j]:
+                h = height[i + 1, stack.pop()]
+                w = j - stack[-1] - 1 if stack else j
+                area = h * w
+                if area > max_area:
+                    if mode == 'inside':
+                        rect_slice = matrix[max(0, i + 1 - h):i + 1, max(0, j - w):j]
+                        if np.all(rect_slice > 0):
+                            max_area = area
+                            max_rect = (start - w, i + 1 - h, w, h)
+                    else:
+                        max_area = area
+                        max_rect = (start - w, i + 1 - h, w, h)
+            stack.append(j)
+            j += 1
+
+        while stack:
+            h = height[i + 1, stack.pop()]
+            w = cols - stack[-1] - 1 if stack else cols
+            area = h * w
+            if area > max_area:
+                if mode == 'inside':
+                    rect_slice = matrix[max(0, i + 1 - h):i + 1, max(0, cols - w):cols]
+                    if np.all(rect_slice > 0):
+                        max_area = area
+                        max_rect = (cols - w, i + 1 - h, w, h)
+                else:
+                    max_area = area
+                    max_rect = (cols - w, i + 1 - h, w, h)
+
+    return max_rect
+
+def find_optimal_frame(fits_files, sampling_factor=8, scale_factor=1.5, zoom_factor=1.0, num_processes=None, mode='in'):
+    """
+    Find the optimal WCS frame for a set of FITS images.
+
+    Args:
+        fits_files: List of input FITS files
+        sampling_factor: Factor for initial sampling (default: 8)
+        scale_factor: Factor for field scaling (default: 1.5)
+        zoom_factor: Additional zoom factor for final output (default: 1.0)
+        num_processes: Number of processes for parallel processing (default: CPU count)
+        mode: 'in' for full coverage or 'out' for partial coverage (default: 'in')
+
+    Returns:
+        dict: FITS header keywords
+    """
+    # Create reference WCS
+    ref_wcs, ref_shape = create_reference_wcs(
+        fits_files,
+        sampling_factor=sampling_factor,
+        scale_factor=scale_factor
+    )
+
+    # Initialize coverage mask
+    coverage = np.zeros(ref_shape, dtype=int)
+
+    # Process images in parallel
+    num_processes = num_processes or mp.cpu_count()
+    print(f"Processing {len(fits_files)} files using {num_processes} processes...")
+
+    # Create pool of workers
+    with mp.Pool(num_processes) as pool:
+        # Prepare arguments for each file
+        process_args = [(fname, ref_wcs, ref_shape) for fname in fits_files]
+
+        # Process files in parallel and collect results
+        masks = pool.map(process_single_file_coverage, process_args)
+
+        # Sum up all masks
+        coverage = sum(masks)
+
+    # Find maximal rectangle
+    max_rect = find_maximal_rectangle(coverage, mode=mode)
+    x, y, w, h = max_rect
+
+    # Create output header
+    header = ref_wcs.to_header()
+    header['NAXIS'] = 2
+    header['NAXIS1'] = int(w * sampling_factor * zoom_factor)
+    header['NAXIS2'] = int(h * sampling_factor * zoom_factor)
+    header['BITPIX'] = -32 # 32 bit float
+    header['CRPIX1'] -= x
+    header['CRPIX2'] -= y
+
+    # Scale pixel size
+    final_scale = sampling_factor * zoom_factor
+    header['CDELT1'] /= final_scale
+    header['CDELT2'] /= final_scale
+    header['CRPIX1'] *= final_scale
+    header['CRPIX2'] *= final_scale
+
+    # Add metadata
+    header['SAMPLING'] = sampling_factor
+    header['SCALE'] = scale_factor
+    header['NIMAGES'] = len(fits_files)
+
+    return header
+
+# ============================================================================
+# Selection and Frame Calculation Functions (from combine)
+# ============================================================================
+
+def get_image_center(header):
+    """Get the center position of an image in RA/Dec.
+
+    Args:
+        header: FITS header with WCS information
+
+    Returns:
+        tuple: (ra, dec) in degrees for image center
+    """
+    wcs = WCS(header)
+    naxis1 = header['NAXIS1']
+    naxis2 = header['NAXIS2']
+
+    # Get center pixel coordinates
+    center_x = naxis1 / 2
+    center_y = naxis2 / 2
+
+    # Convert to world coordinates
+    center_world = wcs.pixel_to_world(center_x, center_y)
+    return center_world.ra.deg, center_world.dec.deg
+
+def find_valid_images_cluster(fits_files):
+    """Find valid images using hierarchical clustering based on spatial proximity.
+
+    Automatically determines outliers by analyzing the distribution of image centers.
+    Images that are spatially isolated (no nearby neighbors) are rejected as outliers.
+
+    The threshold for "nearby" is determined from the typical image size and the
+    natural gaps in the distribution of nearest-neighbor distances.
+
+    Args:
+        fits_files: List of FITS file paths
+
+    Returns:
+        tuple: (valid_files, rejected_files) - lists of file paths
+    """
+    centers = []
+    scales = []
+    all_headers = []
+
+    # Collect centers and pixel scales
+    for fits_file in fits_files:
+        try:
+            with fits.open(fits_file) as hdul:
+                header = hdul[0].header
+                center = get_image_center(header)
+
+                # Get pixel scale (in degrees)
+                if 'CDELT1' in header:
+                    scale = abs(header['CDELT1'])
+                else:
+                    cd = np.array([[header.get('CD1_1', 0), header.get('CD1_2', 0)],
+                                 [header.get('CD2_1', 0), header.get('CD2_2', 0)]])
+                    scale = np.sqrt(np.abs(np.linalg.det(cd)))
+
+                # Get image size in degrees (diagonal)
+                naxis1 = header['NAXIS1']
+                naxis2 = header['NAXIS2']
+                size_deg = np.sqrt((naxis1 * scale)**2 + (naxis2 * scale)**2)
+
+                centers.append(center)
+                scales.append(size_deg)
+                all_headers.append((fits_file, header))
+        except Exception as e:
+            print(f"Warning: Could not process {fits_file}: {str(e)}")
+            continue
+
+    if not centers:
+        raise ValueError("No valid images found")
+
+    centers = np.array(centers)
+    scales = np.array(scales)
+
+    # Calculate all pairwise distances
+    n_images = len(centers)
+    distances = np.zeros((n_images, n_images))
+
+    for i in range(n_images):
+        for j in range(i+1, n_images):
+            # Use cos(dec) correction for RA distances
+            cos_dec = np.cos(np.radians(centers[i,1]))
+            dist = np.sqrt(
+                ((centers[i,0] - centers[j,0]) * cos_dec)**2 +
+                (centers[i,1] - centers[j,1])**2
+            )
+            distances[i,j] = dist
+            distances[j,i] = dist
+
+    # For each point, get its distances to other points
+    sorted_distances = np.sort(distances, axis=1)
+
+    # The first column (index 0) will be zeros (self-distances)
+    # Look at the distribution of nearest neighbor distances (index 1)
+    nearest_distances = sorted_distances[:,1]
+
+    # Get typical image size
+    typical_size = np.median(scales)
+
+    # Find natural break in nearest neighbor distances
+    sorted_nn = np.sort(nearest_distances)
+    gaps = sorted_nn[1:] - sorted_nn[:-1]
+
+    # Find significant gaps (larger than 1/10th typical image size)
+    significant_gaps = np.where(gaps > typical_size/10)[0]
+
+    if len(significant_gaps) > 0:
+        # Use the largest significant gap as the break point
+        threshold = sorted_nn[significant_gaps[0]]
+    else:
+        # If no significant gaps, use 2x typical image size
+        threshold = 2 * typical_size
+
+    # A point is valid if it has at least one neighbor closer than the threshold
+    valid_mask = nearest_distances < threshold
+
+    valid_files = []
+    rejected_files = []
+
+    # Separate valid and rejected files
+    for i, (fits_file, _) in enumerate(all_headers):
+        if valid_mask[i]:
+            valid_files.append(fits_file)
+        else:
+            rejected_files.append(fits_file)
+            print(f"Rejecting {fits_file} as outlier:")
+            print(f"  Distance to nearest neighbor: {nearest_distances[i]:.3f} deg")
+            print(f"  (Threshold: {threshold:.3f} deg)")
+
+    # Calculate center of valid points
+    valid_centers = centers[valid_mask]
+    ra_center = np.mean(valid_centers[:,0])
+    dec_center = np.mean(valid_centers[:,1])
+
+    # Print summary
+    print(f"\nSelection Summary:")
+    print(f"Total images: {len(centers)}")
+    print(f"Valid images: {len(valid_files)}")
+    print(f"Rejected images: {len(rejected_files)}")
+    print(f"Center position: RA={ra_center:.3f}, Dec={dec_center:.3f}")
+    print(f"Threshold distance: {threshold:.3f} deg")
+    print(f"Typical image size: {typical_size:.3f} deg")
+
+    return valid_files, rejected_files
+
+def write_montage_header(header, output_file='skel.hdr'):
+    """Write a FITS header to a Montage-compatible ASCII header file.
+
+    Args:
+        header: Dictionary of FITS header keywords and values
+        output_file: Output filename (default: skel.hdr)
+    """
+    with open(output_file, 'w') as f:
+        for key, value in header.items():
+            if isinstance(value, str):
+                f.write(f'{key:8s}= \'{value}\'\n')
+            elif isinstance(value, (int, float)):
+                f.write(f'{key:8s}= {value}\n')
+            else:
+                f.write(f'{key:8s}= {value}\n')
+    print(f"Written skeleton header to {output_file}")
+
+# ============================================================================
+# Weighting and Combination Functions (from combine2w)
+# ============================================================================
+
+def calculate_chartime(times, weights, t0, rate):
+    """Calculate characteristic time of the combined image.
+
+    For time-variable sources, computes the effective time that represents
+    the combined observation. Uses sophisticated integral calculation when
+    rate information is available, otherwise falls back to weighted average.
+
+    Args:
+        times: List of dicts with 'time', 'abs_time', 'exptime' keys
+        weights: List of image weights
+        t0: Reference time (JD) for power-law calculation
+        rate: Magnitude change rate (mags/day) for power-law
+
+    Returns:
+        float: Characteristic time in JD, or None if calculation fails
+    """
+    # If we have t0 and rate, try the sophisticated method first
+    if t0 is not None and rate is not None:
+        try:
+            A2 = rate  # Magnitude change rate
+            total_up = 0
+            total_down = 0
+
+            for time, weight in zip(times, weights):
+                exp = time['exptime']  # in days
+                t = time['time']  # in days since T0
+
+                # Skip invalid times
+                if t <= 0:
+                    continue
+
+                # Calculate components for characteristic time
+                up = (np.power(t + exp/2, -A2 + 2) - np.power(t - exp/2, -A2 + 2)) * \
+                     np.power(np.power(t + exp/2, -A2 + 1) - np.power(t - exp/2, -A2 + 1), 2) * weight
+
+                down = np.power(np.power(t + exp/2, -A2 + 1) - np.power(t - exp/2, -A2 + 1), 3) * weight
+
+                total_up += up
+                total_down += down
+
+            if total_down != 0:
+                chartime = (-A2 + 1)/(-A2 + 2) * total_up / total_down
+                return chartime + t0
+        except Exception as e:
+            print(f"Warning: Complex characteristic time calculation failed: {str(e)}")
+
+    # Fallback to simple weighted average of mid-exposure times
+    try:
+        total_weight = 0
+        weighted_time = 0
+
+        for time, weight in zip(times, weights):
+            abs_time = time['abs_time']  # Actual JD
+            weighted_time += abs_time * weight
+            total_weight += weight
+
+        if total_weight > 0:
+            print(f"Simple chartime = {weighted_time / total_weight}")
+            return weighted_time / total_weight
+    except Exception as e:
+        print(f"Warning: Simple characteristic time calculation failed: {str(e)}")
+
+    return None
+
+def update_output_header(output_file, inputs, weights, args):
+    """Update output FITS file header with combined metadata.
+
+    Propagates relevant keywords from input files, calculates proper exposure time,
+    characteristic time, and effective GAIN/RNOISE for the combination.
+
+    Args:
+        output_file: Path to output FITS file (will be modified in place)
+        inputs: List of input file paths
+        weights: Dictionary mapping file paths to weights
+        args: Parsed command-line arguments
+    """
+    times = []
+    exposure_times = []
+
+    # Collect metadata from input files
+    keyword_values = {key: [] for key in COPY_KEYWORDS}
+
+    for f in inputs:
+        if weights[f] <= 0:
+            continue
+
+        with fits.open(f) as hdul:
+            header = hdul[0].header
+
+            # Collect times for CHARTIME and EXPTIME calculation
+            if 'EXPTIME' in header and weights[f] > 0:
+                exptime_sec = float(header['EXPTIME'])
+                exptime_days = exptime_sec / 86400.0
+
+                # Get start time (shutter open) - using CTIME/USEC directly
+                try:
+                    usec = float(header.get('USEC', 0))
+                    sec = float(header.get('CTIME', 0))
+                    exp = float(header.get('EXPTIME', 0))
+                    sec = sec + usec/1e6
+                    exp = exp / 86400.0
+
+                    start_time_jd = 2440587.5 + sec/86400.0  # Start of exposure in JD
+                    end_time_jd = start_time_jd + exptime_days
+
+                    exposure_times.append({
+                        'start': start_time_jd,
+                        'end': end_time_jd,
+                        'exptime_sec': exptime_sec
+                    })
+
+                    # Mid-exposure time for CHARTIME calculation
+                    mid_time = start_time_jd + exptime_days/2.0
+                    if args.t0:
+                        time_since_t0 = mid_time - args.t0
+                        times.append({
+                            'time': time_since_t0,
+                            'abs_time': mid_time,
+                            'exptime': exptime_days,
+                        })
+                    else:
+                        times.append({
+                            'abs_time': mid_time,
+                            'exptime': exptime_days,
+                        })
+                except (KeyError, ValueError) as e:
+                    print(f"Warning: Error processing times for {f}: {e}")
+                    continue
+
+            # Collect values for keywords to copy
+            for key in COPY_KEYWORDS:
+                if key in header:
+                    keyword_values[key].append(header[key])
+
+    # Update output file header
+    with fits.open(output_file, mode='update') as hdul:
+        header = hdul[0].header
+
+        # Calculate proper EXPTIME as last-shutter-close - first-shutter-open
+        if exposure_times:
+            first_shutter_open = min(exp['start'] for exp in exposure_times)
+            last_shutter_close = max(exp['end'] for exp in exposure_times)
+            total_exptime_sec = (last_shutter_close - first_shutter_open) * 86400.0
+            header['EXPTIME'] = total_exptime_sec
+            header['EXPSTART'] = (first_shutter_open, 'First shutter open time (JD)')
+            header['EXPEND'] = (last_shutter_close, 'Last shutter close time (JD)')
+        else:
+            # Fallback to summing individual exposure times
+            total_exptime_sec = sum(exp['exptime_sec'] for exp in exposure_times)
+            header['EXPTIME'] = total_exptime_sec
+
+        # Calculate and add CHARTIME if applicable
+        if times:
+            chartime = calculate_chartime(times, [weights[f] for f in inputs if weights[f] > 0],
+                                       args.t0, args.rate)
+            if chartime is not None:
+                header['CHARTIME'] = (chartime, 'Characteristic time of combined image')
+        else:
+            print("no times -> no chartime")
+
+        # Calculate effective GAIN and RNOISE for combined image
+        gain_values = []
+        rnoise_values = []
+        weight_sum = 0
+
+        for f in inputs:
+            if weights[f] <= 0:
+                continue
+
+            with fits.open(f) as hdul:
+                hdr = hdul[0].header
+                gain = float(hdr.get('GAIN', args.gain))
+                if 'RNOISE' in hdr:
+                    rnoise = float(hdr['RNOISE'])
+                elif 'READNOIS' in hdr:
+                    rnoise = float(hdr['READNOIS'])
+                else:
+                    rnoise = np.sqrt(gain * 3.0)  # rough estimate
+
+                weight = weights[f]
+                gain_values.append(gain * weight)
+                rnoise_values.append((rnoise / gain)**2 * weight)
+                weight_sum += weight
+
+        if weight_sum > 0:
+            effective_gain = sum(gain_values) / weight_sum
+            effective_rnoise = np.sqrt(sum(rnoise_values) / weight_sum) * effective_gain
+
+            header['GAIN'] = (effective_gain, 'Effective gain of combined image')
+            header['RNOISE'] = (effective_rnoise, 'Effective read noise of combined image')
+
+        # Copy most common value for each keyword
+        from collections import Counter
+        for key in COPY_KEYWORDS:
+            values = keyword_values[key]
+            if values:
+                if key in ['COMMENT', 'HISTORY']:
+                    for value in set(values):
+                        header[key] = value
+                elif key in ['GAIN', 'RNOISE']:
+                    continue  # Already calculated above
+                else:
+                    most_common = Counter(values).most_common(1)[0][0]
+                    header[key] = most_common
+
+        # Update combination metadata
+        header['NCOMBINE'] = (len([w for w in weights.values() if w > 0]),
+                            'Number of images combined')
+        if args.t0 is not None:
+            header['T0'] = (args.t0, 'Reference time for magnitude calculation')
+        if args.rate is not None:
+            header['MAGRATE'] = (args.rate, 'Magnitude change rate (mag/day)')
+        header['MAG0'] = (args.brightness, 'Reference magnitude')
+
+        # Add processing information
+        header['COMBINER'] = ('combine-images', 'Tool used for combining')
+        header['DATE'] = (datetime.datetime.utcnow().isoformat(),
+                        'UTC date when file was combined')
+
+        hdul.flush()
+
+def calculate_background_stats(data):
+    """Calculate background sigma using row differences method.
+
+    Computes background noise robustly by looking at row-to-row differences,
+    which is insensitive to large-scale gradients and objects.
+
+    Args:
+        data: 2D numpy array of image data
+
+    Returns:
+        tuple: (sigma, median) - background standard deviation and median
+    """
+    if data is None or len(data) < 2:
+        raise ValueError("Invalid data array for background calculation")
+
+    ndiff = np.zeros(len(data), dtype=np.float64)
+    i, j = 0, 0
+
+    while i < len(data) - 1:
+        diff = abs(data[i].astype(np.float32) - data[i+1].astype(np.float32))
+        median = np.nanmedian(diff)
+        if not np.isnan(median):
+            ndiff[j] = median
+            j += 1
+        i += 1
+
+    if j == 0:
+        raise ValueError("No valid background measurements")
+
+    scale_factor = 1.0489  # Conversion from median difference to standard deviation
+    sigma = np.nanmedian(ndiff[:j])
+    median = np.nanmedian(data[~np.isnan(data)])
+
+    return scale_factor * sigma, median
+
+def get_image_time(header):
+    """Get image mid-exposure time in JD from FITS header.
+
+    Args:
+        header: FITS header with CTIME, USEC, EXPTIME keywords
+
+    Returns:
+        float: Mid-exposure time in Julian Date
+    """
+    usec = float(header.get('USEC', 0))
+    sec = float(header.get('CTIME',0)) + usec/1e6
+    exp = float(header.get('EXPTIME')) / 86400.0  # Convert to days
+    return 2440587.5 + sec/86400.0 + exp/2.0  # Mid-exposure time in JD
+
+def calculate_brightness(time, t0, mag0, rate):
+    """Calculate expected source brightness at given time.
+
+    For time-variable sources, applies power-law decay model.
+    For static sources, returns constant brightness.
+
+    Args:
+        time: Observation time (JD)
+        t0: Reference time (JD)
+        mag0: Reference magnitude (at 1 day after t0)
+        rate: Decay rate (mags per decade in time)
+
+    Returns:
+        float: Expected magnitude at the given time
+    """
+    if t0 is not None and rate is not None:
+        dt = (time - t0) * 86400.0  # Convert to seconds
+        if dt <= 0:
+            raise ValueError(f"Invalid time difference: {dt/86400.0:.2f} days before t0")
+        # mag0 is magnitude at 1 day after t0
+        return mag0 + rate * 2.5 * np.log10(dt/86400.0)
+    else:
+        return mag0
+
+def compute_weights(files, gain, t0, mag0, rate, uniform=False):
+    """Compute optimal weights for image combination.
+
+    In weighted mode (default), uses photometric calibration (MAGZERO) and
+    background noise to calculate the optimal weight for each image based on S/N.
+    Files without MAGZERO are skipped.
+
+    In uniform mode, assigns equal weight to all images (no MAGZERO required).
+
+    Args:
+        files: List of FITS file paths
+        gain: CCD gain (e-/ADU)
+        t0: Reference time for variable sources (JD)
+        mag0: Reference magnitude
+        rate: Brightness change rate (mags/day)
+        uniform: If True, use uniform weighting (default: False)
+
+    Returns:
+        tuple: (weights_dict, skipped_files_list)
+            weights_dict: Mapping from file path to weight value
+            skipped_files_list: List of files skipped due to missing MAGZERO
+    """
+    weights = {}
+    skipped = []
+
+    if uniform:
+        # Uniform weighting mode: assign weight 1.0 to all files
+        print("Using uniform weighting (all images weighted equally)")
+        for f in files:
+            weights[f] = 1.0
+            # Update FITS header with weight
+            result = subprocess.run(
+                ["fitsheader", "-w", f"WGHT=1.0", f],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                print(f"Warning: Failed to update weight in {f}: {result.stderr}")
+
+        n_images = len(files)
+        normalized_weights = {f: float(n_images) for f in files}
+        print(f"Normalized {n_images} images with uniform weight")
+        return normalized_weights, skipped
+
+    # Weighted mode: calculate S/N-based weights
+    total_counts = 0
+
+    # First pass - calculate total counts, skip files without MAGZERO
+    for f in files:
+        with fits.open(f) as hdul:
+            header = hdul[0].header
+            if 'MAGZERO' not in header:
+                print(f"Warning: Skipping {f} - MAGZERO keyword missing")
+                skipped.append(f)
+                continue
+
+            time = get_image_time(header)
+            mag = calculate_brightness(time, t0, mag0, rate)
+            counts = gain * np.power(10, -0.4 * (mag - header['MAGZERO']))
+
+            if counts <= 0:
+                print(f"Warning: Skipping {f} - invalid counts: {counts}")
+                skipped.append(f)
+                continue
+
+            total_counts += counts
+
+    if total_counts <= 0:
+        raise ValueError("No valid images with MAGZERO for weight calculation")
+
+    # Second pass - calculate weights
+    for f in files:
+        if f in skipped:
+            weights[f] = 0.0
+            continue
+
+        try:
+            with fits.open(f) as hdul:
+                header = hdul[0].header
+                data = hdul[0].data
+
+                if data is None or len(data.shape) != 2:
+                    raise ValueError(f"Invalid data array in {f}")
+
+                time = get_image_time(header)
+                mag = calculate_brightness(time, t0, mag0, rate)
+                counts = gain * np.power(10, -0.4 * (mag - header['MAGZERO']))
+
+                # Calculate background stats
+                sigma, _ = calculate_background_stats(data)
+
+                # Calculate weight using signal-to-noise optimization
+                # Weight each image by its contribution to final S/N
+                denominator = counts + gain*gain*sigma*sigma*2*2*3.1415
+                if denominator <= 0:
+                    raise ValueError(f"Invalid weight calculation in {f}")
+
+                weight = np.power(counts/total_counts, 2) / denominator
+                weights[f] = weight
+                print(f"Weight for {f}: {weight:.6e}")
+
+                # Update FITS header with weight
+                result = subprocess.run(
+                    ["fitsheader", "-w", f"WGHT={weight:.6g}", f],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"Failed to update weight in {f}: {result.stderr}")
+
+        except Exception as e:
+            print(f"Warning: Error processing {f}: {str(e)}")
+            weights[f] = 0.0
+            if f not in skipped:
+                skipped.append(f)
+
+    if all(w == 0 for w in weights.values()):
+        raise ValueError("No valid weights calculated")
+
+    total_weights = sum(weights.values())
+    print(f"Sum of all weights: {total_weights:.6e}")
+    print(f"Number of images with weight > 0: {sum(1 for w in weights.values() if w > 0)}")
+
+    # Normalize and scale weights: sum = N (compensates for mAdd's automatic averaging)
+    if total_weights > 0:
+        n_images = sum(1 for w in weights.values() if w > 0)
+        normalized_weights = {f: w * n_images / total_weights for f, w in weights.items()}
+        print(f"Normalized weights to sum={n_images} (compensates for mAdd averaging)")
+        return normalized_weights, skipped
+    else:
+        return weights, skipped
+
+def process_single_image(input_data):
+    """Process a single image and its weight map if present.
+
+    Applies scalar weight, reprojects to target WCS using mProjectPP or mProjectPX,
+    and handles associated weight maps for vignetting correction.
+
+    Args:
+        input_data: Tuple of (input_file, scalar_weight, weighted_dir, proj_dir,
+                    skel_hdr, drizzle, weights_dir, projw_dir)
+
+    Returns:
+        dict: {'image': projected_file, 'weight_map': projected_weight_map or None}
+    """
+    input_file, scalar_weight, weighted_dir, proj_dir, skel_hdr, drizzle, weights_dir, projw_dir = input_data
+
+    base_name = Path(input_file).stem
+    output_weighted = weighted_dir / f"{base_name}_weighted.fits"
+    output_proj = proj_dir / f"{base_name}_proj.fits"
+
+    weight_map_file = None
+    weight_map_weighted = None
+    weight_map_proj = None
+
+    with fits.open(input_file) as hdul:
+        # Check for weight map
+        has_weight_map = 'WGHTFILE' in hdul[0].header
+        if has_weight_map:
+            print(f"File {hdul[0].header['WGHTFILE']} is a weight map for {input_file}")
+            weight_map_file = hdul[0].header['WGHTFILE']
+            if not os.path.exists(weight_map_file):
+                print(f"Warning: Weight file {weight_map_file} not found")
+                has_weight_map = False
+
+        # Always use mProjectPX - it's a smart wrapper that:
+        # - Calls mProjectPP directly for natively supported projections
+        # - Converts to TAN+SIP for complex projections (ZPN, or old-style distortions)
+        # This handles the case where CTYPE says TAN but WCS interprets as PLA
+        # due to old-style distortion coefficients
+        proj_tool = "mProjectPX"
+        print(f"Using {proj_tool}")
+
+        # Process weight map if present
+        if has_weight_map:
+            try:
+                weight_map_weighted = weights_dir / f"{base_name}_wmap_weighted.fits"
+                weight_map_proj = projw_dir / f"{base_name}_wmap_proj.fits"
+
+                # Copy and scale weight map
+                with fits.open(weight_map_file) as whdul:
+                    weighted_wmap = whdul[0].data / np.max(whdul[0].data)
+                    new_whdu = fits.PrimaryHDU(weighted_wmap, header=whdul[0].header)
+                    new_whdul = fits.HDUList([new_whdu])
+                    new_whdul.writeto(weight_map_weighted)
+
+                    weighted_data = hdul[0].data * scalar_weight * weighted_wmap
+            except:
+                print("weightmap preparation failed, resetting to no weightmap")
+                has_weight_map = False
+
+        if not has_weight_map:
+            weighted_data = hdul[0].data * scalar_weight
+
+        # Write weighted image
+        new_hdu = fits.PrimaryHDU(weighted_data, header=hdul[0].header)
+        new_hdul = fits.HDUList([new_hdu])
+        new_hdul.writeto(output_weighted)
+
+        # Project the image
+        print(proj_tool, output_weighted)
+        result = subprocess.run([
+            proj_tool,
+            "-z", str(drizzle),
+            str(output_weighted),
+            str(output_proj),
+            str(skel_hdr)
+        ])
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to project image: {result.stderr}")
+
+        # Project weight map if present
+        if has_weight_map:
+            print(proj_tool, weight_map_weighted)
+            result = subprocess.run([
+                proj_tool,
+                "-z", str(drizzle),
+                str(weight_map_weighted),
+                str(weight_map_proj),
+                str(skel_hdr)
+            ])
+
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to project weight map: {result.stderr}")
+
+    return {
+        'image': str(output_proj),
+        'weight_map': str(weight_map_proj) if has_weight_map else None
+    }
+
+def combine_images_montage(output, inputs, weights, skeleton_file, args):
+    """Combine images using Montage's mProjectPP/mProjectPX and mAdd.
+
+    Handles parallel projection, weight map processing, and final combination.
+
+    Args:
+        output: Output FITS file path
+        inputs: List of input FITS file paths
+        weights: Dictionary mapping file paths to weights
+        skeleton_file: Path to skeleton header file
+        args: Parsed command-line arguments
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+
+        # Copy skeleton header to temp directory
+        subprocess.run(
+            ["cp", skeleton_file, str(tmpdir / "skel.hdr")],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+
+        # Create directories
+        weighted_dir = tmpdir / "weighted"
+        proj_dir = tmpdir / "projected"
+        projw_dir = tmpdir / "projw"
+        weights_dir = tmpdir / "weights"
+        weights_dir.mkdir()
+        weighted_dir.mkdir()
+        proj_dir.mkdir()
+        projw_dir.mkdir()
+
+        # Prepare input data for parallel processing
+        process_inputs = [
+            (
+                f,
+                weights[f],
+                weighted_dir,
+                proj_dir,
+                tmpdir / "skel.hdr",
+                args.drizzle,
+                weights_dir,
+                projw_dir
+            )
+            for f in inputs
+            if weights[f] > 0
+        ]
+
+        # Process images and weight maps in parallel
+        max_workers = min(mp.cpu_count(), len(process_inputs))
+        print(f"Processing images using {max_workers} processes...")
+
+        processed_files = []
+        with mp.Pool(processes=max_workers) as pool:
+            results = pool.map(process_single_image, process_inputs)
+            processed_files = [r for r in results if r is not None]
+
+        if not processed_files:
+            raise RuntimeError("No valid processed images produced")
+
+        # Separate image and weight map files
+        image_files = [p['image'] for p in processed_files]
+        weight_map_files = [p['weight_map'] for p in processed_files if p['weight_map'] is not None]
+
+        # Create image table for main images
+        img_tbl = tmpdir / "images.tbl"
+        result = subprocess.run(
+            ["mImgtbl", str(proj_dir), str(img_tbl)],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to create image table: {result.stderr}")
+
+        # Combine main images
+        print("Combining projected images...")
+        result = subprocess.run([
+            "mAdd",
+            "-p", str(proj_dir),
+            str(img_tbl),
+            str(tmpdir / "skel.hdr"),
+            output
+        ], capture_output=True, text=True)
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to combine images: {result.stderr}")
+
+        print("Images combined with normalized weights")
+        try:
+            with fits.open(output) as hdul:
+                max_value = np.max(hdul[0].data)
+                print(f"Final combined image max pixel value: {max_value:.1f}")
+        except Exception as e:
+            print(f"Warning: Could not read final image stats: {str(e)}")
+
+        # If we have weight maps, combine them and apply to final image
+        if weight_map_files:
+            print("Processing weight maps...")
+            weight_output = str(tmpdir / "combined_weight.fits")
+
+            # Create table for weight maps
+            wmap_tbl = tmpdir / "wmaps.tbl"
+            result = subprocess.run(
+                ["mImgtbl", str(projw_dir), str(wmap_tbl)],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to create weight map table: {result.stderr}")
+
+            # Combine weight maps
+            result = subprocess.run([
+                "mAdd",
+                "-p", str(projw_dir),
+                str(wmap_tbl),
+                str(tmpdir / "skel.hdr"),
+                weight_output
+            ], capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to combine weight maps: {result.stderr}")
+
+            # Apply combined weight map to final image
+            print("Applying combined weight map...")
+            try:
+                with fits.open(output) as hdul, fits.open(weight_output) as whdul:
+                    hdul[0].data /= whdul[0].data
+                    hdul.writeto(output, overwrite=True)
+            except Exception as e:
+                raise RuntimeError(f"Failed to apply combined weight map: {str(e)}")
+
+    update_output_header(output, inputs, weights, args)
+
+# ============================================================================
+# Argument Parsing and Main
+# ============================================================================
+
+def parse_arguments():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Combine FITS images with intelligent weighting and outlier rejection',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Automatic mode - select images, calculate optimal frame, combine
+  %(prog)s input*.fits
+
+  # Specify output file
+  %(prog)s -o output.fits input*.fits
+
+  # Uniform weighting (no photometric calibration required)
+  %(prog)s -u input*.fits
+
+  # Calculate optimal WCS skeleton only (no combining)
+  %(prog)s --skeleton-only skel.hdr input*.fits
+
+  # Manual mode - use provided skeleton, no outlier rejection
+  %(prog)s --skeleton custom.hdr --no-selection input*.fits
+
+  # GRB mode with time-variable source
+  %(prog)s --grb 2459000.5,17.0,-1.2 grb*.fits
+
+  # Custom frame calculation parameters
+  %(prog)s --sampling-factor 16 --scale-factor 2.0 *.fits
+        """
+    )
+
+    # Positional arguments
+    parser.add_argument("inputs", nargs="+", help="Input FITS files to combine")
+
+    # Output control
+    parser.add_argument("-o", "--output", default="combined.fits",
+                       help="Output FITS file (default: combined.fits)")
+    parser.add_argument("--skeleton-only", metavar="FILE",
+                       help="Calculate optimal WCS, write skeleton to FILE, and exit (no combining)")
+
+    # Selection control
+    parser.add_argument("--no-selection", action="store_true",
+                       help="Skip outlier rejection, use all input files")
+
+    # Frame calculation control
+    parser.add_argument("--skeleton", "--skel", metavar="FILE",
+                       help="Use provided skeleton header (skip frame calculation)")
+    parser.add_argument("--sampling-factor", type=int, default=8,
+                       help="Sampling factor for WCS calculations (default: 8)")
+    parser.add_argument("--scale-factor", type=float, default=1.5,
+                       help="Factor to scale field size (default: 1.5)")
+    parser.add_argument("--zoom-factor", type=float, default=1.0,
+                       help="Additional zoom factor for output (default: 1.0)")
+
+    # Weighting and photometry
+    parser.add_argument("-u", "--uniform", action="store_true",
+                       help="Use uniform weighting (equal weight for all images)")
+    parser.add_argument("-g", "--gain", type=float, default=2.3,
+                       help="CCD gain in e-/ADU (default: 2.3)")
+    parser.add_argument("-b", "--brightness", type=float, default=17.0,
+                       help="Reference source brightness in magnitudes (default: 17.0)")
+    parser.add_argument("--grb", metavar="T0,MAG,DECAY",
+                       help="GRB parameters: T0 (JD), magnitude at 1d, decay rate (mags/decade)")
+
+    # Processing options
+    parser.add_argument("-z", "--drizzle", type=float, default=1.0,
+                       help="Drizzle scale factor, range (0, 2] (default: 1.0)")
+    parser.add_argument("--num-processes", type=int, default=None,
+                       help="Number of parallel processes (default: auto)")
+
+    args = parser.parse_args()
+
+    # Parse GRB parameters if provided
+    if args.grb:
+        try:
+            parts = args.grb.split(',')
+            if len(parts) != 3:
+                parser.error("GRB parameters must be exactly 3 values: T0,mag,decay")
+            args.t0, args.brightness, args.rate = map(float, parts)
+        except ValueError as e:
+            parser.error(f"Error parsing GRB parameters: {e}")
+    else:
+        args.t0 = None
+        args.rate = None
+
+    # Validation
+    if args.t0 is not None and args.rate is None:
+        parser.error("GRB decay rate required when T0 is specified")
+    if args.rate is not None and args.t0 is None:
+        parser.error("GRB T0 required when decay rate is specified")
+
+    if args.drizzle <= 0 or args.drizzle > 2:
+        parser.error("Drizzle factor must be between 0 and 2")
+
+    if args.gain <= 0:
+        parser.error("Gain must be positive")
+
+    return args
+
+def main():
+    """Main execution function."""
+    args = parse_arguments()
+
+    print("=" * 70)
+    print("combine-images: Intelligent FITS Image Combination")
+    print("=" * 70)
+
+    # Stage 1: Image Selection
+    if args.no_selection:
+        print("\nStage 1: Image Selection - SKIPPED (using all input files)")
+        valid_inputs = args.inputs
+    else:
+        print("\nStage 1: Image Selection - Performing spatial clustering")
+        valid_inputs, rejected = find_valid_images_cluster(args.inputs)
+        if rejected:
+            print(f"Rejected {len(rejected)} outlier(s)")
+
+    if not valid_inputs:
+        raise ValueError("No valid input files remaining after selection")
+
+    print(f"Selected {len(valid_inputs)} images for combination")
+
+    # Stage 2: WCS Frame Calculation
+    if args.skeleton_only:
+        # Skeleton-only mode: calculate frame and exit
+        print(f"\nStage 2: WCS Frame - Calculating optimal frame (skeleton-only mode)")
+        optimal_header = find_optimal_frame(
+            valid_inputs,
+            sampling_factor=args.sampling_factor,
+            scale_factor=args.scale_factor,
+            zoom_factor=args.zoom_factor,
+            num_processes=args.num_processes
+        )
+        write_montage_header(optimal_header, args.skeleton_only)
+        print("\n" + "=" * 70)
+        print(f"Skeleton header written to {args.skeleton_only}")
+        print("=" * 70)
+        return
+    elif args.skeleton:
+        print(f"\nStage 2: WCS Frame - SKIPPED (using provided skeleton: {args.skeleton})")
+        skeleton_file = args.skeleton
+        if not os.path.exists(skeleton_file):
+            raise FileNotFoundError(f"Skeleton file not found: {skeleton_file}")
+    else:
+        print("\nStage 2: WCS Frame - Calculating optimal frame")
+        optimal_header = find_optimal_frame(
+            valid_inputs,
+            sampling_factor=args.sampling_factor,
+            scale_factor=args.scale_factor,
+            zoom_factor=args.zoom_factor,
+            num_processes=args.num_processes
+        )
+        skeleton_file = 'skel.hdr'
+        write_montage_header(optimal_header, skeleton_file)
+
+    # Stage 3: Weight Calculation
+    if args.uniform:
+        print("\nStage 3: Weight Calculation - Using uniform weights")
+    else:
+        print("\nStage 3: Weight Calculation - Computing optimal weights")
+        if args.t0 is not None:
+            print(f"GRB mode: T0={args.t0}, mag@1d={args.brightness}, decay={args.rate} mag/decade")
+
+    weights, skipped = compute_weights(
+        valid_inputs,
+        args.gain,
+        args.t0,
+        args.brightness,
+        args.rate,
+        uniform=args.uniform
+    )
+
+    # Report skipped files
+    if skipped:
+        print(f"\nWarning: {len(skipped)} file(s) excluded from combination (missing MAGZERO):")
+        for f in skipped:
+            print(f"  - {f}")
+        print("\nNote: To include all files with uniform weighting, use the --uniform (-u) option")
+
+        # Check if ALL files were skipped
+        valid_count = sum(1 for w in weights.values() if w > 0)
+        if valid_count == 0:
+            raise ValueError(
+                "All files were excluded due to missing MAGZERO.\n"
+                "Use --uniform (-u) to combine with equal weighting instead."
+            )
+
+    # Stage 4: Image Combination
+    print("\nStage 4: Image Combination - Reprojecting and combining")
+    if os.path.exists(args.output):
+        raise ValueError(f"Output file {args.output} already exists")
+
+    combine_images_montage(args.output, valid_inputs, weights, skeleton_file, args)
+
+    # Final summary
+    valid_count = sum(1 for w in weights.values() if w > 0)
+    print("\n" + "=" * 70)
+    print(f"Successfully combined {valid_count} images into {args.output}")
+    print("=" * 70)
+
+if __name__ == "__main__":
+    main()
