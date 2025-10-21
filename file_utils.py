@@ -1,9 +1,42 @@
 import os
+import shutil
 import astropy.io.fits
 import astropy.wcs
 import logging
 from contextlib import suppress
 from astropy.table import Table
+
+# Cache the result so we don't check every time
+_sextractor_binary = None
+
+def get_sextractor_binary():
+    """Find which SExtractor binary is available on the system.
+
+    Checks for different names that SExtractor has had over time:
+    - sex (original name)
+    - sextractor (first rename)
+    - source-extractor (current name)
+
+    Returns:
+        str: The name of the available binary, or None if not found
+    """
+    global _sextractor_binary
+
+    # Return cached result if we've already checked
+    if _sextractor_binary is not None:
+        return _sextractor_binary
+
+    # Try each possible name in order of likelihood
+    candidates = ['sex', 'sextractor', 'source-extractor']
+
+    for binary in candidates:
+        if shutil.which(binary) is not None:
+            logging.info(f"Found SExtractor binary: {binary}")
+            _sextractor_binary = binary
+            return binary
+
+    logging.error("No SExtractor binary found (tried: sex, sextractor, source-extractor)")
+    return None
 
 def try_img(arg, verbose=False):
     """Try to open arg as a fits file, exit cleanly if it does not happen"""
