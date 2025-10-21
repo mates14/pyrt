@@ -608,15 +608,22 @@ def update_output_header(output_file, inputs, weights, args):
             header = hdul[0].header
 
             # Collect times for CHARTIME and EXPTIME calculation
-            if 'EXPTIME' in header and weights[f] > 0:
-                exptime_sec = float(header['EXPTIME'])
+            # Try EXPTIME first, fall back to EXPOSURE
+            exptime_key = None
+            if 'EXPTIME' in header:
+                exptime_key = 'EXPTIME'
+            elif 'EXPOSURE' in header:
+                exptime_key = 'EXPOSURE'
+
+            if exptime_key and weights[f] > 0:
+                exptime_sec = float(header[exptime_key])
                 exptime_days = exptime_sec / 86400.0
 
                 # Get start time (shutter open) - using CTIME/USEC directly
                 try:
                     usec = float(header.get('USEC', 0))
                     sec = float(header.get('CTIME', 0))
-                    exp = float(header.get('EXPTIME', 0))
+                    exp = float(header.get(exptime_key, 0))
                     sec = sec + usec/1e6
                     exp = exp / 86400.0
 
@@ -778,14 +785,23 @@ def get_image_time(header):
     """Get image mid-exposure time in JD from FITS header.
 
     Args:
-        header: FITS header with CTIME, USEC, EXPTIME keywords
+        header: FITS header with CTIME, USEC, and EXPTIME (or EXPOSURE) keywords
 
     Returns:
         float: Mid-exposure time in Julian Date
     """
     usec = float(header.get('USEC', 0))
     sec = float(header.get('CTIME',0)) + usec/1e6
-    exp = float(header.get('EXPTIME')) / 86400.0  # Convert to days
+
+    # Try EXPTIME first, fall back to EXPOSURE (both in seconds)
+    if 'EXPTIME' in header:
+        exp_sec = float(header['EXPTIME'])
+    elif 'EXPOSURE' in header:
+        exp_sec = float(header['EXPOSURE'])
+    else:
+        raise ValueError("Neither EXPTIME nor EXPOSURE keyword found in header")
+
+    exp = exp_sec / 86400.0  # Convert to days
     return 2440587.5 + sec/86400.0 + exp/2.0  # Mid-exposure time in JD
 
 def calculate_brightness(time, t0, mag0, rate):
