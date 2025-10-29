@@ -138,14 +138,9 @@ def run_iraf(cmdfile: str) -> bool:
         print(f"Error output: {e.stderr}")
         return False
 
-def call_iraf(file, det, aperture=None):
+def call_iraf(file, det, fwhm, aperture=None):
     """call iraf/digiphot/daophot/phot on a file"""
     base = os.path.splitext(file)[0]
-
-    fwhm = get_fwhm_from_detections(det)
-    if np.isnan(fwhm):
-        fwhm = np.nanmedian(det['FWHM_IMAGE'])
-    print(f'FWHM={fwhm}')
 
     # Create coordinate file with sorted coordinates
     coords = [(num, x, y) for num, x, y in zip(det['NUMBER'], det['X_IMAGE'], det['Y_IMAGE'])]
@@ -191,35 +186,50 @@ logout
                                converters={'ID': [astropy.io.ascii.convert_numpy(np.int32)]})
     #mag['MAG'] = mag['MAG'] - mag.meta['ZMAG']
     os.system(f'rm {base}.mag.1')
-    return mag, fwhm,ape
+    return mag, ape
 
 def get_fwhm_from_detections(det, min_good_detections=30):
     """
-    Calculate FWHM from detections using a two-tier approach:
+    Calculate FWHM from detections using a multi-tier fallback approach:
     1. Try detections with good magnitude errors
     2. If insufficient, fall back to brightest objects
+    3. If that fails, use all detections
+    4. Return NaN if everything fails
 
     Parameters:
     det: astropy.table.Table - Detection table from sextractor
     min_good_detections: int - Minimum number of detections needed before falling back
 
     Returns:
-    float - Median FWHM value
+    float - Median FWHM value (using nanmedian), or NaN if no valid data
     """
 
     sel = np.all( [ det['X_IMAGE'] < det.meta['IMAGEW']-32, det['Y_IMAGE'] < det.meta['IMAGEH']-32, det['X_IMAGE'] > 32, det['Y_IMAGE'] > 32 ], axis=0)
     det2 = det [ sel ]
+
     # First try: all detections with good magnitude errors
     good_detections = det2[det2['MAGERR_AUTO'] < 1.091/10]
 
     if len(good_detections) >= min_good_detections:
-        return np.median(good_detections['FWHM_IMAGE'])
+        fwhm = np.nanmedian(good_detections['FWHM_IMAGE'])
+        if not np.isnan(fwhm):
+            return fwhm
 
     # Second try: use 30 brightest objects
     # Sort by magnitude (lower is brighter)
-    bright_detections = det2[np.argsort(det2['MAG_AUTO'])[:30]]
+    if len(det2) >= 30:
+        bright_detections = det2[np.argsort(det2['MAG_AUTO'])[:30]]
+        fwhm = np.nanmedian(bright_detections['FWHM_IMAGE'])
+        if not np.isnan(fwhm):
+            return fwhm
 
-    return np.median(bright_detections['FWHM_IMAGE'])
+    # Third try: use all detections with nanmedian
+    fwhm = np.nanmedian(det['FWHM_IMAGE'])
+    if not np.isnan(fwhm):
+        return fwhm
+
+    # Everything failed
+    return np.nan
 
 def process_photometry(file: str,
                       noiraf: bool = False,
@@ -278,12 +288,22 @@ def process_photometry(file: str,
                 # Add target row to the end of detections
                 det = astropy.table.vstack([det, target_row])
 
+    # Compute FWHM before any photometry operations
+    fwhm = get_fwhm_from_detections(det)
+    if np.isnan(fwhm):
+        print("Warning: Could not determine FWHM from detections, using default")
+        fwhm = 2.0  # fallback to initial guess
+    print(f'FWHM={fwhm}')
+
+    det.meta['FWHM'] = fwhm
+
     if noiraf:
+        # Compute aperture for metadata (same formula used in IRAF path)
+        ape = aperture or np.sqrt(fwhm*fwhm+1.5*1.5)
+        det.meta['APERTURE'] = ape
         tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
     else:
-        mag, fwhm, ape = call_iraf(file, det, aperture=aperture)
-
-        det.meta['FWHM'] = fwhm
+        mag, ape = call_iraf(file, det, fwhm, aperture=aperture)
         det.meta['APERTURE'] = ape
 
         # Verify alignment before joining
