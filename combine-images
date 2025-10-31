@@ -724,7 +724,7 @@ def update_output_header(output_file, inputs, weights, args):
                 if key in ['COMMENT', 'HISTORY']:
                     for value in set(values):
                         header[key] = value
-                elif key in ['GAIN', 'RNOISE']:
+                elif key in ['GAIN', 'RNOISE', 'EXPTIME', 'EXPOSURE']:
                     continue  # Already calculated above
                 else:
                     most_common = Counter(values).most_common(1)[0][0]
@@ -1233,8 +1233,8 @@ Examples:
     # Output control
     parser.add_argument("-o", "--output", default="combined.fits",
                        help="Output FITS file (default: combined.fits)")
-    parser.add_argument("--skeleton-only", metavar="FILE",
-                       help="Calculate optimal WCS, write skeleton to FILE, and exit (no combining)")
+    parser.add_argument("--skeleton-only", metavar="FILE", nargs='?', const='skeleton.hdr',
+                       help="Calculate optimal WCS, write skeleton to FILE, and exit (no combining). Default: skeleton.hdr")
 
     # Selection control
     parser.add_argument("--no-selection", action="store_true",
@@ -1292,6 +1292,13 @@ Examples:
 
     if args.gain <= 0:
         parser.error("Gain must be positive")
+
+    # Critical safety check: Prevent overwriting existing FITS files
+    if args.skeleton_only:
+        if os.path.exists(args.skeleton_only):
+            parser.error(f"Operation would overwrite an existing file: {args.skeleton_only}")
+    elif os.path.exists(args.output):
+        parser.error(f"Output file {args.output} already exists")
 
     return args
 
