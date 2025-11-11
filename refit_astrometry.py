@@ -7,6 +7,7 @@ import numpy as np
 import zpnfit
 import logging
 import matplotlib.pyplot as plt
+from copy import deepcopy
 
 def plot_astrometric_residuals(zpntest, data, filename="astrometric_residuals.png", arrow_scale=2.5):
     """
@@ -166,6 +167,11 @@ def refit_astrometry(det, data, options):
         zpntest.fixterm(["PV2_1"], [1])
     elif camera in ["CAM-ZEA"]:
         zpntest = zpnfit.zpnfit(proj="ZEA")
+    elif options.refit_zpn:
+        # Refit TAN as ZPN when requested
+        logging.info(f"ZPN projection activated via refit_zpn flag (TAN approximation)")
+        zpntest = zpnfit.zpnfit(proj="ZPN")
+        zpntest.fixterm(["PV2_1"], [1])
     else:
         zpntest = zpnfit.zpnfit(proj="TAN")
 
@@ -306,6 +312,15 @@ def setup_camera_params(zpntest, camera, refit_zpn):
 # PV2_5   =   0.044189874766 / ± 0.002482740922 (5.618348%)
 # CRPIX1  = 339.882095473812 / ± 0.262750191549 (0.077306%)
 # CRPIX2  = 335.523756136020 / ± 0.325225858217 (0.096931%)
+
+    # Default TAN approximation for unknown cameras when refit_zpn is requested
+    if refit_zpn and camera not in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
+        # Taylor series coefficients for tan(θ) = θ + θ³/3 + 2θ⁵/15 + ...
+        # PV2_1 = 1 (already fixed above)
+        # PV2_3 = 1/3 ≈ 0.333333
+        # PV2_5 = 2/15 ≈ 0.133333
+        logging.info(f"Setting up TAN approximation for ZPN projection (PV2_3=1/3, PV2_5=2/15)")
+        zpntest.fitterm(["PV2_3", "PV2_5"], [1.0/3.0, 2.0/15.0])
 
 #    # ... (similar blocks for other camera types)
 
