@@ -181,25 +181,45 @@ def get_limits(det, verbose=False):
         stability testing of these limits tested at a series of short exposures of AD Leo was 1-sigma=0.013 mag.
         level of accuracy of limits set this way depends on the underlying detection alorithm, its gain/rn settings and aperture
     """
-    res = opt.least_squares(errormodel, [1, 2.5], args=[(det['MAG_AUTO'],np.log10(det['MAGERR_AUTO'] * np.log(2.5) * 3))] )
-    det.meta['LIMFLX3'] = res.x[0]
-    det.meta['LIMFLX10'] = res.x[0]+res.x[1]*np.log10(1.091/10) # FIXME: this is strange, I do not trust this is actually 10-sigma
+    # Check if we have enough detections - warn but continue without setting limits
+    if len(det) < 3:
+        if verbose:
+            print(f"Warning: Only {len(det)} detection(s), cannot fit error model")
+        # Don't set LIMFLX3/LIMFLX10/DLIMFLX3 - downstream code can check if they exist
+        return
+
+    # Check if magnitude errors produce finite values
+    log_errors = np.log10(det['MAGERR_AUTO'] * np.log(2.5) * 3)
+    if not np.all(np.isfinite(log_errors)):
+        if verbose:
+            print(f"Warning: Non-finite magnitude errors, cannot fit error model")
+        # Don't set LIMFLX3/LIMFLX10/DLIMFLX3 - downstream code can check if they exist
+        return
 
     try:
-        cov = np.linalg.inv(res.jac.T.dot(res.jac))
-        fiterrors = np.sqrt(np.diagonal(cov))
-        if not np.isnan(fiterrors[0]):
-            det.meta['DLIMFLX3'] = fiterrors[0]
-        else:
-            det.meta['DLIMFLX3'] = 0
-    except:
-        fiterrors = res.x*np.nan
-        det.meta['DLIMFLX3'] = 0
+        res = opt.least_squares(errormodel, [1, 2.5], args=[(det['MAG_AUTO'], log_errors)])
+        det.meta['LIMFLX3'] = res.x[0]
+        det.meta['LIMFLX10'] = res.x[0]+res.x[1]*np.log10(1.091/10) # FIXME: this is strange, I do not trust this is actually 10-sigma
 
-    if verbose and res.success:
-        print(f"Limits fitted, LIMFLX3 = {det.meta['LIMFLX3']:.3f} +/- {det.meta['DLIMFLX3']:.3f}")
-    if verbose and not res.success:
-        print("Fitting limits failed")
+        try:
+            cov = np.linalg.inv(res.jac.T.dot(res.jac))
+            fiterrors = np.sqrt(np.diagonal(cov))
+            if not np.isnan(fiterrors[0]):
+                det.meta['DLIMFLX3'] = fiterrors[0]
+            else:
+                det.meta['DLIMFLX3'] = 0
+        except:
+            fiterrors = res.x*np.nan
+            det.meta['DLIMFLX3'] = 0
+
+        if verbose and res.success:
+            print(f"Limits fitted, LIMFLX3 = {det.meta['LIMFLX3']:.3f} +/- {det.meta['DLIMFLX3']:.3f}")
+        if verbose and not res.success:
+            print("Fitting limits failed")
+    except (ValueError, RuntimeError) as e:
+        if verbose:
+            print(f"Warning: Error model fitting failed: {e}")
+        # Don't set LIMFLX3/LIMFLX10/DLIMFLX3 - downstream code can check if they exist
 
 def open_files(arg, verbose=False):
     """sort out the argument and open appropriate files"""
@@ -378,25 +398,40 @@ def process_detections(det: astropy.table.Table,
     # NAXIS1/2 are bound to the image - they will not stay in the header
     det.meta['IMGAXIS1'] = c['NAXIS1']
     det.meta['IMGAXIS2'] = c['NAXIS2']
-    rd = imgwcs.all_pix2world([[det.meta['CTRX'], det.meta['CTRY']], [0, 0], [det.meta['CTRX'], det.meta['CTRY']+1]], 0)
 
-    det.meta['CTRRA'] = rd[0][0]
-    det.meta['CTRDEC'] = rd[0][1]
+    # Check if WCS has celestial information and is valid
+    if not imgwcs.has_celestial:
+        print("Error: No valid WCS/astrometry found in FITS header, cannot continue")
+        return None
 
-    center = SkyCoord(rd[0][0]*astropy.units.deg, rd[0][1]*astropy.units.deg, frame='fk5')
-    corner = SkyCoord(rd[1][0]*astropy.units.deg, rd[1][1]*astropy.units.deg, frame='fk5')
-    pixel = SkyCoord(rd[2][0]*astropy.units.deg, rd[2][1]*astropy.units.deg, frame='fk5').separation(center)
-    field = center.separation(corner)
-    if verbose:
-        if field.deg > 10:
-            print(f"Diagonal field size: {field.deg*2:.1f}°, Pixel size: {pixel.arcsec:.3f}\"")
-        elif field.deg > 1:
-            print(f"Diagonal field size: {field.deg*2:.2f}°, Pixel size: {pixel.arcsec:.3f}\"")
-        else:
-            print(f"Diagonal field size: {field.deg*120:.1f}\', Pixel size: {pixel.arcsec:.3f}\"")
+    try:
+        rd = imgwcs.all_pix2world([[det.meta['CTRX'], det.meta['CTRY']], [0, 0], [det.meta['CTRX'], det.meta['CTRY']+1]], 0)
 
-    det.meta['FIELD'] = field.deg
-    det.meta['PIXEL'] = pixel.arcsec
+        # Check if declination is within valid range
+        if abs(rd[0][1]) > 90:
+            print(f"Error: Invalid WCS transformation (dec={rd[0][1]:.1f}°), likely bad SIP solution. Cannot continue")
+            return None
+
+        det.meta['CTRRA'] = rd[0][0]
+        det.meta['CTRDEC'] = rd[0][1]
+
+        center = SkyCoord(rd[0][0]*astropy.units.deg, rd[0][1]*astropy.units.deg, frame='fk5')
+        corner = SkyCoord(rd[1][0]*astropy.units.deg, rd[1][1]*astropy.units.deg, frame='fk5')
+        pixel = SkyCoord(rd[2][0]*astropy.units.deg, rd[2][1]*astropy.units.deg, frame='fk5').separation(center)
+        field = center.separation(corner)
+        if verbose:
+            if field.deg > 10:
+                print(f"Diagonal field size: {field.deg*2:.1f}°, Pixel size: {pixel.arcsec:.3f}\"")
+            elif field.deg > 1:
+                print(f"Diagonal field size: {field.deg*2:.2f}°, Pixel size: {pixel.arcsec:.3f}\"")
+            else:
+                print(f"Diagonal field size: {field.deg*120:.1f}\', Pixel size: {pixel.arcsec:.3f}\"")
+
+        det.meta['FIELD'] = field.deg
+        det.meta['PIXEL'] = pixel.arcsec
+    except (RuntimeError, ValueError) as e:
+        print(f"Error: Bad astrometry/WCS transformation ({e}), cannot continue")
+        return None
 
     try:  # Normally we should have a FWHM value from phcat in the photometry file
         fwhm = det.meta['FWHM']
@@ -434,6 +469,10 @@ def main():
                                filter_override=options.filter,
                                target_photometry=options.target_photometry,
                                verbose=options.verbose)
+
+        if det is None:
+            print("Skipping file due to errors")
+            continue
 
         output = os.path.splitext(filef)[0] + ".det"
         if options.verbose: print(f"Writing output file {output}")
