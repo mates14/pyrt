@@ -119,6 +119,11 @@ def check_projection_handling(header, force_convert=False):
     or needs conversion to TAN+SIP (convert). Also validates that the projection
     is supported by astropy WCS.
 
+    Special handling: If old-style distortion coefficients (PV_i_j keywords) are
+    present, forces conversion even for TAN projections. This is because Montage
+    and astropy interpret these differently - astropy may see TAN while Montage
+    sees PLA (Plate Carrée), causing mProjectPP to fail.
+
     Args:
         header (astropy.io.fits.Header): FITS header containing WCS information
         force_convert (bool): If True, force conversion even for supported types
@@ -132,6 +137,15 @@ def check_projection_handling(header, force_convert=False):
     """
     wcs = WCS(header)
     proj_type = wcs.wcs.ctype[0].split('-')[-1]
+
+    # Check for old-style distortion coefficients (PV_i_j keywords)
+    # These cause Montage and astropy to interpret projections differently
+    has_pv_keywords = any(key.startswith('PV') for key in header)
+
+    if has_pv_keywords:
+        # Force conversion if old-style distortion is present
+        # Even if astropy thinks it's TAN, Montage might see it as PLA
+        return 'convert'
 
     if proj_type in MPROJECT_PP_PROJECTIONS:
         return 'passthrough'
