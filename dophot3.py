@@ -359,7 +359,7 @@ def update_det_file(fitsimgf: str, options): #  -> Tuple[Optional[Table], str]:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
         print(f"Error running cat2det.py: {e}")
-        return None, ""
+        return "", None
 
     return try_det(os.path.splitext(fitsimgf)[0] + ".det", options.verbose)
 
