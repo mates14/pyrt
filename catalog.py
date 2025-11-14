@@ -779,9 +779,9 @@ class Catalog(astropy.table.Table):
 
         # Filter by field of view
         ctr = SkyCoord(self._query_params.ra*u.deg, self._query_params.dec*u.deg, frame='fk5')
-        corner1 = SkyCoord((self._query_params.ra+self._query_params.width)*u.deg, (self._query_params.dec+self._query_params.height)*u.deg, frame='fk5')
-        corner2 = SkyCoord((self._query_params.ra-self._query_params.width)*u.deg, (self._query_params.dec-self._query_params.height)*u.deg, frame='fk5')
-        radius = max(corner1.separation(ctr), corner2.separation(ctr))
+        # Calculate diagonal radius directly to avoid invalid declination values
+        # For a rectangular field with half-width and half-height, the diagonal is sqrt(w^2 + h^2)
+        radius = np.sqrt(self._query_params.width**2 + self._query_params.height**2) * u.deg
         logging.debug(f"catalog.makak: fov radius: {radius} {radius}")
 
         cat_coords = SkyCoord(cat['radeg']*u.deg, cat['decdeg']*u.deg, frame='fk5')
