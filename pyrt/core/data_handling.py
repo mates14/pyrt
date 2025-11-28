@@ -1,6 +1,6 @@
 import numpy as np
 import logging
-from airmass import calculate_airmass_array
+from pyrt.utils.airmass import calculate_airmass_array
 
 class FitData:
     """

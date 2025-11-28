@@ -20,16 +20,16 @@ warnings.simplefilter('ignore', category=FITSFixedWarning)
 
 from sklearn.neighbors import KDTree
 
-import zpnfit
-import fotfit
+from pyrt.core import zpnfit
+from pyrt.core import fotfit
 #from catalogs import get_atlas, get_catalog
-from catalog import Catalog, CatalogFilter
-from cat2det import remove_junk
-from refit_astrometry import refit_astrometry
-from file_utils import try_det, try_img, write_region_file
-from config import parse_arguments
+from pyrt.catalog.catalog import Catalog, CatalogFilter
+from pyrt.cli.cat2det import remove_junk
+from pyrt.core.refit_astrometry import refit_astrometry
+from pyrt.utils.file_utils import try_det, try_img, write_region_file
+from pyrt.utils.dophot_config import parse_arguments
 #from config import load_config
-from data_handling import PhotometryData, make_pairs_to_fit, compute_initial_zeropoints
+from pyrt.core.data_handling import PhotometryData, make_pairs_to_fit, compute_initial_zeropoints
 
 def match_stars(det, cat, imgwcs, idlimit=2.0):
     """

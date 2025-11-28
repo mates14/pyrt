@@ -22,18 +22,18 @@ import warnings
 from astropy.wcs import FITSFixedWarning
 warnings.simplefilter('ignore', category=FITSFixedWarning)
 
-import fotfit
-from catalog import Catalog
-from cat2det import remove_junk
-from refit_astrometry import refit_astrometry
-from file_utils import try_det, try_img, write_region_file
-from config import parse_arguments
-from data_handling import PhotometryData, make_pairs_to_fit, compute_zeropoints_all_filters
-from match_stars import process_image_with_dynamic_limits
-from stepwise_regression import perform_stepwise_regression, parse_terms, expand_pseudo_term
+from pyrt.core import fotfit
+from pyrt.catalog.catalog import Catalog
+from pyrt.cli.cat2det import remove_junk
+from pyrt.core.refit_astrometry import refit_astrometry
+from pyrt.utils.file_utils import try_det, try_img, write_region_file
+from pyrt.utils.dophot_config import parse_arguments
+from pyrt.core.data_handling import PhotometryData, make_pairs_to_fit, compute_zeropoints_all_filters
+from pyrt.core.match_stars import process_image_with_dynamic_limits
+from pyrt.core.stepwise_regression import perform_stepwise_regression, parse_terms, expand_pseudo_term
 
-from plotting import create_residual_plots, create_correction_volume_plots
-from filter_matching import determine_filter
+from pyrt.utils.plotting import create_residual_plots, create_correction_volume_plots
+from pyrt.utils.filter_matching import determine_filter
 
 if sys.version_info[0]*1000+sys.version_info[1]<3008:
     print(f"Error: python3.8 or higher is required (this is python {sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]})")
@@ -274,6 +274,52 @@ def perform_photometric_fitting(data, options, metadata):
     print(f"Parsed terms: stepwise={parsed_terms['stepwise']}, direct={parsed_terms['direct']}, "
           f"fixed={list(parsed_terms['fixed'].keys())}, default={parsed_terms['default']}")
 
+    # Check if SC or XC terms are present and validate reference filter position
+    all_terms = (parsed_terms['stepwise'] + parsed_terms['direct'] +
+                 list(parsed_terms['fixed'].keys()) + parsed_terms['default'])
+    # Strip per-image suffixes and modifiers to get base term names
+    base_terms = set()
+    for term in all_terms:
+        # Remove :n suffix if present
+        base_term = term.split(':')[0] if ':' in term else term
+        base_terms.add(base_term)
+
+    if 'SC' in base_terms or 'XC' in base_terms:
+        schema_name = metadata[0]['PHSCHEMA']
+        if schema_name and schema_name in options.filter_schemas:
+            schema = options.filter_schemas[schema_name]
+            required_ref_filter = schema[1]  # SC/XC require reference filter at position 1
+            current_ref_filter = metadata[0]['PHFILTER']
+
+            if current_ref_filter != required_ref_filter:
+                print(f"WARNING: SC/XC terms require reference filter to be at position 1 in schema")
+                print(f"         Schema '{schema_name}': {schema}")
+                print(f"         Current reference filter: {current_ref_filter}")
+                print(f"         Required reference filter: {required_ref_filter}")
+                print(f"         Updating reference filter to {required_ref_filter}")
+
+                # Update reference filter in all metadata
+                for meta in metadata:
+                    meta['PHFILTER'] = required_ref_filter
+
+                # Update data object's current filter
+                data.set_current_filter(required_ref_filter)
+
+                # Need to recompute zeropoints with the new reference filter
+                print(f"Recomputing zeropoints with corrected reference filter...")
+                zeropoints, _, _ = compute_zeropoints_all_filters(data, metadata, options)
+
+                # Update initial values with new zeropoints
+                if options.single_zeropoint:
+                    avg_zp = np.mean(zeropoints)
+                    initial_values['Z'] = avg_zp
+                    print(f"Updated single zeropoint: Z={avg_zp:.6f}")
+                else:
+                    for i, zp in enumerate(zeropoints, 1):
+                        zp_term = f"Z:{i}"
+                        initial_values[zp_term] = zp
+                    print(f"Updated per-image zeropoints: Z:1..Z:{len(zeropoints)}")
+
     # Merge initial values from model file and command line
     combined_initial_values = {**initial_values, **parsed_terms['initial_values']}
 
@@ -346,8 +392,15 @@ def load_model_from_file(ffit, model_file):
     print(f"Cannot open model {model_file}")
 
 def update_det_file(fitsimgf: str, options): #  -> Tuple[Optional[Table], str]:
-    """Update the .det file using cat2det.py."""
-    cmd = ["cat2det.py"]
+    """Update the .det file using cat2det (pyrt-cat2det when installed)."""
+    # Try installed command first, fall back to module for source runs
+    import shutil
+    if shutil.which("pyrt-cat2det"):
+        cmd = ["pyrt-cat2det"]
+    else:
+        # Fall back to running as module (for source/development)
+        cmd = [sys.executable, "-m", "pyrt.cli.cat2det"]
+
     if options.verbose:
         cmd.append("-v")
     if options.filter:
@@ -358,7 +411,7 @@ def update_det_file(fitsimgf: str, options): #  -> Tuple[Optional[Table], str]:
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
-        print(f"Error running cat2det.py: {e}")
+        print(f"Error running cat2det: {e}")
         return "", None
 
     return try_det(os.path.splitext(fitsimgf)[0] + ".det", options.verbose)
@@ -637,6 +690,41 @@ def main():
 
         catalog_name = 'makak' if options.makak else options.catalog
         determine_filter(det, options, catalog_name)
+
+        # Override schema if specified on command line
+        if options.schema:
+            if options.schema in options.filter_schemas:
+                # Validate that catalog has all required filters for this schema
+                from filter_matching import get_catalog_filters
+                available_filters = get_catalog_filters(catalog_name)
+                required_filters = set(options.filter_schemas[options.schema])
+                available_filter_names = set(available_filters.keys())
+
+                missing_filters = required_filters - available_filter_names
+                if missing_filters:
+                    logging.error(f'Cannot use schema "{options.schema}" - catalog missing filters: {sorted(missing_filters)}')
+                    logging.error(f'Available filters in catalog: {sorted(available_filter_names)}')
+                    sys.exit(1)
+
+                original_schema = det.meta["PHSCHEMA"]
+                original_filter = det.meta["PHFILTER"]
+                det.meta["PHSCHEMA"] = options.schema
+
+                # Set reference filter to position [1] of the new schema (for SC/XC compatibility)
+                schema_filters = options.filter_schemas[options.schema]
+                det.meta["PHFILTER"] = schema_filters[1]
+
+                # Update photometric system based on the new reference filter
+                if det.meta["PHFILTER"] in available_filters:
+                    det.meta["PHSYSTEM"] = available_filters[det.meta["PHFILTER"]].system
+
+                logging.info(f'Schema overridden from command line: {original_schema} -> {options.schema}')
+                logging.info(f'Reference filter updated: {original_filter} -> {det.meta["PHFILTER"]} (position [1] in schema)')
+            else:
+                available_schemas = ', '.join(options.filter_schemas.keys())
+                logging.error(f'Unknown schema "{options.schema}". Available schemas: {available_schemas}')
+                sys.exit(1)
+
         logging.info(f'Reference filter is {det.meta["PHFILTER"]}, '
                 f'Schema: {det.meta["PHSCHEMA"]}, '
                 f'System: {det.meta["PHSYSTEM"]}')

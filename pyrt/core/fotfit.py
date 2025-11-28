@@ -6,7 +6,7 @@ Photometric response fitter
 """
 
 import numpy as np
-import termfit
+from pyrt.core import termfit
 import logging
 from astropy.table import Table
 
@@ -347,11 +347,19 @@ class fotfit(termfit.termfit):
             elif term_to_process == 'HM': hm = value
             elif term_to_process == 'HN': hn = value
             elif term_to_process == 'XC':
+                # XC: Extended color term with linear interpolation
+                # IMPORTANT: Requires reference filter to be at position [1] in the 5-filter schema
+                # Colors are defined as: color1=schema[0]-schema[1], color2=schema[1]-schema[2], etc.
+                # XC value encodes which filter was actually used relative to schema positions
                 bval = np.where(value < 0, value * color1,
                                 np.where(value <= 1, value * color2,
                                          (value - 1) * color3 + color2))
                 model[img_mask] += bval[img_mask]
             elif term_to_process == 'SC':
+                # SC: Smooth color term with sinusoidal interpolation
+                # IMPORTANT: Requires reference filter to be at position [1] in the 5-filter schema
+                # Colors are defined as: color1=schema[0]-schema[1], color2=schema[1]-schema[2], etc.
+                # SC value encodes which filter was actually used relative to schema positions
                 s = np.sin(value * np.pi)
                 w1 = 0.5 * (-s + 1)
                 w2 = 0.5 * (s + 1)

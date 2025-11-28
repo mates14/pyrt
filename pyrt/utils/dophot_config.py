@@ -118,6 +118,7 @@ def parse_arguments(args=None):
     parser.add_argument("-d", "--date", action='store', help="what to put into the third column (char,mid,bjd), default=mid")
     parser.add_argument("-e", "--enlarge", type=float, default=config.get('enlarge'), help="Enlarge catalog search region")
     parser.add_argument("-f", "--filter", default=config.get('filter'), help="Override filter info from fits")
+    parser.add_argument("--schema", default=config.get('schema'), help="Override filter schema (e.g., 'JohnsonU', 'SloanJ', 'PS')")
     parser.add_argument("-F", "--flat", help="Produce flats", action='store_true')
     parser.add_argument("-g", "--guessbase", action="store_true", default=config.get('guessbase', 'False'),
                         help="Try and set base filter from fits header (implies -j if Bessel filter is found)")

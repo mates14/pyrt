@@ -16,8 +16,8 @@ import logging
 import sys
 import numpy as np
 
-import fotfit
-from catalog import Catalog, CatalogFilter
+from pyrt.core import fotfit
+from pyrt.catalog.catalog import Catalog, CatalogFilter
 
 
 def get_catalog_filters(catalog_name):

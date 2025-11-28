@@ -18,7 +18,7 @@ import astropy.table
 from astropy.coordinates import SkyCoord, EarthLocation
 from astropy.time import Time
 import astropy.units as u
-from file_utils import try_sex, try_ecsv, try_img
+from pyrt.utils.file_utils import try_sex, try_ecsv, try_img
 
 from typing import Optional, Tuple
 

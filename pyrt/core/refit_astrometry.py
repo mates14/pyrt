@@ -4,7 +4,7 @@ import os
 import numpy as np
 #import astropy.wcs
 #import astropy.io.fits
-import zpnfit
+from pyrt.core import zpnfit
 import logging
 import matplotlib.pyplot as plt
 from copy import deepcopy
@@ -126,6 +126,347 @@ def refine_fit(zpntest, data):
     zpntest.delin = True
     zpntest.fit(ad_ok.astparams)
 
+def select_best_projection(zpntest, data):
+    """
+    Test TAN, ZEA, AZP, and ZPN projections to find the best fit.
+
+    Args:
+        zpntest: Initial ZPN fitting object
+        data: PhotometryData with astrometric data
+
+    Returns:
+        zpnfit object with best projection selected
+
+    Projections tested:
+        TAN - Gnomonic (standard, 0 parameters)
+        ZEA - Zenithal equal area (photometry-friendly, 0 parameters)
+        AZP - Zenithal perspective with fitted mu (projection type selection, 1 parameter)
+              mu=0→TAN, mu=1→STG, mu→∞→SIN. No Runge oscillations like ZPN.
+        ZPN - Zenithal polynomial (radial distortion, stepwise selection of polynomial terms)
+              If no polynomial terms improve fit, reported as ARC (zenithal equidistant)
+        ARC - Zenithal equidistant (r=u), widely used for Schmidt telescopes
+              Mathematically equivalent to ZPN with only PV2_1=1
+    """
+    best_projection = None
+    best_wssrndf = float('inf')
+    best_zpntest = None
+    best_terms = []
+
+    # Test each projection type
+    for proj_name in ["TAN", "ZEA", "AZP", "ZPN"]:
+        logging.info(f"Testing {proj_name} projection...")
+        print(f"Testing {proj_name} projection...")
+
+        # Create a new zpnfit object with this projection
+        zpntest_test = deepcopy(zpntest)
+        proj_idx = zpntest_test.projections.index(proj_name)
+
+        # Update the PROJ term
+        if "PROJ" in zpntest_test.fixterms:
+            proj_term_idx = zpntest_test.fixterms.index("PROJ")
+            zpntest_test.fixvalues[proj_term_idx] = proj_idx
+        else:
+            zpntest_test.fixterm(["PROJ"], [proj_idx])
+
+        try:
+            if proj_name == "AZP":
+                # For AZP, fit only mu (distance parameter), gamma defaults to 0 (no tilt)
+                # mu controls projection type: 0=TAN, 1=STG, infinity=SIN
+                # Initial: mu=0.1 (close to TAN)
+
+                # Clear all PV2_* terms from both fitterms and fixterms (clean slate for AZP)
+                pv2_terms = [f"PV2_{i}" for i in range(1, 10)]
+                for term in pv2_terms:
+                    # Remove from fitterms
+                    if term in zpntest_test.fitterms:
+                        idx = zpntest_test.fitterms.index(term)
+                        zpntest_test.fitterms.pop(idx)
+                        zpntest_test.fitvalues.pop(idx)
+
+                    # Remove from fixterms
+                    if term in zpntest_test.fixterms:
+                        idx = zpntest_test.fixterms.index(term)
+                        zpntest_test.fixterms.pop(idx)
+                        zpntest_test.fixvalues.pop(idx)
+
+                # Set PV2_2 (gamma) to 0 and fix it (no tilt)
+                zpntest_test.fixterm(["PV2_2"], [0.0])
+
+                # Now add PV2_1 as a fitting term
+                zpntest_test.fitterm(["PV2_1"], [0.1])   # mu to be fitted, start close to TAN
+
+                # Do initial fit to check if it's working
+                try:
+                    refine_fit(zpntest_test, data)
+                    refine_fit(zpntest_test, data)
+                    final_wssrndf = zpntest_test.wssrndf
+
+                except Exception as e:
+                    logging.warning(f"{proj_name}: Fit failed with error: {e}")
+                    print(f"{proj_name}: Fit failed with error: {e}")
+                    continue
+
+                # Validate the fit
+                if not np.isfinite(final_wssrndf) or final_wssrndf <= 0:
+                    logging.warning(f"{proj_name}: Invalid WSSR/NDF = {final_wssrndf:.6f}, rejecting")
+                    print(f"{proj_name}: Invalid WSSR/NDF = {final_wssrndf:.6f}, rejecting")
+                    continue
+
+                # Get the fitted mu value for reporting
+                mu_idx = zpntest_test.fitterms.index("PV2_1") if "PV2_1" in zpntest_test.fitterms else None
+                mu_value = zpntest_test.fitvalues[mu_idx] if mu_idx is not None else 0.0
+
+                selected_terms = ["PV2_1"]
+                msg = f"{proj_name}: WSSR/NDF = {final_wssrndf:.6f} with fitted mu = {mu_value:.6f}"
+                logging.info(msg)
+                print(msg)
+
+                if final_wssrndf < best_wssrndf:
+                    best_wssrndf = final_wssrndf
+                    best_projection = proj_name
+                    best_zpntest = zpntest_test
+                    best_terms = selected_terms
+            elif proj_name == "ZPN":
+                # For ZPN, use stepwise regression to select polynomial terms
+                refine_fit(zpntest_test, data)
+                selected_terms = perform_stepwise_astrometry(zpntest_test, data)
+                final_wssrndf = zpntest_test.wssrndf
+
+                # If no polynomial terms were selected, this is actually ARC projection
+                # ARC (zenithal equidistant): r = u, equivalent to ZPN with only PV2_1=1
+                # Widely used for Schmidt telescopes
+                if not selected_terms:
+                    # Change projection from ZPN to ARC
+                    proj_idx_arc = zpntest_test.projections.index("ARC")
+                    proj_term_idx = zpntest_test.fixterms.index("PROJ")
+                    zpntest_test.fixvalues[proj_term_idx] = proj_idx_arc
+
+                    proj_name = "ARC"
+                    msg = f"{proj_name}: WSSR/NDF = {final_wssrndf:.6f} (zenithal equidistant, no distortion)"
+                else:
+                    msg = f"{proj_name}: WSSR/NDF = {final_wssrndf:.6f} with terms {selected_terms}"
+
+                logging.info(msg)
+                print(msg)
+
+                if final_wssrndf < best_wssrndf:
+                    best_wssrndf = final_wssrndf
+                    best_projection = proj_name
+                    best_zpntest = zpntest_test
+                    best_terms = selected_terms
+            else:
+                # For TAN and ZEA, just refine the fit (no free parameters)
+                refine_fit(zpntest_test, data)
+                refine_fit(zpntest_test, data)
+                final_wssrndf = zpntest_test.wssrndf
+
+                msg = f"{proj_name}: WSSR/NDF = {final_wssrndf:.6f}"
+                logging.info(msg)
+                print(msg)
+
+                if final_wssrndf < best_wssrndf:
+                    best_wssrndf = final_wssrndf
+                    best_projection = proj_name
+                    best_zpntest = zpntest_test
+                    best_terms = []
+
+        except Exception as e:
+            logging.warning(f"Failed to fit {proj_name} projection: {e}")
+            print(f"Failed to fit {proj_name} projection: {e}")
+            continue
+
+    # Report the winner
+    if best_terms:
+        msg = f"Best projection: {best_projection} (WSSR/NDF = {best_wssrndf:.6f}) with terms {best_terms}"
+    else:
+        msg = f"Best projection: {best_projection} (WSSR/NDF = {best_wssrndf:.6f})"
+    logging.info(msg)
+    print(msg)
+
+    return best_zpntest
+
+def perform_stepwise_astrometry(zpntest, data, 
+                                 # pv_terms=['PV2_3', 'PV2_5', 'PV2_7'],
+                                 pv_terms=['PV2_2', 'PV2_3', 'PV2_4', 'PV2_5', 'PV2_6', 'PV2_7'],  # Use if even terms needed
+                                 initial_values=None, improvement_threshold=0.001, max_iterations=20):
+    """
+    Perform bidirectional stepwise regression for ZPN polynomial terms.
+    Uses forward selection and backward elimination to find optimal term set.
+
+    Args:
+        zpntest: ZPN fitting object (will be modified in place)
+        data: PhotometryData with astrometric data
+        pv_terms: List of PV2_N terms to consider (default: ['PV2_3', 'PV2_5', 'PV2_7'] - odd terms only)
+                  For difficult cases, can use: ['PV2_2', 'PV2_3', 'PV2_4', 'PV2_5', 'PV2_6', 'PV2_7']
+        initial_values: Initial guesses for each term (default: odd=Taylor series, even=0)
+        improvement_threshold: Minimum relative improvement to keep/remove term (default: 0.001 = 0.1%)
+        max_iterations: Maximum forward+backward cycles (default: 20)
+
+    Returns:
+        list: Terms that were kept
+    """
+    if initial_values is None:
+        # Default initial values from Taylor series of tan(θ) for odd terms
+        # tan(θ) = θ + θ³/3 + 2θ⁵/15 + 17θ⁷/315 + ...
+        # Even terms start at 0 (no contribution in ideal TAN projection)
+        if len(pv_terms) == 3:
+            # Odd terms only (default)
+            initial_values = [1.0/3.0, 2.0/15.0, 17.0/315.0]
+        else:
+            # All terms including even
+            initial_values = [0.0, 1.0/3.0, 0.0, 2.0/15.0, 0.0, 17.0/315.0]
+
+    # Ensure we have enough initial values
+    while len(initial_values) < len(pv_terms):
+        initial_values.append(0.0)
+
+    # Create a dictionary for term -> initial value lookup
+    term_init_values = dict(zip(pv_terms, initial_values))
+
+    # Save the initial clean state (before any PV2_* terms are added)
+    # This is our baseline to rebuild from
+    zpntest_clean = deepcopy(zpntest)
+
+    selected_terms = []
+    remaining_terms = list(pv_terms)
+    baseline_wssrndf = zpntest.wssrndf
+
+    logging.info(f"Starting bidirectional stepwise astrometry with baseline WSSR/NDF = {baseline_wssrndf:.6f}")
+    print(f"Starting bidirectional stepwise astrometry with baseline WSSR/NDF = {baseline_wssrndf:.6f}")
+
+    for iteration in range(max_iterations):
+        made_change = False
+
+        # FORWARD STEP: Try adding best remaining term
+        best_new_term = None
+        best_improvement = 0
+        best_new_wssrndf = baseline_wssrndf
+
+        for term in remaining_terms:
+            # Try adding this term - start from clean state + selected terms
+            zpntest_test = deepcopy(zpntest_clean)
+            for t in selected_terms:
+                zpntest_test.fitterm([t], [term_init_values[t]])
+            zpntest_test.fitterm([term], [term_init_values[term]])
+
+            # Refit with sigma clipping
+            try:
+                refine_fit(zpntest_test, data)
+                refine_fit(zpntest_test, data)
+            except Exception as e:
+                continue
+
+            new_wssrndf = zpntest_test.wssrndf
+            improvement = 1 - new_wssrndf/baseline_wssrndf
+
+            if improvement > best_improvement:
+                best_improvement = improvement
+                best_new_term = term
+                best_new_wssrndf = new_wssrndf
+
+        # Add best term if improvement exceeds threshold
+        if best_new_term and best_improvement > improvement_threshold:
+            msg = (f"[Iter {iteration+1}] Adding {best_new_term}: WSSR/NDF {baseline_wssrndf:.6f} → "
+                   f"{best_new_wssrndf:.6f} (improvement: {best_improvement:.1%})")
+            logging.info(msg)
+            print(msg)
+
+            selected_terms.append(best_new_term)
+            remaining_terms.remove(best_new_term)
+
+            # Rebuild zpntest from clean state with all selected terms
+            zpntest_new = deepcopy(zpntest_clean)
+            for t in selected_terms:
+                zpntest_new.fitterm([t], [term_init_values[t]])
+            refine_fit(zpntest_new, data)
+            refine_fit(zpntest_new, data)
+
+            # Copy the fitted state back to zpntest
+            zpntest.fixterms = zpntest_new.fixterms.copy()
+            zpntest.fixvalues = zpntest_new.fixvalues.copy()
+            zpntest.fitterms = zpntest_new.fitterms.copy()
+            zpntest.fitvalues = zpntest_new.fitvalues.copy()
+            zpntest.fiterrors = zpntest_new.fiterrors.copy()
+            zpntest.wssrndf = zpntest_new.wssrndf
+            zpntest.sigma = zpntest_new.sigma
+
+            baseline_wssrndf = zpntest.wssrndf
+            made_change = True
+
+        # BACKWARD STEP: Try removing worst selected term
+        if len(selected_terms) > 0:
+            worst_term = None
+            smallest_degradation = float('inf')
+            worst_new_wssrndf = baseline_wssrndf
+
+            for term in selected_terms:
+                # Try removing this term - start from clean state
+                terms_without = [t for t in selected_terms if t != term]
+
+                # Build from clean state with only the terms we want
+                zpntest_test = deepcopy(zpntest_clean)
+                for t in terms_without:
+                    zpntest_test.fitterm([t], [term_init_values[t]])
+
+                try:
+                    refine_fit(zpntest_test, data)
+                    refine_fit(zpntest_test, data)
+                except Exception as e:
+                    continue
+
+                new_wssrndf = zpntest_test.wssrndf
+                degradation = 1 - baseline_wssrndf/new_wssrndf
+
+                if degradation < smallest_degradation:
+                    smallest_degradation = degradation
+                    worst_new_wssrndf = new_wssrndf
+                    if degradation < improvement_threshold:
+                        worst_term = term
+
+            # Remove term if its removal causes minimal degradation
+            if worst_term:
+                msg = (f"[Iter {iteration+1}] Removing {worst_term}: WSSR/NDF {baseline_wssrndf:.6f} → "
+                       f"{worst_new_wssrndf:.6f} (degradation: {smallest_degradation:.1%})")
+                logging.info(msg)
+                print(msg)
+
+                selected_terms.remove(worst_term)
+                remaining_terms.append(worst_term)
+
+                # Rebuild zpntest from clean state with remaining terms
+                zpntest_new = deepcopy(zpntest_clean)
+                for t in selected_terms:
+                    zpntest_new.fitterm([t], [term_init_values[t]])
+                refine_fit(zpntest_new, data)
+                refine_fit(zpntest_new, data)
+
+                # Copy the fitted state back to zpntest
+                zpntest.fixterms = zpntest_new.fixterms.copy()
+                zpntest.fixvalues = zpntest_new.fixvalues.copy()
+                zpntest.fitterms = zpntest_new.fitterms.copy()
+                zpntest.fitvalues = zpntest_new.fitvalues.copy()
+                zpntest.fiterrors = zpntest_new.fiterrors.copy()
+                zpntest.wssrndf = zpntest_new.wssrndf
+                zpntest.sigma = zpntest_new.sigma
+
+                baseline_wssrndf = zpntest.wssrndf
+                made_change = True
+
+        # Stop if no changes in this iteration
+        if not made_change:
+            logging.info(f"Converged after {iteration+1} iterations")
+            print(f"Converged after {iteration+1} iterations")
+            break
+
+    if selected_terms:
+        logging.info(f"Stepwise astrometry selected terms: {selected_terms}")
+        print(f"Stepwise astrometry selected terms: {selected_terms}")
+    else:
+        logging.info("Stepwise astrometry: no terms improved the fit")
+        print("Stepwise astrometry: no terms improved the fit")
+
+    return selected_terms
+
 def refit_astrometry(det, data, options):
     """
     Refit the astrometric solution for a given image
@@ -191,9 +532,27 @@ def refit_astrometry(det, data, options):
     ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
     zpntest.fit(ad.astparams)
 
-    # Refine the fit
-    refine_fit(zpntest, data)
-    refine_fit(zpntest, data)
+    # Refine the fit - use stepwise for unknown cameras with refit_zpn
+    is_known_camera = camera in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]
+    is_zpn = (zpntest.fixvalues[zpntest.fixterms.index("PROJ")] == zpntest.projections.index("ZPN"))
+
+    if options.refit_zpn and not is_known_camera and is_zpn:
+        # Test TAN, ZEA, AZP, and ZPN projections to find the best one
+        logging.info("Testing projection types: TAN, ZEA, AZP (fitted mu), and ZPN with stepwise regression")
+        print("Testing projection types: TAN, ZEA, AZP (fitted mu), and ZPN with stepwise regression")
+
+        zpntest = select_best_projection(zpntest, data)
+
+        # Determine the actual projection name
+        proj_idx = int(zpntest.fixvalues[zpntest.fixterms.index('PROJ')])
+        proj_name = zpntest.projections[proj_idx]
+
+        logging.info(f"Selected projection: {proj_name}")
+    else:
+        # Normal refinement for known cameras or non-ZPN projections
+        refine_fit(zpntest, data)
+        refine_fit(zpntest, data)
+
     print(zpntest)
 
     if options.sip is not None:
@@ -314,13 +673,10 @@ def setup_camera_params(zpntest, camera, refit_zpn):
 # CRPIX2  = 335.523756136020 / ± 0.325225858217 (0.096931%)
 
     # Default TAN approximation for unknown cameras when refit_zpn is requested
+    # NOTE: Don't set up PV2_3/PV2_5 here - stepwise regression will handle it
     if refit_zpn and camera not in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
-        # Taylor series coefficients for tan(θ) = θ + θ³/3 + 2θ⁵/15 + ...
-        # PV2_1 = 1 (already fixed above)
-        # PV2_3 = 1/3 ≈ 0.333333
-        # PV2_5 = 2/15 ≈ 0.133333
-        logging.info(f"Setting up TAN approximation for ZPN projection (PV2_3=1/3, PV2_5=2/15)")
-        zpntest.fitterm(["PV2_3", "PV2_5"], [1.0/3.0, 2.0/15.0])
+        # Stepwise regression will determine which terms to include
+        logging.info(f"ZPN projection will use stepwise regression to determine distortion terms")
 
 #    # ... (similar blocks for other camera types)
 

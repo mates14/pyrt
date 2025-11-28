@@ -271,33 +271,91 @@ def create_correction_volume_plots(data, output_base, ffit):
     # Subpixel X/Y map - compute actual subpixel correction
     # This is the difference between model at fractional vs integer positions
     ax = fig.add_subplot(gs[3:6, 3:6])
-    
+
     # Create fotparams with integer-floored coordinates
     rounded_fotparams = list(fd.fotparams)
     rounded_fotparams[2] = np.floor(fd.coord_x)  # Floor coord_x to integers
     rounded_fotparams[3] = np.floor(fd.coord_y)  # Floor coord_y to integers
-    
+
     # Calculate model with rounded coordinates
     model_rounded = ffit.model(np.array(ffit.fitvalues), rounded_fotparams)
-    
+
     # Subpixel correction is the difference: fractional position - integer position
     subpixel_correction = model_original - model_rounded
-    subpixel_correction = np.clip(subpixel_correction, -0.1, 0.1)
-    
-    sc = ax.scatter(subpixel_x[current_mask], subpixel_y[current_mask], 
-                   c=subpixel_correction[current_mask], cmap='RdBu_r', s=8)
-    ax.scatter(subpixel_x[~current_mask], subpixel_y[~current_mask], 
-              c='gray', alpha=0.3, s=4)
+
+    # Create a 2D grid to evaluate the model's subpixel sensitivity function
+    # Evaluate model(fractional) - model(0,0) to show only subpixel variation
+    grid_resolution = 50
+    subpix_grid_x, subpix_grid_y = np.meshgrid(
+        np.linspace(0, 1, grid_resolution),
+        np.linspace(0, 1, grid_resolution)
+    )
+
+    # Use a fixed base position for grid evaluation
+    base_coord_x = 1024.0
+    base_coord_y = 1024.0
+
+    # Create fotparams for grid evaluation
+    n_grid = grid_resolution * grid_resolution
+    grid_fotparams = [
+        np.full(n_grid, np.median(fd.fotparams[0].flat)),  # magnitude
+        np.full(n_grid, np.median(fd.fotparams[1].flat)),  # airmass
+        (base_coord_x + subpix_grid_x).flatten(),  # coord_x with fractional part
+        (base_coord_y + subpix_grid_y).flatten(),  # coord_y with fractional part
+        np.full(n_grid, np.median(fd.fotparams[4].flat)),  # color1
+        np.full(n_grid, np.median(fd.fotparams[5].flat)),  # color2
+        np.full(n_grid, np.median(fd.fotparams[6].flat)),  # color3
+        np.full(n_grid, np.median(fd.fotparams[7].flat)),  # color4
+        np.full(n_grid, np.median(fd.fotparams[8].flat)),  # img
+        np.full(n_grid, np.median(fd.fotparams[9].flat)),  # y
+        np.full(n_grid, np.median(fd.fotparams[10].flat)), # err
+        np.full(n_grid, np.median(fd.fotparams[11].flat)), # cat_x
+        np.full(n_grid, np.median(fd.fotparams[12].flat)), # cat_y
+        np.full(n_grid, np.median(fd.fotparams[13].flat)), # airmass_abs
+    ]
+
+    # Evaluate model on the grid
+    try:
+        model_grid = ffit.model(np.array(ffit.fitvalues), tuple(grid_fotparams))
+        model_grid = model_grid.reshape(grid_resolution, grid_resolution)
+
+        # Subtract the mean to show only variation (removes baseline offset)
+        grid_correction = model_grid - np.mean(model_grid)
+
+        # Plot the model subpixel sensitivity as a mesh/heatmap
+        im = ax.pcolormesh(subpix_grid_x, subpix_grid_y, grid_correction,
+                          cmap='RdBu_r', alpha=0.7, shading='auto',
+                          vmin=-0.05, vmax=0.05)
+        plt.colorbar(im, ax=ax, label='Model Subpixel Sensitivity [mag]')
+    except Exception as e:
+        print(f"Warning: Could not evaluate model grid: {e}")
+
+    # Data points: show data - model(floor(position))
+    # This is what's left after removing the model at integer pixel positions
+    data_residuals = fd.x - model_rounded
+    data_residuals_clipped = np.clip(data_residuals, -0.1, 0.1)
+
+    # Plot masked points as small gray dots
+    ax.scatter(subpixel_x[~current_mask], subpixel_y[~current_mask],
+              c='gray', alpha=0.3, s=2, edgecolors='none')
+
+    # Plot active data points: data minus model at integer positions
+    sc = ax.scatter(subpixel_x[current_mask], subpixel_y[current_mask],
+                   c=data_residuals_clipped[current_mask], cmap='RdBu_r',
+                   s=15, alpha=0.8, edgecolors='black', linewidths=0.3,
+                   vmin=-0.05, vmax=0.05)
+
     ax.set_xlabel('Subpixel X')
     ax.set_ylabel('Subpixel Y')
-    ax.set_title('Subpixel X/Y Map of Corrections')
-    plt.colorbar(sc, ax=ax, label='Subpixel Correction')
+    ax.set_title('Subpixel Sensitivity: Model (mesh) + Data (points)')
     ax.set_aspect('equal')
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
     
     plt.tight_layout()
     
     # Save the plot
-    output_filename = f"{output_base}-corrections.png"
+    output_filename = f"{output_base}-corr.png"
     plt.savefig(output_filename, dpi=100, bbox_inches='tight')
     plt.close()
     

@@ -6,7 +6,7 @@ Astrometric error model fitting
 """
 
 import numpy as np
-import termfit
+from pyrt.core import termfit
 import logging
 
 class ErrorModelFit(termfit.termfit):

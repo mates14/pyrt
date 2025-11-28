@@ -13,16 +13,14 @@ import scipy
 from astropy.io import fits
 import astropy.wcs
 import collections
-import termfit
+from pyrt.core import termfit
 import logging
-
-import numpy as np
 
 rad = np.pi/180.0
 
 class zpnfit(termfit.termfit):
-    """WCS/ZPN astrometry fitter
-    Primarily made to fit ZPN, but can deal also with TAN,ZEA and AZP
+    """WCS projection astrometry fitter
+    Supports TAN, ZPN, ZEA, AZP, ARC projections
     """
 
     PROJ_TAN = 0
@@ -30,7 +28,8 @@ class zpnfit(termfit.termfit):
     PROJ_ZEA = 2
     PROJ_AZP = 3
     PROJ_SZP = 4
-    projections = [ "TAN", "ZPN", "ZEA", "AZP", "SZP" ]
+    PROJ_ARC = 5
+    projections = [ "TAN", "ZPN", "ZEA", "AZP", "SZP", "ARC" ]
     print_in_arcsec = [ "CD1_1", "CD1_2", "CD2_1", "CD2_2" ]
     modelname="FITZPN astrometric model"
 
@@ -351,11 +350,15 @@ class zpnfit(termfit.termfit):
 
         # the actual kernel of projection:
         if proj == self.PROJ_ZEA:
-            r = np.sqrt(2*(1-np.sin(u)))
+            # ZEA: r = sqrt(2*(1-sin(θ))) where θ is native latitude
+            # Since u is angular distance from pole: θ = 90° - u, so sin(θ) = cos(u)
+            r = np.sqrt(2*(1-np.cos(u)))
             x1 = -r * np.cos(b) / rad
             y1 = r * np.sin(b) / rad
 
-        elif proj == self.PROJ_ZPN:
+        elif proj == self.PROJ_ZPN or proj == self.PROJ_ARC:
+            # ZPN: zenithal polynomial with arbitrary radial function r(u)
+            # ARC: zenithal equidistant (r = u), equivalent to ZPN with only PV2_1=1
             r = 0
             for n in range(0,10):
                 if PV2[n] != 0:
@@ -364,37 +367,74 @@ class zpnfit(termfit.termfit):
             y1 = r * np.sin(b) / rad
 
         elif proj == self.PROJ_AZP:
+            # AZP: zenithal/azimuthal perspective projection
+            # Parameters: mu (distance), gamma (tilt angle) in degrees
             mu = PV2[1]
-            gamma = PV2[2] if len(PV2) > 2 else 0.0  # Default gamma to 0 if not provided
+            gamma = PV2[2]
+
+            # Log field range once for diagnostic purposes
+            if not hasattr(self, '_azp_field_debug_done'):
+                u_deg = np.degrees(u)
+                logging.debug(f"AZP: Field range u = {np.min(u_deg):.3f}° to {np.max(u_deg):.3f}° (angular distance from center)")
+                self._azp_field_debug_done = True
 
             # Convert gamma to radians
-            gamma_rad = gamma * np.pi / 180.0
+            gamma_rad = gamma * rad
 
-            # Calculate intermediate values
-            rho = np.sqrt((mu + 1)**2 - (mu + np.cos(u))**2)
-            omega = mu + np.cos(u)
+            # u is angular distance from pole, so theta (native latitude) = 90° - u
+            # Therefore: sin(theta) = cos(u), cos(theta) = sin(u)
+            # phi = b (position angle)
 
-            # Calculate x and y
-            x1 = -rho * np.sin(b) / (omega * np.cos(gamma_rad) - rho * np.sin(gamma_rad))
-            y1 = rho * (omega * np.sin(gamma_rad) + rho * np.cos(gamma_rad)) / \
-                 (omega * np.cos(gamma_rad) - rho * np.sin(gamma_rad)) / np.cos(b)
+            # From wcstools azpfwd():
+            # s = tan(gamma) * cos(phi)
+            # t = (mu + sin(theta)) + cos(theta) * s
+            # r = (mu+1) * cos(theta) / t
+            # x = r * sin(phi)
+            # y = -r * cos(phi) * sec(gamma)
 
-#            r = (PV2[1]+1)*np.sin(u)/(PV2[1]+np.cos(u))
-#            x1 = -r * np.cos(b) / rad
-#            y1 = r * np.sin(b) / rad
+            # Precompute trigonometric functions
+            cos_gamma = np.cos(gamma_rad)
+            sin_gamma = np.sin(gamma_rad)
+
+            # Avoid division by zero for gamma
+            if abs(cos_gamma) < 1e-10:
+                cos_gamma = 1e-10
+
+            tan_gamma = sin_gamma / cos_gamma
+            sec_gamma = 1.0 / cos_gamma
+
+            s = tan_gamma * np.cos(b)
+            t = (mu + np.cos(u)) + np.sin(u) * s
+
+            # Protect against division by zero
+            t = np.where(np.abs(t) < 1e-10, 1e-10, t)
+
+            r = (mu + 1.0) * np.sin(u) / t
+
+            # Use same coordinate convention as TAN/ZEA/ZPN
+            x1 = -r * np.cos(b) / rad
+            y1 = r * np.sin(b) / rad
 
         elif proj == self.PROJ_SZP:
+            # SZP: slant zenithal perspective projection
+            # Parameters: mu (distance), phi_c (longitude), theta_c (latitude) in degrees
             mu = PV2[1]
-            phi0 = PV2[2] * rad
-            theta0 = PV2[3] * rad
+            phi_c = PV2[2] * rad
+            theta_c = PV2[3] * rad
 
-            x = -mu * np.cos(theta0) * np.sin(phi0)
-            y = mu * np.cos(theta0) * np.cos(phi0)
-            z = mu * np.sin(theta0) + 1
+            # Projection point coordinates
+            xp = -mu * np.cos(theta_c) * np.sin(phi_c)
+            yp = mu * np.cos(theta_c) * np.cos(phi_c)
+            zp = mu * np.sin(theta_c) + 1
 
-            denominator = z - (1 - np.sin(u))
-            x1 = -(z * np.cos(u) * np.cos(b) - x * (1 - np.sin(u))) / denominator / rad
-            y1 = (z * np.cos(u) * np.sin(b) - y * (1 - np.sin(u))) / denominator / rad
+            # u is angular distance from pole, so theta (native latitude) = 90° - u
+            # Therefore: sin(theta) = cos(u), cos(theta) = sin(u)
+            s = 1.0 - np.cos(u)  # s = 1 - sin(theta)
+            denominator = zp - s
+
+            # Forward projection formulas from wcstools
+            x1 = (zp * np.sin(u) * np.sin(b) - xp * s) / denominator / rad
+            y1 = -(zp * np.sin(u) * np.cos(b) + yp * s) / denominator / rad
 
         else: # Default to TAN projection
             r = np.tan(u)

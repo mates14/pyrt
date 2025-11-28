@@ -6,7 +6,7 @@ import shutil
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
-import zpnfit
+from pyrt.core import zpnfit
 
 def create_grid_points(naxis1, naxis2, ngrid=100):
     """Create grid points with denser sampling near edges and center"""
@@ -188,32 +188,35 @@ def apply_sip(x, y, a_coeffs, b_coeffs, order):
                 dy += b_coeffs[i,j] * xp
     return dx, dy
 
-if __name__ == "__main__":
-    import sys
-    
+def main():
+    """Convert ZPN FITS files to TAN projection with SIP corrections."""
     if len(sys.argv) != 2:
         print(f"Usage: {sys.argv[0]} <fits_file>")
         sys.exit(1)
-        
+
     fitsfile = sys.argv[1]
     outname = fitsfile.replace('.fits', '_tan.fits')
-    
+
     # First copy the input file
     if os.path.exists(outname):
         os.unlink(outname)
     shutil.copy2(fitsfile, outname)
-    
+
     # Read input file
     hdul = fits.open(fitsfile)
     header = hdul[0].header
     hdul.close()
-    
+
     # Try different SIP orders
 #    for order in [3]:
 #        print(f"\n=== Testing SIP order {order} ===")
     fitter, rms = zpn_to_tan_mesh(header, ngrid=200, sip_order=3)
     print(f"\nRMS residual: {rms:.3f} pixels")
     #print(f"Final RMS: {rms:.3f} pixels")
-    
+
     # Write best solution to file
     fitter.write(outname)
+
+
+if __name__ == "__main__":
+    main()

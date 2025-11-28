@@ -12,7 +12,7 @@ import astropy.table
 import astropy.io.fits
 
 from typing import Optional, Tuple
-from file_utils import get_sextractor_binary
+from pyrt.utils.file_utils import get_sextractor_binary
 
 def read_options(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
