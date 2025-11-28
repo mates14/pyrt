@@ -489,8 +489,11 @@ def main():
         if det is not None and 'keywords' in det.meta:
             del det.meta['keywords']
 
+        # Derive catalog path from image path
+        cat_path = os.path.splitext(filef)[0] + ".cat"
+
         det = process_detections(det, filef,
-                               cat_path=detf,
+                               cat_path=cat_path,
                                filter_override=options.filter,
                                target_photometry=options.target_photometry,
                                verbose=options.verbose)
