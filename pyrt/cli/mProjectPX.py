@@ -48,7 +48,7 @@ import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 import subprocess
-from zpn_to_tan import zpn_to_tan_mesh
+from pyrt.cli.zpn_to_tan import zpn_to_tan_mesh
 
 # This is to silence a particular annoying warning (MJD not present in a fits file)
 import warnings
