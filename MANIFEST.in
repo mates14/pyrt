@@ -1,0 +1,15 @@
+# Include documentation
+include README.md
+include LICENSE
+recursive-include docs *.md
+
+# Include requirements
+include requirements.txt
+
+# Include configuration examples if any
+include pyproject.toml
+
+# Exclude unnecessary files
+global-exclude __pycache__
+global-exclude *.py[co]
+global-exclude .DS_Store

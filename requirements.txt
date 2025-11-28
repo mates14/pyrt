@@ -1,0 +1,21 @@
+# Core dependencies for PYRT - Photometric Reduction Tool
+# Also specified in pyproject.toml
+
+# Scientific computing
+numpy>=1.20
+scipy>=1.7
+
+# Astronomy-specific
+astropy>=5.0
+
+# Visualization
+matplotlib>=3.3
+
+# Machine learning (for KDTree in star matching)
+scikit-learn>=1.0
+
+# Optional external tools (not pip-installable):
+# - SExtractor (source extraction)
+# - IRAF (optional, for precision aperture photometry)
+# - astrometry.net (for initial WCS solutions)
+# - Montage (optional, for fast image reprojection)
