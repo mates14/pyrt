@@ -19,6 +19,7 @@ from astropy.coordinates import SkyCoord, EarthLocation
 from astropy.time import Time
 import astropy.units as u
 from pyrt.utils.file_utils import try_sex, try_ecsv, try_img
+from pyrt.cli.field_solve import validate_and_fix_wcs
 
 from typing import Optional, Tuple
 
@@ -325,12 +326,29 @@ def remove_junk(hdr):
 
 def process_detections(det: astropy.table.Table,
                       fits_path: str,
+                      cat_path: Optional[str] = None,
                       filter_override: Optional[str] = None,
                       target_photometry: bool = True,
                       verbose: bool = False) -> astropy.table.Table:
-    """Main detection processing function that can be called programmatically"""
+    """Main detection processing function that can be called programmatically
+
+    Args:
+        det: Detection catalog table
+        fits_path: Path to FITS image file
+        cat_path: Path to .cat catalog file (used for WCS solving if needed)
+        filter_override: Override filter from command line
+        target_photometry: Enable target photometry
+        verbose: Print debugging info
+    """
 
     det.meta['FITSFILE'] = fits_path
+
+    # Validate and fix WCS if needed (before reading header)
+    # This checks if WCS is valid and runs solve-field if necessary
+    # Use the .cat file we already loaded for faster solving
+    wcs_ok = validate_and_fix_wcs(fits_path, cat_file=cat_path, verbose=verbose)
+    if not wcs_ok:
+        print(f"Warning: WCS validation/fixing failed for {fits_path}, proceeding anyway...")
 
     # remove zeros in the error column
     det['MAGERR_AUTO'] = np.sqrt(det['MAGERR_AUTO']*det['MAGERR_AUTO']+0.0005*0.0005)
@@ -466,6 +484,7 @@ def main():
             del det.meta['keywords']
 
         det = process_detections(det, filef,
+                               cat_path=detf,
                                filter_override=options.filter,
                                target_photometry=options.target_photometry,
                                verbose=options.verbose)

@@ -66,6 +66,7 @@ pyrt-phcat = "pyrt.cli.phcat:main"
 pyrt-cat2det = "pyrt.cli.cat2det:main"
 
 # Astrometric utilities
+pyrt-field-solve = "pyrt.cli.field_solve:main"
 pyrt-zpn-to-tan = "pyrt.cli.zpn_to_tan:main"
 pyrt-mproject = "pyrt.cli.mProjectPX:main"
 
