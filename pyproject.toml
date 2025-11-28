@@ -75,7 +75,7 @@ pyrt-fits-overlap = "pyrt.cli.fits_overlap:main"
 pyrt-f2cj = "pyrt.cli.f2cj:main"
 
 # General purpose tools
-pyrt-combine-images = "pyrt.cli.combine:main"
+pyrt-combine = "pyrt.cli.combine:main"
 pyrt-cphead = "pyrt.cli.cphead:main"
 pyrt-edhead = "pyrt.cli.edhead:main"
 pyrt-sky2xy = "pyrt.cli.sky2xy:main"
