@@ -242,14 +242,20 @@ def open_files(arg, verbose=False):
         detf, det = try_ecsv(os.path.splitext(arg)[0] + ".cat", verbose)
 
     if det is None: # os.system does not raise an exception if it fails
-        #cmd = f"sscat-noradec {arg}"
+        # Try installed command first, fall back to module for source runs
+        import shutil
+        if shutil.which("pyrt-phcat"):
+            cmd = f"pyrt-phcat {arg}"
+        else:
+            # Fall back to running as module (for source/development)
+            cmd = f"{sys.executable} -m pyrt.cli.phcat {arg}"
+
         try:
-            cmd = f"phcat.py {arg}"
             if verbose: print(f"Running {cmd}")
             os.system(cmd)
         except:
             print(f"Warning: Tried and failed to execute {cmd}")
-            
+
         detf, det = try_ecsv(os.path.splitext(arg)[0] + ".cat",verbose)
         if det is None: detf, det = try_sex(arg + ".xat", verbose)
 
