@@ -135,6 +135,75 @@ def remove_pv_coefficients(fits_file, verbose=False):
         return False
 
 
+def create_xyls_from_cat(cat_file, fits_file, output_xyls, verbose=False):
+    """Convert a .cat file to .xyls format for astrometry.net
+
+    The .xyls format is a FITS file with:
+    - Primary HDU with AN_FILE='XYLS' marker
+    - Binary table extension with X, Y coordinates and optionally FLUX
+
+    Args:
+        cat_file: Input .cat file from phcat
+        fits_file: FITS image file (to get dimensions)
+        output_xyls: Output .xyls filename
+        verbose: Print debugging info
+
+    Returns:
+        (success: bool, width: int, height: int) tuple
+    """
+    try:
+        # Read the catalog
+        cat = astropy.io.ascii.read(cat_file, format='ecsv')
+
+        # Check required columns
+        if 'X_IMAGE' not in cat.colnames or 'Y_IMAGE' not in cat.colnames:
+            if verbose:
+                print(f"Warning: {cat_file} missing X_IMAGE/Y_IMAGE columns")
+            return (False, 0, 0)
+
+        # Get image dimensions
+        with pyfits.open(fits_file) as hdul:
+            header = hdul[0].header
+            imagew = header.get('NAXIS1', 0)
+            imageh = header.get('NAXIS2', 0)
+
+        # Create minimal primary HDU with AN_FILE marker
+        primary = pyfits.PrimaryHDU()
+        primary.header['AN_FILE'] = ('XYLS', 'Astrometry.net file type')
+
+        # Create binary table with X, Y, and optionally FLUX
+        # Use numpy arrays with explicit dtype for double precision float (format='1D')
+        x_col = pyfits.Column(name='X', format='1D',
+                              array=cat['X_IMAGE'].astype(numpy.float64))
+        y_col = pyfits.Column(name='Y', format='1D',
+                              array=cat['Y_IMAGE'].astype(numpy.float64))
+
+        cols = [x_col, y_col]
+
+        # Add FLUX if available (helps solve-field prioritize bright stars)
+        if 'FLUX_AUTO' in cat.colnames:
+            flux_col = pyfits.Column(name='FLUX', format='1D',
+                                    array=cat['FLUX_AUTO'].astype(numpy.float64))
+            cols.append(flux_col)
+
+        # Create the binary table HDU
+        tbhdu = pyfits.BinTableHDU.from_columns(cols)
+
+        # Create HDU list and write
+        hdul = pyfits.HDUList([primary, tbhdu])
+        hdul.writeto(output_xyls, overwrite=True)
+
+        if verbose:
+            print(f"Created {output_xyls} with {len(cat)} sources")
+
+        return (True, imagew, imageh)
+
+    except Exception as e:
+        if verbose:
+            print(f"Error creating .xyls file: {e}")
+        return (False, 0, 0)
+
+
 def validate_and_fix_wcs(fits_file, cat_file=None, scale=None, time_limit=15, verbose=False):
     """Validate WCS and fix it if needed.
 
@@ -295,37 +364,19 @@ class AstrometryScript:
 
             # Handle catalog file if provided
             xyls_file = None
+            img_width = None
+            img_height = None
             if cat_file and os.path.exists(cat_file):
-                try:
-                    # Read the catalog (ECSV format from phcat.py)
-                    cat = astropy.io.ascii.read(cat_file, format='ecsv')
-
-                    # Extract X and Y positions (standard SExtractor columns)
-                    if 'X_IMAGE' in cat.colnames and 'Y_IMAGE' in cat.colnames:
-                        # Create xyls (FITS binary table) for solve-field
-                        xyls_data = astropy.table.Table()
-                        xyls_data['X'] = cat['X_IMAGE']
-                        xyls_data['Y'] = cat['Y_IMAGE']
-
-                        # Add FLUX if available (helps solve-field prioritize bright stars)
-                        if 'FLUX_AUTO' in cat.colnames:
-                            xyls_data['FLUX'] = cat['FLUX_AUTO']
-
-                        xyls_file = os.path.join(odir, 'input.xyls')
-                        xyls_data.write(xyls_file, format='fits', overwrite=True)
-                        print(f"Using catalog from {cat_file} ({len(xyls_data)} stars)")
-                    else:
-                        print(f"Warning: {cat_file} missing X_IMAGE/Y_IMAGE columns, solve-field will detect stars")
-                except Exception as e:
-                    print(f"Warning: Could not read {cat_file}: {e}, solve-field will detect stars")
+                xyls_file = os.path.join(odir, 'input.xyls')
+                success, img_width, img_height = create_xyls_from_cat(cat_file, fits_file, xyls_file, verbose=True)
+                if not success:
+                    xyls_file = None
+                    img_width = None
+                    img_height = None
+                    print(f"Warning: Could not create .xyls from {cat_file}, solve-field will detect stars")
 
             #solve_field=[self.astrometry_bin + '/solve-field', '-D', odir,'--no-plots', '--no-fits2fits']
             solve_field=[self.astrometry_bin + '/solve-field', '-D', odir,'--no-plots']
-
-            # Use catalog file if available
-            if xyls_file:
-                solve_field.append('--xyls')
-                solve_field.append(xyls_file)
 
 
             if zoom is None:
@@ -370,7 +421,20 @@ class AstrometryScript:
     #            solve_field.append('--radius')
     #            solve_field.append('15')
 
+            # Always pass the FITS image (needed for WCS output)
             solve_field.append(infpath)
+
+            # If we have a .xyls file from the catalog, also pass it
+            # solve-field will use it for source positions instead of running source extraction
+            if xyls_file:
+                solve_field.append('--width')
+                solve_field.append(str(img_width))
+                solve_field.append('--height')
+                solve_field.append(str(img_height))
+                # Sort by FLUX (brightest first - descending order is default)
+                solve_field.append('--sort-column')
+                solve_field.append('FLUX')
+                solve_field.append(xyls_file)
 
             #print(solve_field)
           
