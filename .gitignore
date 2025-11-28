@@ -126,7 +126,10 @@ astmodel.ecsv
 darks/
 landolt/
 stetson/
-atlas/
 test_*.ecsv
 fit.log
 gaia_bright_stars.fits
+
+# Atlas compiled binary (optional tool)
+atlas/atlas
+atlas/*.o
