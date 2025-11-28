@@ -1,1 +1,3 @@
 LDLIBS=-lm
+
+default: atlas
