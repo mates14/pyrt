@@ -492,10 +492,11 @@ def refit_astrometry(det, data, options):
 
     try:
         camera = det.meta['CCD_NAME']
+        logging.info(f"CCD_NAME is {camera}")
     except KeyError:
         camera = "C0"
+        logging.info(f"CCD_NAME not found, setting {camera}")
 
-    logging.info(f"CAMERA is {camera}")
     if options.szp:
         zpntest = zpnfit.zpnfit(proj="AZP")
         zpntest.fitterm(["PV2_1"], [1])
