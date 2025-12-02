@@ -405,6 +405,8 @@ def update_det_file(fitsimgf: str, options): #  -> Tuple[Optional[Table], str]:
         cmd.append("-v")
     if options.filter:
         cmd.extend(["-f", options.filter])
+    if options.force_regen:
+        cmd.append("--force-regen")
     cmd.append(fitsimgf)
 
     print(f"Running: {' '.join(cmd)}")
@@ -416,10 +418,103 @@ def update_det_file(fitsimgf: str, options): #  -> Tuple[Optional[Table], str]:
 
     return try_det(os.path.splitext(fitsimgf)[0] + ".det", options.verbose)
 
+def validate_det_file_keywords(det, detf):
+    """
+    Validate that a .det file contains all critical keywords required for processing.
+
+    Returns:
+        tuple: (is_valid: bool, missing_keywords: list)
+    """
+    # Critical keywords that MUST be present in .det file (set by cat2det)
+    # These are used throughout dophot and match_stars without defensive checks
+    critical_keywords = [
+        # WCS and field geometry (used for catalog queries and coordinate transforms)
+        'FIELD',      # Field size in degrees - used in match_stars.py:271
+        'CTRRA',      # Field center RA - used in match_stars.py:283
+        'CTRDEC',     # Field center DEC - used in match_stars.py:284
+        'CTRX',       # Image center X - used in dophot.py:476, data_handling.py:348
+        'CTRY',       # Image center Y - used in dophot.py:477, data_handling.py:349
+        'IMGAXIS1',   # Image width - used in dophot.py:609
+        'IMGAXIS2',   # Image height - used in dophot.py:609
+
+        # Image properties (used for PSF and background calculations)
+        'FWHM',       # Full width half maximum - used in dophot.py:628
+        'BGSIGMA',    # Background sigma - used in dophot.py:628
+
+        # Observation metadata (used in output and corrections)
+        'FITSFILE',   # FITS filename - used in dophot.py:63, 547, 586, 689
+        'FILTER',     # Filter name - used in dophot.py:689, 820
+        'JD',         # Julian date - used in dophot.py:677, 689
+        'EXPTIME',    # Exposure time - used in dophot.py:63, 677, 689
+        'AIRMASS',    # Airmass - used in dophot.py:567, 686, 689
+
+        # Observatory location (used for airmass calculations in data_handling.py)
+        'LATITUDE',   # Observatory latitude - used in data_handling.py:327
+        'LONGITUD',   # Observatory longitude - used in data_handling.py:328
+        'ALTITUDE',   # Observatory altitude - used in data_handling.py:329
+    ]
+
+    # Important keywords that should be present but have some defensive handling
+    important_keywords = [
+        'LIMFLX3',    # 3-sigma detection limit - used in match_stars.py:189, dophot.py:54
+                      # Note: may not be set by cat2det if too few detections (see cat2det.py:186)
+        'OBSID',      # Observation ID - used in dophot.py:689
+        'OBJRA',      # Target RA - used in match_stars.py:82, 88 (set to -100 if no target)
+        'OBJDEC',     # Target DEC - used in match_stars.py:82, 88 (set to -100 if no target)
+    ]
+
+    missing_critical = []
+    missing_important = []
+
+    for keyword in critical_keywords:
+        if keyword not in det.meta:
+            missing_critical.append(keyword)
+
+    for keyword in important_keywords:
+        if keyword not in det.meta:
+            missing_important.append(keyword)
+
+    return (len(missing_critical) == 0, missing_critical, missing_important)
+
 def should_update_det_file(det, fitsimg, detf, fitsimgf, options):
     """Determine if the .det file should be updated."""
     if det is None and fitsimg is not None:
         return True
+
+    # Force regeneration if requested
+    if options.force_regen:
+        if fitsimg is None:
+            print(f"\nERROR: Cannot regenerate .det file - no FITS file found.")
+            print(f"To regenerate '{detf}', you need the corresponding FITS file.")
+            import sys
+            sys.exit(1)
+        if det is not None:
+            logging.info("Force regeneration requested (--force-regen), regenerating .det file...")
+        return True
+
+    # Validate critical keywords in .det file
+    if det is not None:
+        is_valid, missing_critical, missing_important = validate_det_file_keywords(det, detf)
+
+        if not is_valid:
+            print(f"\nERROR: .det file '{detf}' is missing critical keywords: {', '.join(missing_critical)}")
+            print("This .det file was likely created with an older version of pyrt or is corrupted.")
+            print("Please regenerate the .det file using one of these methods:")
+            if fitsimgf:
+                print(f"  1. Run: pyrt-dophot --force-regen {fitsimgf}")
+                print(f"  2. Delete {detf} and re-run dophot with the FITS file")
+                print(f"  3. Manually run: pyrt-cat2det {fitsimgf}")
+            else:
+                print(f"  1. Find the original FITS file and run: pyrt-cat2det <fits_file>")
+                print(f"  2. Or run: pyrt-dophot --force-regen <fits_file>")
+            import sys
+            sys.exit(1)
+
+        # Warn about missing important keywords but allow processing to continue
+        if missing_important:
+            logging.warning(f".det file '{detf}' is missing non-critical keywords: {', '.join(missing_important)}")
+            logging.warning("Processing will continue but some features may not work correctly.")
+
     if det is not None and fitsimg is not None and options.autoupdate:
         return os.path.getmtime(fitsimgf) > os.path.getmtime(detf)
     return False

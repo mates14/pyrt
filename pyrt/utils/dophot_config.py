@@ -145,6 +145,7 @@ def parse_arguments(args=None):
     parser.add_argument("-s", "--stars", action='store_true', default=config.get('stars', 'False'), help="Output fitted numbers to a file")
     parser.add_argument("-S", "--sip", help="Order of SIP refinement for the astrometric solution (0=disable)", type=int)
     parser.add_argument("-u", "--autoupdate", action='store_true', help="Update .det if .fits is newer", default=config.get('autoupdate', 'False'))
+    parser.add_argument("--force-regen", action='store_true', help="Force regeneration of .det file (runs phcat+cat2det)", default=False)
     parser.add_argument("-U", "--terms",
                         help="Extended term specification: PC=0.2 (initial value), #PC=0.2 (fixed), @term (stepwise), &term (always), .p3/.r2 (macros). Supports mixed strategies (cf. terms-explained.md)",
                         type=str, default=config.get('terms', ''))
