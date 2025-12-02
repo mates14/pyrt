@@ -457,7 +457,7 @@ def validate_det_file_keywords(det, detf):
     # Important keywords that should be present but have some defensive handling
     important_keywords = [
         'LIMFLX3',    # 3-sigma detection limit - used in match_stars.py:189, dophot.py:54
-                      # Note: may not be set by cat2det if too few detections (see cat2det.py:186)
+                      # Note: may not be set by cat2det if too few detections (see pyrt-cat2det:186)
         'OBSID',      # Observation ID - used in dophot.py:689
         'OBJRA',      # Target RA - used in match_stars.py:82, 88 (set to -100 if no target)
         'OBJDEC',     # Target DEC - used in match_stars.py:82, 88 (set to -100 if no target)

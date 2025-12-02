@@ -24,8 +24,8 @@ import json
 import scipy.optimize as fit
 from sklearn.neighbors import KDTree,BallTree
 
-import zpnfit
-import fotfit
+from pyrt.core import zpnfit
+from pyrt.core import fotfit
 
 # TRAJECTORY-BASED MOVING OBJECT TRACKING
 class MovingObjectTrail:

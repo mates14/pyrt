@@ -22,10 +22,10 @@ Where corrections include:
 
 ## The Extended -U Syntax
 
-Instead of specifying long lists of terms and options, dophot3 uses an elegant shorthand notation:
+Instead of specifying long lists of terms and options, pyrt-dophot uses an elegant shorthand notation:
 
 ```bash
-dophot3 image.fits -U '@.p2,&.r2,#PC=0.1'
+pyrt-dophot image.fits -U '@.p2,&.r2,#PC=0.1'
 ```
 
 ### Modifiers: How to Handle Each Term
@@ -88,7 +88,7 @@ dophot3 image.fits -U '@.p2,&.r2,#PC=0.1'
 
 ### Color and Atmospheric Polynomials
 
-dophot3 loads **five magnitude filters** that create **four colors** for photometric modeling:
+pyrt-dophot loads **five magnitude filters** that create **four colors** for photometric modeling:
 
 #### Color Variables (C, D, E, F)
 - **C** = color1 = (2nd filter - 1st filter) = canonically (2nd bluest - bluest)
@@ -144,7 +144,7 @@ Adding `*` to any term makes it **per-image**:
 The `-y` option is a time-honored tradition that means "fit transparency gradients per-image":
 
 ```bash
-dophot3 -y images*.fits     # Old reliable way
+pyrt-dophot -y images*.fits     # Old reliable way
 ```
 
 **What happens under the hood:**
@@ -168,7 +168,7 @@ dophot3 -y images*.fits     # Old reliable way
 -U '#PC=0.12,&*PX,&*PY'
 
 # Use -y for pointing, add custom per-image focus term
-dophot3 -y -U '*P2R' images*.fits
+pyrt-dophot -y -U '*P2R' images*.fits
 ```
 
 ## Human-Friendly Notation
@@ -220,7 +220,7 @@ Examples:
 
 ### Example 5: Variable Conditions (Multi-Night Data)
 ```bash
-dophot3 -y -U '@.p2,&*P2R,#PC=0.1' night1/*.fits night2/*.fits
+pyrt-dophot -y -U '@.p2,&*P2R,#PC=0.1' night1/*.fits night2/*.fits
 ```
 **Result**:
 - `-y` adds per-image transparency corrections (each image gets its own PX, PY for clouds)
@@ -283,7 +283,7 @@ The system automatically resolves conflicts using logical precedence - no crypti
 
 ### 2. Per-Image Beats Global Rule: `*` Wins Over Non-`*`
 ```bash
-dophot3 -y -U '.p2'       # Result: Per-image PX,PY from -y; global PX,PY removed
+pyrt-dophot -y -U '.p2'       # Result: Per-image PX,PY from -y; global PX,PY removed
 -U '&*PX,@PX'            # Result: Per-image PX always fitted; global PX ignored
 ```
 **Why**: If you're fitting something per-image, you obviously don't want a global version too.
@@ -300,7 +300,7 @@ dophot3 -y -U '.p2'       # Result: Per-image PX,PY from -y; global PX,PY remove
 
 ### Real-World Example: Conflict Resolution in Action
 ```bash
-dophot3 -y -U '@.p3,&.p2,#PXY=0.02' images*.fits
+pyrt-dophot -y -U '@.p3,&.p2,#PXY=0.02' images*.fits
 ```
 
 **What the system does automatically:**
@@ -324,37 +324,37 @@ No conflicts, no duplicates, no confusion - just exactly what you meant!
 ### For Beginners (Start Here!)
 ```bash
 # Basic spatial correction
-dophot3 -U '@.p2' images.fits
+pyrt-dophot -U '@.p2' images.fits
 
 # Including pointing variation
-dophot3 -y -U '@.p2' images*.fits
+pyrt-dophot -y -U '@.p2' images*.fits
 
 # Add color correction
-dophot3 -y -U '@.p2,PC' images*.fits
+pyrt-dophot -y -U '@.p2,PC' images*.fits
 ```
 
 ### For Experienced Users
 ```bash
 # Multi-night survey data
-dophot3 -y -U '@.p3,&.r2,PC,PD' night*/*.fits
+pyrt-dophot -y -U '@.p3,&.r2,PC,PD' night*/*.fits
 
 # Known instrument calibration
-dophot3 -y -U '#PC=0.12,#PD=0.03,@.p2' science*.fits
+pyrt-dophot -y -U '#PC=0.12,#PD=0.03,@.p2' science*.fits
 
 # Changing aperture conditions (frost/dew on primary mirror)
-dophot3 -y -U '@.p2,&*P2R' night_long_sequence/*.fits
+pyrt-dophot -y -U '@.p2,&*P2R' night_long_sequence/*.fits
 ```
 
 ### For Advanced Calibration
 ```bash
 # Full polynomial exploration
-dophot3 -y -U '@.p4,@.r3,@.c2,@.d2' calibration/*.fits
+pyrt-dophot -y -U '@.p4,@.r3,@.c2,@.d2' calibration/*.fits
 
 # Conservative but thorough
-dophot3 -y -U '&.p2,&.r2,&PC,@.p3' survey_data/*.fits
+pyrt-dophot -y -U '&.p2,&.r2,&PC,@.p3' survey_data/*.fits
 
 # Fixed from previous runs
-dophot3 -U '#PC=0.123,#PD=0.045,#PR=-0.02,@.p2' followup*.fits
+pyrt-dophot -U '#PC=0.123,#PD=0.045,#PR=-0.02,@.p2' followup*.fits
 ```
 
 ## The Philosophy: Making Complexity Simple
@@ -367,7 +367,7 @@ The `-U` syntax follows a simple principle: **write what you mean**.
 
 This term syntax approach was inspired by **TPoint** by Patrick Wallace - the legendary telescope pointing modeling software. TPoint's elegant term language for fitting complex pointing models showed how powerful and intuitive a well-designed syntax can be. Just as TPoint makes telescope pointing corrections accessible through clear term notation, dophot3's `-U` syntax makes photometric calibration straightforward.
 
-The parallel is beautiful: TPoint fits for mechanical pointing errors using terms like `IH`, `ID`, `CH`, etc., while dophot3 fits for photometric systematics using terms like `PX`, `PC`, `PR`, etc. Both use the same philosophy of **domain-specific vocabulary** that matches how experts think about the problem.
+The parallel is beautiful: TPoint fits for mechanical pointing errors using terms like `IH`, `ID`, `CH`, etc., while pyrt-dophot fits for photometric systematics using terms like `PX`, `PC`, `PR`, etc. Both use the same philosophy of **domain-specific vocabulary** that matches how experts think about the problem.
 
 - Need spatial corrections? → `.p2`
 - Want the computer to decide? → `@.p2`
@@ -387,7 +387,7 @@ The result? You spend more time doing science and less time fighting with softwa
 
 ### The Universal Truth: All Sources Are Created Equal
 
-dophot3 has learned to treat **all sources of photometric information identically**. Whether your terms come from:
+pyrt-dophot has learned to treat **all sources of photometric information identically**. Whether your terms come from:
 
 - **RESPONSE headers** (embedded in FITS files from previous runs)
 - **Model files** (`-M model.ecsv`)
@@ -397,7 +397,7 @@ dophot3 has learned to treat **all sources of photometric information identicall
 
 ### The Three-Step Dance
 
-Every dophot3 run follows the same elegant choreography:
+Every pyrt-dophot run follows the same elegant choreography:
 
 #### Step 1: Gather Initial Values from Everywhere
 ```bash
@@ -433,11 +433,11 @@ The stepwise regression doesn't know or care where terms came from - it just opt
 #### Scenario 1: D50 Workflow Speed Boost 🚀
 ```bash
 # First image: Cold start (5.2 seconds)
-dophot3 img001.fits -U '.p3,.r3'
+pyrt-dophot img001.fits -U '.p3,.r3'
 # → Fits from scratch, saves RESPONSE header in FITS file
 
 # Second image: Warm start (1.2 seconds)
-dophot3 img002.fits -U '.p3,.r3'
+pyrt-dophot img002.fits -U '.p3,.r3'
 # → Loads RESPONSE automatically, pre-selects proven terms
 # → 4x speedup from intelligent warm starting!
 ```
@@ -445,10 +445,10 @@ dophot3 img002.fits -U '.p3,.r3'
 #### Scenario 2: Model Training Strategy 🧠
 ```bash
 # Step 1: Train comprehensive model
-dophot3 training_set*.fits -y -U '@.p4,@.r3,@PC,@PD' -W survey_model.ecsv
+pyrt-dophot training_set*.fits -y -U '@.p4,@.r3,@PC,@PD' -W survey_model.ecsv
 
 # Step 2: Apply to individual images
-dophot3 target001.fits -M survey_model.ecsv -U '@.p2'
+pyrt-dophot target001.fits -M survey_model.ecsv -U '@.p2'
 # → Loads survey_model terms as initial values
 # → Adds .p2 as stepwise candidates
 # → Gets best of both: proven complex model + local optimization
@@ -457,7 +457,7 @@ dophot3 target001.fits -M survey_model.ecsv -U '@.p2'
 #### Scenario 3: Mixed Source Harmony 🎵
 ```bash
 # Complex multi-source fitting
-dophot3 -M base_model.ecsv -U '#PC=0.123,@.p3' archive_imgs/*.fits
+pyrt-dophot -M base_model.ecsv -U '#PC=0.123,@.p3' archive_imgs/*.fits
 # → Model file provides: PE, PAE, color terms, radial corrections
 # → Command line fixes: PC at precisely calibrated value
 # → RESPONSE headers provide: per-image zeropoints and spatial terms
@@ -483,23 +483,23 @@ dophot3 -M base_model.ecsv -U '#PC=0.123,@.p3' archive_imgs/*.fits
 #### The Model Evolution Pattern
 ```bash
 # Generation 1: Learn from data
-dophot3 survey_night1*.fits -U '@.p3,@.r2,@PC' -W night1_model.ecsv
+pyrt-dophot survey_night1*.fits -U '@.p3,@.r2,@PC' -W night1_model.ecsv
 
 # Generation 2: Build on knowledge
-dophot3 survey_night2*.fits -M night1_model.ecsv -U '@.p3,@PD' -W night2_model.ecsv
+pyrt-dophot survey_night2*.fits -M night1_model.ecsv -U '@.p3,@PD' -W night2_model.ecsv
 # → Inherits night1 terms + explores new ones
 
 # Generation 3: Production ready
-dophot3 new_targets*.fits -M night2_model.ecsv
+pyrt-dophot new_targets*.fits -M night2_model.ecsv
 # → Fast, robust, proven calibration
 ```
 
 #### The Response Chain Technique
 ```bash
 # Each image builds on the last
-dophot3 img001.fits -U '.p3,.r3'           # → RESPONSE saved in img001
-dophot3 img002.fits -U '.p3,.r3'           # → Loads img001 RESPONSE
-dophot3 img003.fits -U '.p3,.r3,@PC'       # → Loads img002 + explores color
+pyrt-dophot img001.fits -U '.p3,.r3'           # → RESPONSE saved in img001
+pyrt-dophot img002.fits -U '.p3,.r3'           # → Loads img001 RESPONSE
+pyrt-dophot img003.fits -U '.p3,.r3,@PC'       # → Loads img002 + explores color
 # → Natural evolution of photometric model through observation sequence
 ```
 

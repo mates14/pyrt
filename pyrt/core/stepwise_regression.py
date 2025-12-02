@@ -263,7 +263,7 @@ def parse_terms(terms_string, n_images=1):
 
     result = resolve_conflicts(result)
 
-    # Zeropoint terms are now explicitly added in dophot3.py with computed values
+    # Zeropoint terms are now explicitly added in pyrt-dophot with computed values
     # No need to auto-add them here
 
     return result

@@ -352,7 +352,7 @@ class AstrometryScript:
             replace: If True, replace original file with solved version
             naxis1, naxis2: Image dimensions (optional)
             zoom: Downsample factor for solve-field
-            cat_file: Optional .cat file from phcat.py to use for star positions
+            cat_file: Optional .cat file from pyrt-phcat to use for star positions
                      instead of letting solve-field detect stars
         """
 
@@ -481,7 +481,7 @@ Examples:
   # Basic usage (solve-field detects stars):
   %(prog)s image.fits
 
-  # Use existing catalog from phcat.py (recommended):
+  # Use existing catalog from pyrt-phcat (recommended):
   %(prog)s image.fits --cat image.cat
 
   # Specify pixel scale hint:
@@ -493,7 +493,7 @@ Examples:
 
     parser.add_argument('fits_file', help='FITS image file to solve')
     parser.add_argument('--cat', dest='cat_file', metavar='FILE',
-                        help='Use catalog from phcat.py instead of letting solve-field detect stars')
+                        help='Use catalog from pyrt-phcat instead of letting solve-field detect stars')
     parser.add_argument('--scale', type=float, metavar='ARCSEC',
                         help='Pixel scale hint in arcsec/pixel (helps solve-field)')
     parser.add_argument('--time', type=int, default=15, metavar='SEC',

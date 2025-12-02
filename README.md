@@ -15,7 +15,7 @@ Currently in production use at:
 
 **Getting Started**: Just give it an astrometry.net-solved FITS file:
 ```bash
-dophot3.py your_image.fits
+pyrt-dophot your_image.fits
 ```
 The tool orchestrates source extraction (SExtractor + optionally IRAF) and performs photometric calibration and astrometric refinement, producing a self-contained `.ecsv` file ready for scientific analysis.
 
@@ -52,15 +52,15 @@ The pipeline integrates several specialized tools, each doing what it does best:
 ```
                                 FITS Image
                                     ↓
-                              astrometry.net 
+                              astrometry.net
                                     ↓
                              WCS-solved  FITS
                                     ↓
-              phcat.py: SExtractor + IRAF [or SExtractor-only]
+              pyrt-phcat: SExtractor + IRAF [or SExtractor-only]
                                     ↓
-                    cat2det.py: prepare detection table
+                   pyrt-cat2det: prepare detection table
                                     ↓
-        dophot3: photometric calibration + astrometric refinement
+        pyrt-dophot: photometric calibration + astrometric refinement
                                     ↓
                        Calibrated catalog (.ecsv)
                                     ↓
@@ -71,10 +71,10 @@ The pipeline integrates several specialized tools, each doing what it does best:
 
 - **Prerequisites**: astrometry.net for initial WCS solution
 - **dophot3 pipeline**: Python3 + astropy + scipy (portable)
-  - `phcat.py`: Orchestrates SExtractor + IRAF (or SExtractor-only mode)
-  - `cat2det.py`: Prepares detection tables with FITS metadata
+  - `pyrt-phcat`: Orchestrates SExtractor + IRAF (or SExtractor-only mode)
+  - `pyrt-cat2det`: Prepares detection tables with FITS metadata
   - `catalog.py`: Unified catalog interface supporting multiple sources
-  - `dophot3.py`: Core engine for photometric calibration and astrometric refinement
+  - `pyrt-dophot`: Core engine for photometric calibration and astrometric refinement
   - Generalized response model inspired by TPoint
   - **Catalog support**: ATLAS (local/Vizier), PanSTARRS, GAIA, SDSS, USNO-B, Makak
   - Johnson magnitude conversions available (GAIA, ATLAS)
@@ -100,7 +100,7 @@ The pipeline integrates several specialized tools, each doing what it does best:
 The system is designed to be approachable while providing powerful capabilities:
 
 ### Basic Workflow
-The `dophot3` tool is telescope-agnostic and works with astrometry.net-solved FITS images. Helper scripts (`phcat.py` wraps SExtractor+IRAF, `cat2det.py` prepares detection tables) are orchestrated automatically when needed. The tool performs photometric calibration and astrometric refinement, producing self-contained `.ecsv` catalogs.
+The `pyrt-dophot` tool is telescope-agnostic and works with astrometry.net-solved FITS images. Helper scripts (`pyrt-phcat` wraps SExtractor+IRAF, `pyrt-cat2det` prepares detection tables) are orchestrated automatically when needed. The tool performs photometric calibration and astrometric refinement, producing self-contained `.ecsv` catalogs.
 
 You can use single-image mode for individual object photometry, or multi-image mode for advanced calibration including color responses and atmospheric modeling. Multi-pass processing is supported - output `.ecsv` files can be fed back as input for iterative refinement. The "train once, apply many" workflow lets you create robust photometric models from representative images and apply them to individual observations.
 

@@ -85,19 +85,19 @@ Short forms also accepted: `n`, `w`, `s`, `d`
 
 ```bash
 # Trust header (fastest, default)
-dophot3 image.fits
+pyrt-dophot image.fits
 
 # Validate and warn about problems  
-dophot3 --filter-check=warn image.fits
+pyrt-dophot --filter-check=warn image.fits
 
 # Strict validation for critical work
-dophot3 --filter-check=strict image.fits
+pyrt-dophot --filter-check=strict image.fits
 
 # Discover filter for unknown images
-dophot3 --filter-check=discover mystery_image.fits
+pyrt-dophot --filter-check=discover mystery_image.fits
 
 # Short form
-dophot3 --filter-check=d image.fits
+pyrt-dophot --filter-check=d image.fits
 ```
 
 ### Option B: Consistency Tracking (Rejected)

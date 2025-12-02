@@ -22,7 +22,7 @@ $ pyrt-dophot               ← Installed command (namespaced, no conflicts)
 - No conflicts with other installed tools
 
 **2. Clean Source Code**
-- Source files have simple, clean names: `dophot.py`, `phcat.py`
+- Source files have simple, clean names: `dophot.py`, `pyrt-phcat`
 - Within the `pyrt.cli` package context, these names make sense
 - No need for long prefixes in imports: `from pyrt.cli import dophot`
 
@@ -36,8 +36,8 @@ $ pyrt-dophot               ← Installed command (namespaced, no conflicts)
 | Source File | Installed Command | Description |
 |-------------|-------------------|-------------|
 | `pyrt/cli/dophot.py` | `pyrt-dophot` | Main photometric calibration |
-| `pyrt/cli/phcat.py` | `pyrt-phcat` | Source extraction |
-| `pyrt/cli/cat2det.py` | `pyrt-cat2det` | Detection table preparation |
+| `pyrt/cli/pyrt-phcat` | `pyrt-phcat` | Source extraction |
+| `pyrt/cli/pyrt-cat2det` | `pyrt-cat2det` | Detection table preparation |
 | `pyrt/cli/zpn_to_tan.py` | `pyrt-zpn-to-tan` | ZPN to TAN conversion |
 | `pyrt/cli/mProjectPX.py` | `pyrt-mproject` | Fast reprojection |
 | `pyrt/cli/combine-images` | `pyrt-combine-images` | Image combination |
@@ -90,7 +90,7 @@ pyrt-cat2det catalog.cat
 
 # Not these (source file names)
 dophot.py image.fits        # Won't work
-phcat.py image.fits         # Won't work
+pyrt-phcat image.fits         # Won't work
 ```
 
 ### For Developers

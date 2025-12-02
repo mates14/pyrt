@@ -9,9 +9,9 @@ Dear wise frog, before we explore the fancy new features, let me explain what do
 dophot3 is a **telescope-agnostic photometric calibration system** that transforms your raw astronomical images into properly calibrated photometry. Here's the complete workflow:
 
 1. **Start with a FITS file** that has basic WCS (World Coordinate System) information
-2. **Extract sources:** `phcat.py your_image.fits` → creates `your_image.cat` (requires SExtractor)
-3. **Prepare detection table:** `cat2det.py your_image.cat` → creates `your_image.det` (merges source extraction with FITS metadata)
-4. **Perform photometric calibration:** `dophot3.py your_image.det` → creates `your_image.ecsv`
+2. **Extract sources:** `pyrt-phcat your_image.fits` → creates `your_image.cat` (requires SExtractor)
+3. **Prepare detection table:** `pyrt-cat2det your_image.cat` → creates `your_image.det` (merges source extraction with FITS metadata)
+4. **Perform photometric calibration:** `pyrt-dophot your_image.det` → creates `your_image.ecsv`
 
 The final `.ecsv` file contains everything: your original detections + calibrated magnitudes + improved WCS + all the metadata needed for science.
 
@@ -19,17 +19,17 @@ The final `.ecsv` file contains everything: your original detections + calibrate
 
 ```bash
 # Most basic usage - just give it a FITS file with WCS:
-dophot3.py your_image.fits
+pyrt-dophot your_image.fits
 
 # The system will automatically run the full pipeline:
-# your_image.fits → phcat.py → cat2det.py → dophot3.py → your_image.ecsv
+# your_image.fits → pyrt-phcat → pyrt-cat2det → pyrt-dophot → your_image.ecsv
 ```
 
 ### What You Get
 
 The output `.ecsv` file is **self-contained and reusable**:
 - Contains calibrated photometry for all detected sources
-- Can be fed back to dophot3.py for iterative improvements
+- Can be fed back to pyrt-dophot for iterative improvements
 - Includes astrometric solutions and photometric models
 - Ready for scientific analysis or transient detection
 
@@ -37,7 +37,7 @@ The output `.ecsv` file is **self-contained and reusable**:
 
 - **Required:** SExtractor (for initial object detection and centroid positions)
 - **Recommended:** IRAF (for precision photometry of detected objects - 100MB well invested)
-- **Alternative:** `phcat.py -I` uses SExtractor-only mode (faster, lighter, but less trusted photometry)
+- **Alternative:** `pyrt-phcat -I` uses SExtractor-only mode (faster, lighter, but less trusted photometry)
 - **Workflow:** SExtractor finds objects → IRAF measures them precisely (or SExtractor does both if using -I)
 - **Telescope agnostic:** Works with any observatory (though you might encounter squeaks with unusual setups)
 
@@ -56,7 +56,7 @@ Our frog deserves to know that dophot3 can work in two distinct modes, each with
 **How it works:**
 ```bash
 # Basic single image fitting
-dophot3.py your_image.fits -U '.p3,.r3'
+pyrt-dophot your_image.fits -U '.p3,.r3'
 ```
 
 This is the **D50 telescope workflow** - we actually run the code **twice**:
@@ -78,13 +78,13 @@ This is the **D50 telescope workflow** - we actually run the code **twice**:
 **How it works:**
 ```bash
 # Multiple images with per-image terms - synthetic flatfield with response tilt variation
-dophot3.py image1.fits image2.fits image3.fits -U '.p3,.r3,*PX,*PY,SC'
+pyrt-dophot image1.fits image2.fits image3.fits -U '.p3,.r3,*PX,*PY,SC'
 
 # The above is so common it has a shortcut: --fit-xy (-y)
-dophot3.py image1.fits image2.fits image3.fits -y -U '.p3,.r3,SC'
+pyrt-dophot image1.fits image2.fits image3.fits -y -U '.p3,.r3,SC'
 
 # Global zeropoint for survey work
-dophot3.py survey*.fits -Z -U '.p3,.r3,PA'
+pyrt-dophot survey*.fits -Z -U '.p3,.r3,PA'
 ```
 
 **Key advantages:**
@@ -129,10 +129,10 @@ A powerful strategy combines both approaches: **use multi-image fitting to creat
 
 ```bash
 # Step 1: Train the model using many images with good statistics
-dophot3.py training_set*.fits -y -U '.p3,.r3,SC,PC' -W advanced_model.ecsv
+pyrt-dophot training_set*.fits -y -U '.p3,.r3,SC,PC' -W advanced_model.ecsv
 
 # Step 2: Apply the trained model to single images
-dophot3.py target_image.fits -M advanced_model.ecsv
+pyrt-dophot target_image.fits -M advanced_model.ecsv
 ```
 
 **Why this works:**
@@ -144,7 +144,7 @@ dophot3.py target_image.fits -M advanced_model.ecsv
 **Filter-specific model logic:**
 ```bash
 # If you specify a base model name:
-dophot3.py image_g.fits -M /path/to/model
+pyrt-dophot image_g.fits -M /path/to/model
 
 # The system tries:
 # 1. /path/to/model (exact path)

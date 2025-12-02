@@ -38,7 +38,7 @@ def get_catalog_filters(catalog_name):
         logging.error(f"Unknown catalog '{catalog_name}'")
         logging.error(f"Available catalogs: {', '.join(sorted(available_catalogs))}")
         logging.error("Use one of the available catalogs with the -C option.")
-        logging.error("Example: dophot3.py -C atlas@vizier your_file.fits")
+        logging.error("Example: pyrt-dophot -C atlas@vizier your_file.fits")
         sys.exit(1)
     return catalog_info['filters']
 
