@@ -45,12 +45,19 @@ def format_polynomial_term(x_power, y_power):
 
     return result
 
-def expand_pseudo_term(term):
+def expand_pseudo_term(term, max_polynomial_degree=0):
     """
     Expands pseudo-terms like '.p3' or '.r2' into their constituent terms.
 
+    Smart radial/polynomial interaction:
+    - Since R = x² + y², radial term PxR represents a polynomial of degree 2x
+    - To avoid degeneracy, .r macros skip radial orders where 2×order ≤ max_polynomial_degree
+    - Example: .r5,.p4 → .r expands only P3R, P4R, P5R (degrees 6, 8, 10)
+
     Args:
         term (str): The term to expand (e.g., '.p3' or '.r2')
+        max_polynomial_degree (int): Maximum polynomial degree present. Radial terms
+                                      will only expand for orders where 2×order > this value.
 
     Returns:
         list: List of expanded terms
@@ -81,6 +88,13 @@ def expand_pseudo_term(term):
             order_str = term[2:] if len(term) > 2 else '1'
             pol_order = int(order_str) if order_str else 1
             for pp in range(1, pol_order + 1):
+                # For radial terms: R = x² + y², so PxR is degree 2x in x,y
+                # Skip radial orders that conflict with polynomial degrees
+                if term[1] == 'r' and max_polynomial_degree > 0:
+                    polynomial_degree_of_radial = 2 * pp
+                    if polynomial_degree_of_radial <= max_polynomial_degree:
+                        continue  # Skip this radial order to avoid degeneracy
+
                 if pp == 1:
                     # P1R → PR, P1C → PC, P1D → PD, etc. (omit the 1)
                     expanded_terms.append(f"P{term[1].upper()}")
@@ -118,6 +132,11 @@ def parse_terms(terms_string, n_images=1):
     - PC         : Use default behavior based on --use-stepwise
     - .p3        : Macros work with all modifiers
 
+    Smart radial/polynomial interaction:
+    - When both .r and .p macros are present, .p automatically excludes polynomial
+      degrees that overlap with even-order radial terms to avoid redundancy
+    - Example: '.r5,.p4' will expand .p4 but skip degrees 2 and 4 (covered by P2R and P4R)
+
     Args:
         terms_string (str): Comma-separated string of terms with modifiers
         n_images (int): Number of images for per-image term expansion
@@ -142,6 +161,24 @@ def parse_terms(terms_string, n_images=1):
         return result
 
     terms = [term.strip() for term in terms_string.split(',') if term.strip()]
+
+    # First pass: detect maximum polynomial degree for smart radial expansion
+    max_polynomial_degree = 0
+    for term in terms:
+        # Strip all modifiers to get the base term
+        clean_term = term.replace('*', '').replace('#', '').replace('@', '').replace('&', '')
+        # Remove value assignments
+        if '=' in clean_term:
+            clean_term = clean_term.split('=')[0]
+        clean_term = clean_term.strip()
+
+        # Check if this is a polynomial macro
+        if clean_term.startswith('.p') and len(clean_term) > 2:
+            try:
+                poly_order = int(clean_term[2:])
+                max_polynomial_degree = max(max_polynomial_degree, poly_order)
+            except (ValueError, IndexError):
+                pass
 
     for term in terms:
         # Parse modifiers and values
@@ -190,7 +227,8 @@ def parse_terms(terms_string, n_images=1):
             term = term_name
 
         # Expand pseudo-terms (e.g., .p3 -> P1X, PY, P1XY, etc.)
-        expanded_terms = expand_pseudo_term(term)
+        # Pass max polynomial degree so .r macros avoid degeneracy with .p terms
+        expanded_terms = expand_pseudo_term(term, max_polynomial_degree)
 
         # Handle per-image expansion if * modifier was used
         if is_per_image:
