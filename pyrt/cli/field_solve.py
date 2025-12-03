@@ -93,48 +93,67 @@ def check_wcs_needs_solving(fits_file, verbose=False):
                     print(f"WCS initialization failed for {fits_file}: {e}")
                 return True
 
-            # Test if WCS actually works - try transformations at image center
+            # Test if WCS actually works - try transformations at multiple points
+            # Test center + all 4 corners to catch polynomial divergence at edges
             try:
                 naxis1 = header.get('NAXIS1', 2048)
                 naxis2 = header.get('NAXIS2', 2048)
-                center_x = naxis1 / 2.0
-                center_y = naxis2 / 2.0
 
-                # Test pix2world
-                try:
-                    ra, dec = wcs.all_pix2world(center_x, center_y, 1)
-                except Exception as e:
-                    if verbose:
-                        print(f"WCS pix2world failed at image center: {e}")
-                    return True
+                # Test points: center + 4 corners + 4 edge midpoints
+                test_points = [
+                    (naxis1 / 2.0, naxis2 / 2.0, "center"),
+                    (100, 100, "bottom-left corner"),
+                    (naxis1 - 100, 100, "bottom-right corner"),
+                    (100, naxis2 - 100, "top-left corner"),
+                    (naxis1 - 100, naxis2 - 100, "top-right corner"),
+                ]
 
-                # Check if result is valid (RA/Dec in sensible ranges)
-                if not (0 <= ra <= 360 and -90 <= dec <= 90):
-                    if verbose:
-                        print(f"WCS gives invalid coordinates: RA={ra:.1f}, Dec={dec:.1f}")
-                    return True
+                max_error = 0.0
+                failed_points = []
 
-                # Test world2pix round-trip - this catches divergent solutions
-                try:
-                    x_back, y_back = wcs.all_world2pix(ra, dec, 1)
-                except astropy.wcs.wcs.NoConvergence as e:
-                    if verbose:
-                        print(f"WCS world2pix failed to converge (divergent solution)")
-                    return True
-                except Exception as e:
-                    if verbose:
-                        print(f"WCS world2pix failed: {e}")
-                    return True
+                for px, py, label in test_points:
+                    # Test pix2world
+                    try:
+                        ra, dec = wcs.all_pix2world(px, py, 1)
+                    except Exception as e:
+                        if verbose:
+                            print(f"WCS pix2world failed at {label}: {e}")
+                        return True
 
-                # Check round-trip accuracy (should be < 1 pixel error)
-                error = numpy.sqrt((x_back - center_x)**2 + (y_back - center_y)**2)
-                if error > 1.0:
+                    # Check if result is valid (RA/Dec in sensible ranges)
+                    if not (0 <= ra <= 360 and -90 <= dec <= 90):
+                        if verbose:
+                            print(f"WCS gives invalid coordinates at {label}: RA={ra:.1f}, Dec={dec:.1f}")
+                        return True
+
+                    # Test world2pix round-trip - this catches divergent solutions
+                    try:
+                        x_back, y_back = wcs.all_world2pix(ra, dec, 1)
+                    except astropy.wcs.wcs.NoConvergence as e:
+                        if verbose:
+                            print(f"WCS world2pix failed to converge at {label} (divergent solution)")
+                        return True
+                    except Exception as e:
+                        if verbose:
+                            print(f"WCS world2pix failed at {label}: {e}")
+                        return True
+
+                    # Check round-trip accuracy (should be < 1 pixel error)
+                    error = numpy.sqrt((x_back - px)**2 + (y_back - py)**2)
+                    if error > 1.0:
+                        failed_points.append((label, error))
+                    max_error = max(max_error, error)
+
+                # If too many points fail, the WCS is bad
+                if len(failed_points) > 0:
                     if verbose:
-                        print(f"WCS round-trip error too large: {error:.2f} pixels")
+                        print(f"WCS round-trip errors too large at {len(failed_points)} point(s):")
+                        for label, err in failed_points:
+                            print(f"  {label}: {err:.2f} pixels")
                     return True
 
                 if verbose:
-                    print(f"WCS validation passed (round-trip error: {error:.3f} pixels)")
+                    print(f"WCS validation passed (max round-trip error: {max_error:.3f} pixels)")
 
             except Exception as e:
                 if verbose:

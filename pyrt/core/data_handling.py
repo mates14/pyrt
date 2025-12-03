@@ -1,5 +1,6 @@
 import numpy as np
 import logging
+import astropy.wcs
 from pyrt.utils.airmass import calculate_airmass_array
 
 class FitData:
@@ -305,9 +306,38 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None,
         cat_data = cat[cat_inds]
 
         # RA+Dec of detections from their measured X&Y
-        ra, dec = imgwcs.all_pix2world(det_data[:, 0], det_data[:, 1], 1)
+        try:
+            ra, dec = imgwcs.all_pix2world(det_data[:, 0], det_data[:, 1], 1)
+        except Exception as e:
+            logging.error(f"Failed to transform detection pixel coordinates to world: {e}")
+            raise
+
         # X,Y for catalog for their catalog RA&Dec
-        cat_x, cat_y = imgwcs.all_world2pix(cat_data['radeg'], cat_data['decdeg'], 1)
+        try:
+            cat_x, cat_y = imgwcs.all_world2pix(cat_data['radeg'], cat_data['decdeg'], 1)
+        except astropy.wcs.wcs.NoConvergence as e:
+            # Some catalog stars failed to converge - filter them out
+            logging.warning(f"WCS failed to converge for {len(e.divergent)} catalog stars, filtering them out")
+            cat_x, cat_y = e.best_solution
+
+            # Filter out invalid coordinates
+            valid_mask = np.isfinite(cat_x) & np.isfinite(cat_y)
+            if not np.any(valid_mask):
+                logging.error("All catalog coordinates failed WCS transformation")
+                raise ValueError("All catalog coordinates failed WCS transformation")
+
+            # Apply mask to all related arrays (keep them aligned)
+            det_data = det_data[valid_mask]
+            ra = ra[valid_mask]
+            dec = dec[valid_mask]
+            cat_data = cat_data[valid_mask]
+            cat_x = cat_x[valid_mask]
+            cat_y = cat_y[valid_mask]
+            cat_inds = cat_inds[valid_mask]
+            logging.info(f"Continuing with {len(cat_data)} valid catalog stars")
+        except Exception as e:
+            logging.error(f"Failed to transform catalog world coordinates to pixel: {e}")
+            raise
 
         # Calculate airmass if we have reliable time and location info
         try:

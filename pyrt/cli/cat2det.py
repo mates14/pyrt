@@ -412,8 +412,8 @@ def process_detections(det: astropy.table.Table,
 
         try:
             tmp = imgwcs.all_world2pix(det.meta['OBJRA'], det.meta['OBJDEC'], 0)
-        except RuntimeError:
-            print("Error: Bad astrometry, cannot continue")
+        except (RuntimeError, astropy.wcs.wcs.NoConvergence) as e:
+            print(f"Error: Bad astrometry ({type(e).__name__}), cannot continue")
             return None
 
         if verbose:
