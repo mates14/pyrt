@@ -53,13 +53,12 @@ def match_stars(det, cat, imgwcs, idlimit=2.0):
         logging.warning(f"WCS transformation: {len(e.divergent) if e.divergent is not None else 0} catalog stars failed to converge")
 
         # Get best solution and filter out divergent points
-        if e.best_solution is None or len(e.best_solution) == 0:
+        if e.best_solution is None or len(e.best_solution) != 2:
             logging.error("NoConvergence with no best_solution - WCS completely broken")
             return None
 
-        # best_solution is shape (2, N) for x, y arrays
-        cat_x = e.best_solution[0]
-        cat_y = e.best_solution[1]
+        # best_solution is a tuple (x_array, y_array)
+        cat_x, cat_y = e.best_solution
 
         # Create mask for valid (non-NaN, finite) coordinates
         valid_mask = np.isfinite(cat_x) & np.isfinite(cat_y)
