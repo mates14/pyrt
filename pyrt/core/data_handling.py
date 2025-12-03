@@ -327,8 +327,14 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None,
                 logging.error(f"Unexpected best_solution format: {type(e.best_solution)}")
                 raise ValueError("WCS transformation failed with unexpected format")
 
-            # Filter out invalid coordinates
-            valid_mask = np.isfinite(cat_x) & np.isfinite(cat_y)
+            # Create mask excluding divergent stars
+            valid_mask = np.ones(len(cat_data), dtype=bool)
+            if e.divergent is not None and len(e.divergent) > 0:
+                valid_mask[e.divergent] = False
+
+            # Also check for NaN/inf
+            valid_mask &= np.isfinite(cat_x) & np.isfinite(cat_y)
+
             if not np.any(valid_mask):
                 logging.error("All catalog coordinates failed WCS transformation")
                 raise ValueError("All catalog coordinates failed")

@@ -58,11 +58,9 @@ def match_stars(det, cat, imgwcs, idlimit=2.0):
             return None
 
         # best_solution is a numpy array with shape (N, 2) where each row is [x, y]
-        # We need to transpose it to get separate x and y arrays
         if hasattr(e.best_solution, 'shape') and len(e.best_solution.shape) == 2 and e.best_solution.shape[1] == 2:
             cat_x = e.best_solution[:, 0]
             cat_y = e.best_solution[:, 1]
-            logging.info(f"Using best_solution: filtered {len(cat)} catalog stars")
         else:
             logging.error(f"Unexpected best_solution format")
             logging.error(f"  type: {type(e.best_solution)}")
@@ -70,8 +68,14 @@ def match_stars(det, cat, imgwcs, idlimit=2.0):
                 logging.error(f"  shape: {e.best_solution.shape}")
             return None
 
-        # Create mask for valid (non-NaN, finite) coordinates
-        valid_mask = np.isfinite(cat_x) & np.isfinite(cat_y)
+        # Create mask for valid coordinates: exclude divergent stars
+        # e.divergent contains indices of stars that failed to converge
+        valid_mask = np.ones(len(cat), dtype=bool)
+        if e.divergent is not None and len(e.divergent) > 0:
+            valid_mask[e.divergent] = False
+
+        # Also check for NaN/inf (shouldn't happen, but be safe)
+        valid_mask &= np.isfinite(cat_x) & np.isfinite(cat_y)
 
         if not np.any(valid_mask):
             logging.error("All catalog stars failed WCS transformation")
