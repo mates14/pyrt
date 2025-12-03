@@ -101,14 +101,16 @@ def check_wcs_needs_solving(fits_file, verbose=False):
 
                 # Create a grid of test points covering the ENTIRE image including edges
                 # 7x7 grid = 49 points should catch divergence anywhere
+                gridsize=11
                 test_x = []
                 test_y = []
-                for i in range(7):
-                    for j in range(7):
-                        x = i * naxis1 / 6.0  # From 0 to NAXIS1
-                        y = j * naxis2 / 6.0  # From 0 to NAXIS2
+                for i in range(gridsize):
+                    for j in range(gridsize):
+                        x = i * naxis1 / (gridsize-1)  # From 0 to NAXIS1
+                        y = j * naxis2 / (gridsize-1)  # From 0 to NAXIS2
                         test_x.append(x)
                         test_y.append(y)
+
 
                 test_x = numpy.array(test_x)
                 test_y = numpy.array(test_y)
