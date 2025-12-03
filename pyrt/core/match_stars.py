@@ -47,10 +47,38 @@ def match_stars(det, cat, imgwcs, idlimit=2.0):
     # Transform catalog coordinates to pixel space
     try:
         cat_x, cat_y = imgwcs.all_world2pix(cat['radeg'], cat['decdeg'], 1)
+    except astropy.wcs.wcs.NoConvergence as e:
+        # Some catalog coordinates failed to converge (likely outside valid WCS region)
+        # This is normal - catalog queries include stars around the field, some outside image
+        logging.warning(f"WCS transformation: {len(e.divergent) if e.divergent is not None else 0} catalog stars failed to converge")
+
+        # Get best solution and filter out divergent points
+        if e.best_solution is None or len(e.best_solution) == 0:
+            logging.error("NoConvergence with no best_solution - WCS completely broken")
+            return None
+
+        # best_solution is shape (2, N) for x, y arrays
+        cat_x = e.best_solution[0]
+        cat_y = e.best_solution[1]
+
+        # Create mask for valid (non-NaN, finite) coordinates
+        valid_mask = np.isfinite(cat_x) & np.isfinite(cat_y)
+
+        if not np.any(valid_mask):
+            logging.error("All catalog stars failed WCS transformation")
+            return None
+
+        # Filter catalog to only valid stars
+        n_removed = len(cat) - np.sum(valid_mask)
+        cat = cat[valid_mask]
+        cat_x = cat_x[valid_mask]
+        cat_y = cat_y[valid_mask]
+
+        logging.info(f"Filtered out {n_removed} catalog stars outside valid WCS region, continuing with {len(cat)} stars")
+
     except Exception as e:
-        # Any transformation failure (including NoConvergence) means bad WCS
-        logging.error(f"WCS transformation failed: {type(e).__name__}")
-        logging.error("WCS solution is invalid and needs to be re-solved")
+        # Any other transformation failure is a real error
+        logging.error(f"WCS transformation failed: {type(e).__name__}: {e}")
         return None
 
     # Create coordinate arrays
