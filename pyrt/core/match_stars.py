@@ -47,29 +47,10 @@ def match_stars(det, cat, imgwcs, idlimit=2.0):
     # Transform catalog coordinates to pixel space
     try:
         cat_x, cat_y = imgwcs.all_world2pix(cat['radeg'], cat['decdeg'], 1)
-    except astropy.wcs.wcs.NoConvergence as e:
-        # Some coordinates failed to converge - filter them out
-        logging.warning(f"WCS transformation failed to converge for {len(e.divergent)} catalog stars")
-        logging.info(f"Attempting to use {len(e.best_solution)} successfully transformed stars")
-
-        # Use the best solution available (may have NaN for divergent points)
-        cat_x, cat_y = e.best_solution
-
-        # Filter out NaN/invalid coordinates
-        valid_mask = np.isfinite(cat_x) & np.isfinite(cat_y)
-        if not np.any(valid_mask):
-            logging.error("All catalog coordinates failed WCS transformation")
-            return None, None, None, None
-
-        # Filter catalog and coordinates to only valid entries
-        cat = cat[valid_mask]
-        cat_x = cat_x[valid_mask]
-        cat_y = cat_y[valid_mask]
-        logging.info(f"Continuing with {len(cat)} valid catalog stars")
-
     except Exception as e:
-        # Catch all other transformation errors
-        logging.error(f"Astrometry transformation failed: {type(e).__name__}: {e}")
+        # Any transformation failure (including NoConvergence) means bad WCS
+        logging.error(f"WCS transformation failed: {type(e).__name__}")
+        logging.error("WCS solution is invalid and needs to be re-solved")
         return None, None, None, None
 
     # Create coordinate arrays

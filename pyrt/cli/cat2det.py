@@ -360,7 +360,9 @@ def process_detections(det: astropy.table.Table,
     # Use the .cat file we already loaded for faster solving
     wcs_ok = validate_and_fix_wcs(fits_path, cat_file=cat_path, verbose=verbose)
     if not wcs_ok:
-        print(f"Warning: WCS validation/fixing failed for {fits_path}, proceeding anyway...")
+        print(f"Error: WCS validation/fixing failed for {fits_path}")
+        print("The WCS solution is invalid and could not be repaired. Cannot continue.")
+        return None
 
     # remove zeros in the error column
     det['MAGERR_AUTO'] = np.sqrt(det['MAGERR_AUTO']*det['MAGERR_AUTO']+0.0005*0.0005)
