@@ -507,8 +507,8 @@ def main():
                                verbose=options.verbose)
 
         if det is None:
-            print("Skipping file due to errors")
-            continue
+            print(f"ERROR: Failed to process {filef}")
+            sys.exit(1)
 
         output = os.path.splitext(filef)[0] + ".det"
         if options.verbose: print(f"Writing output file {output}")
