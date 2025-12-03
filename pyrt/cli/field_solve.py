@@ -66,6 +66,8 @@ def check_wcs_needs_solving(fits_file, verbose=False):
     1. WCS initialization fails
     2. No WCS present at all
     3. Old distortion standard (PV coefficients instead of SIP)
+    4. WCS transformations don't converge (divergent solution)
+    5. Round-trip transformation accuracy is poor
     """
     try:
         with pyfits.open(fits_file) as hdul:
@@ -91,7 +93,55 @@ def check_wcs_needs_solving(fits_file, verbose=False):
                     print(f"WCS initialization failed for {fits_file}: {e}")
                 return True
 
-            # WCS seems OK
+            # Test if WCS actually works - try transformations at image center
+            try:
+                naxis1 = header.get('NAXIS1', 2048)
+                naxis2 = header.get('NAXIS2', 2048)
+                center_x = naxis1 / 2.0
+                center_y = naxis2 / 2.0
+
+                # Test pix2world
+                try:
+                    ra, dec = wcs.all_pix2world(center_x, center_y, 1)
+                except Exception as e:
+                    if verbose:
+                        print(f"WCS pix2world failed at image center: {e}")
+                    return True
+
+                # Check if result is valid (RA/Dec in sensible ranges)
+                if not (0 <= ra <= 360 and -90 <= dec <= 90):
+                    if verbose:
+                        print(f"WCS gives invalid coordinates: RA={ra:.1f}, Dec={dec:.1f}")
+                    return True
+
+                # Test world2pix round-trip - this catches divergent solutions
+                try:
+                    x_back, y_back = wcs.all_world2pix(ra, dec, 1)
+                except astropy.wcs.wcs.NoConvergence as e:
+                    if verbose:
+                        print(f"WCS world2pix failed to converge (divergent solution)")
+                    return True
+                except Exception as e:
+                    if verbose:
+                        print(f"WCS world2pix failed: {e}")
+                    return True
+
+                # Check round-trip accuracy (should be < 1 pixel error)
+                error = numpy.sqrt((x_back - center_x)**2 + (y_back - center_y)**2)
+                if error > 1.0:
+                    if verbose:
+                        print(f"WCS round-trip error too large: {error:.2f} pixels")
+                    return True
+
+                if verbose:
+                    print(f"WCS validation passed (round-trip error: {error:.3f} pixels)")
+
+            except Exception as e:
+                if verbose:
+                    print(f"WCS transformation test failed: {e}")
+                return True
+
+            # WCS is OK
             return False
 
     except Exception as e:
