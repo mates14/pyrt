@@ -351,13 +351,18 @@ def try_term_robust(ffit, term, current_terms, fdata, initial_values=None):
     current_mask = np.ones(len(thread_data[0]), dtype=bool)
     prev_wssrndf = float('inf')
 
+    import time
+    start_time = time.time()
+
     for iteration in range(max_iterations):
         # Apply current mask to data
         masked_data = tuple(arr[current_mask] for arr in thread_data)
 
         # Perform the fit
         try:
+            fit_start = time.time()
             new_ffit.fit(masked_data)
+            fit_time = time.time() - fit_start
 
         except Exception as e:
             print(f"Fitting failed for terms {terms_to_fit}: {str(e)}")
@@ -369,12 +374,18 @@ def try_term_robust(ffit, term, current_terms, fdata, initial_values=None):
         # Create new mask for points within 5-sigma
         new_mask = np.abs(residuals) < 3 * np.sqrt(new_ffit.wssrndf)
 
+        n_masked = np.sum(~new_mask)
+
         # Check for convergence
         if np.array_equal(new_mask, current_mask) or new_ffit.wssrndf >= prev_wssrndf:
             break
 
         current_mask = new_mask
         prev_wssrndf = new_ffit.wssrndf
+
+    total_time = time.time() - start_time
+    if total_time > 10:  # Only log if takes > 10 seconds
+        print(f"\n[DEBUG] try_term_robust: {iteration+1} iterations, {total_time:.1f}s total, final WSSR/NDF={new_ffit.wssrndf:.3f}, {n_masked} outliers masked")
 
     return new_ffit.wssrndf, current_mask
 
@@ -430,7 +441,11 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
 
     # Perform initial fit with sigma clipping using existing robust fitting function
     # This ensures photometry mask is always created, even when no stepwise terms are selected
+    import time
+    print(f"[DEBUG] Initial fit starting with {len(always_selected)} always-selected terms...")
+    fit_start = time.time()
     initial_wssrndf, initial_mask = try_term_robust(ffit, None, always_selected or [], fd.fotparams, initial_values_for_direct if 'initial_values_for_direct' in locals() else None)
+    print(f"[DEBUG] Initial fit took {time.time()-fit_start:.1f}s, WSSR/NDF={initial_wssrndf:.3f}")
 
     # Store the photometry mask in the data object for plotting
     data.add_mask('photometry', initial_mask)
@@ -450,6 +465,9 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
     if hasattr(options, '_combined_initial_values'):
         combined_initial_values.update(options._combined_initial_values)
 
+    # Track how many terms we started with before pre-selection
+    initial_selected_count = len(selected_terms)
+
     # Move ANY terms with initial values from remaining to selected (source-agnostic warm start)
     for term in list(remaining_terms):
         if term in combined_initial_values:
@@ -457,15 +475,22 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
             remaining_terms.remove(term)
             print(f"Pre-selected term: {term} = {combined_initial_values[term]:.6f}")
 
-    # Refit with all selected terms (including pre-selected terms) if we added any
-    if any(term in combined_initial_values for term in selected_terms):
+    # Refit with all selected terms ONLY if we actually added new terms
+    if len(selected_terms) > initial_selected_count:
+        print(f"[DEBUG] Refit starting with {len(selected_terms)} selected terms (added {len(selected_terms) - initial_selected_count} pre-selected)...")
+        refit_start = time.time()
         best_wssrndf, initial_mask = try_term_robust(ffit, None, selected_terms, fd.fotparams, combined_initial_values)
+        print(f"[DEBUG] Refit took {time.time()-refit_start:.1f}s, WSSR/NDF={best_wssrndf:.3f}")
         data.add_mask('photometry', initial_mask)
+    else:
+        print(f"[DEBUG] Skipping refit - no new terms pre-selected (still {len(selected_terms)} terms)")
 
     max_iterations = 100  # Prevent infinite loops
     iteration = 0
     improvement_threshold = 0.001  # Minimum relative improvement to accept a term
     total_checks = 0  # Track total number of model evaluations
+
+    print(f"[DEBUG] Entering stepwise loop: {len(remaining_terms)} remaining candidates, {len(selected_terms)} selected")
 
     while iteration < max_iterations:
 #        print(f"=== Cycle {iteration}: WSSRNDF={best_wssrndf:.6f}, Selected={len(selected_terms)} terms, Remaining={len(remaining_terms)} candidates ===")
@@ -575,20 +600,24 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
         # Stop if no changes were made in this iteration
         if not made_change:
 #            print(f"=== Converged after {iteration} cycles: No forward or backward changes possible ===")
+            print(f"[DEBUG] Stepwise loop exited after {iteration} iteration(s)")
             break
 
     # Final newline to complete the progress display
     print()
 
     # Final fit with all selected terms using current photometry mask
+    print(f"[DEBUG] Final fit starting with {len(selected_terms)} selected terms...")
+    final_fit_start = time.time()
     ffit.fixall()
     setup_terms(ffit, selected_terms, combined_initial_values)
-    
+
     # Get current masked data for final fit
     data.use_mask('photometry')
     final_fd = data.get_fitdata('y', 'adif', 'coord_x', 'coord_y', 'color1',
                                'color2', 'color3', 'color4', 'img', 'x', 'dy',
                                'image_x', 'image_y', 'airmass')
     ffit.fit(final_fd.fotparams)
+    print(f"[DEBUG] Final fit took {time.time()-final_fit_start:.1f}s, WSSR/NDF={ffit.wssrndf:.3f}")
 
     return selected_terms, ffit.wssrndf

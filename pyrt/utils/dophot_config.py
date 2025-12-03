@@ -143,6 +143,8 @@ def parse_arguments(args=None):
                         default=config.get('filter_check', 'none'),
                         help="Filter validation mode: none=trust header, warn=validate and warn on mismatch, strict=reject on mismatch, discover=ignore header and find best filter")
     parser.add_argument("-s", "--stars", action='store_true', default=config.get('stars', 'False'), help="Output fitted numbers to a file")
+    parser.add_argument("--max-stars", type=int, default=config.get('max_stars'),
+                        help="Maximum number of matched stars per image to use for fitting (randomly subsampled if exceeded)")
     parser.add_argument("-S", "--sip", help="Order of SIP refinement for the astrometric solution (0=disable)", type=int)
     parser.add_argument("-u", "--autoupdate", action='store_true', help="Update .det if .fits is newer", default=config.get('autoupdate', 'False'))
     parser.add_argument("--force-regen", action='store_true', help="Force regeneration of .det file (runs phcat+cat2det)", default=False)

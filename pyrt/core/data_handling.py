@@ -411,6 +411,23 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None,
 
         n_matched_stars = np.sum(mag_mask)
 
+        # Random subsampling if max_stars is specified and exceeded
+        if options.max_stars and n_matched_stars > options.max_stars:
+            # Find indices where mag_mask is True
+            true_indices = np.where(mag_mask)[0]
+
+            # Randomly select max_stars indices
+            np.random.seed()  # Ensure true randomness
+            selected_indices = np.random.choice(true_indices, size=options.max_stars, replace=False)
+
+            # Create new mask with only selected stars
+            new_mask = np.zeros_like(mag_mask, dtype=bool)
+            new_mask[selected_indices] = True
+
+            print(f"Random subsampling: {n_matched_stars} matched stars → {options.max_stars} randomly selected")
+            mag_mask = new_mask
+            n_matched_stars = options.max_stars
+
         # Store filter data before applying magnitude mask
         for filter_name in cat.filters:
             if filter_name in options.filter_schemas[det.meta['PHSCHEMA']]:
