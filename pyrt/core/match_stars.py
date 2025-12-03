@@ -51,7 +51,7 @@ def match_stars(det, cat, imgwcs, idlimit=2.0):
         # Any transformation failure (including NoConvergence) means bad WCS
         logging.error(f"WCS transformation failed: {type(e).__name__}")
         logging.error("WCS solution is invalid and needs to be re-solved")
-        return None, None, None, None
+        return None
 
     # Create coordinate arrays
     det_coords = np.array([det['X_IMAGE'], det['Y_IMAGE']]).T
