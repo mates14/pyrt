@@ -315,12 +315,17 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None,
             # Some catalog stars are outside valid WCS region - filter them out
             logging.warning(f"WCS: {len(e.divergent) if e.divergent is not None else 0} catalog stars failed to converge")
 
-            if e.best_solution is None or len(e.best_solution) != 2:
+            if e.best_solution is None:
                 logging.error("NoConvergence with no best_solution")
                 raise ValueError("WCS transformation completely failed")
 
-            # best_solution is a tuple (x_array, y_array)
-            cat_x, cat_y = e.best_solution
+            # best_solution is a numpy array with shape (N, 2) where each row is [x, y]
+            if hasattr(e.best_solution, 'shape') and len(e.best_solution.shape) == 2 and e.best_solution.shape[1] == 2:
+                cat_x = e.best_solution[:, 0]
+                cat_y = e.best_solution[:, 1]
+            else:
+                logging.error(f"Unexpected best_solution format: {type(e.best_solution)}")
+                raise ValueError("WCS transformation failed with unexpected format")
 
             # Filter out invalid coordinates
             valid_mask = np.isfinite(cat_x) & np.isfinite(cat_y)

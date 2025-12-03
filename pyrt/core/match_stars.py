@@ -57,18 +57,17 @@ def match_stars(det, cat, imgwcs, idlimit=2.0):
             logging.error("NoConvergence with best_solution=None - WCS completely broken")
             return None
 
-        # best_solution from all_world2pix returns the same structure as the normal return
-        # For all_world2pix(ra_array, dec_array, 1) → returns (x_array, y_array)
-        # So best_solution should also be (x_array, y_array)
-        try:
-            # Just unpack it like normal return value
-            cat_x, cat_y = e.best_solution
-            logging.info(f"Using best_solution arrays: x.shape={cat_x.shape}, y.shape={cat_y.shape}")
-        except (TypeError, ValueError) as unpack_err:
-            logging.error(f"Failed to unpack best_solution: {unpack_err}")
-            logging.error(f"  best_solution type: {type(e.best_solution)}")
+        # best_solution is a numpy array with shape (N, 2) where each row is [x, y]
+        # We need to transpose it to get separate x and y arrays
+        if hasattr(e.best_solution, 'shape') and len(e.best_solution.shape) == 2 and e.best_solution.shape[1] == 2:
+            cat_x = e.best_solution[:, 0]
+            cat_y = e.best_solution[:, 1]
+            logging.info(f"Using best_solution: filtered {len(cat)} catalog stars")
+        else:
+            logging.error(f"Unexpected best_solution format")
+            logging.error(f"  type: {type(e.best_solution)}")
             if hasattr(e.best_solution, 'shape'):
-                logging.error(f"  best_solution shape: {e.best_solution.shape}")
+                logging.error(f"  shape: {e.best_solution.shape}")
             return None
 
         # Create mask for valid (non-NaN, finite) coordinates
