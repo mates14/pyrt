@@ -328,6 +328,8 @@ def create_correction_volume_plots(data, output_base, ffit):
     cbar_val = np.ones(n_colors)
     cbar_hsv = np.stack([cbar_hue, cbar_sat, cbar_val], axis=-1)
     cbar_rgb = hsv_to_rgb(cbar_hsv.reshape(1, -1, 3)).reshape(-1, 3)
+    # Clip to valid range to handle floating point errors
+    cbar_rgb = np.clip(cbar_rgb, 0.0, 1.0)
 
     # Create a dummy mappable for colorbar
     from matplotlib.cm import ScalarMappable
