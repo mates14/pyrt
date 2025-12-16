@@ -57,6 +57,43 @@ from pyrt.utils import dms
 ast_scales=[1,2,3,4] # ,5,6,8,10,12,14]
 
 
+def read_wcs_from_file(wcs_file):
+    """Read WCS keywords from a .wcs file (astrometry.net output).
+
+    The .wcs file is a FITS file with just a header containing WCS solution.
+    We extract all keywords except FITS structure and comment/history junk.
+
+    Args:
+        wcs_file: Path to .wcs file containing WCS header
+
+    Returns:
+        Dictionary of WCS keywords, or None if file doesn't exist or can't be read
+    """
+    if not os.path.exists(wcs_file):
+        return None
+
+    try:
+        with pyfits.open(wcs_file) as hdul:
+            header = hdul[0].header
+
+            # Keywords to exclude (FITS structure and junk)
+            exclude_keywords = {'SIMPLE', 'BITPIX', 'NAXIS', 'EXTEND', 'DATE',
+                               'COMMENT', 'HISTORY', 'IMAGEW', 'IMAGEH',
+                               'comments', 'COMMENTS', 'history'}
+
+            # Extract all keywords except excluded ones
+            wcs_keywords = {}
+            for key in header.keys():
+                if key not in exclude_keywords:
+                    wcs_keywords[key] = header[key]
+
+            return wcs_keywords
+
+    except Exception as e:
+        print(f"Error reading WCS from {wcs_file}: {e}")
+        return None
+
+
 def check_wcs_needs_solving(fits_file, verbose=False):
     """Check if WCS needs to be solved or re-solved.
 
@@ -95,12 +132,13 @@ def check_wcs_needs_solving(fits_file, verbose=False):
 
             # Test if WCS actually works - test grid across ENTIRE image including edges
             # A proper WCS should work at [0,0] and [NAXIS1,NAXIS2], not just with margin
+            # IMPORTANT: Test both origin=0 and origin=1 since cat2det uses origin=0
             try:
                 naxis1 = header.get('NAXIS1', 2048)
                 naxis2 = header.get('NAXIS2', 2048)
 
                 # Create a grid of test points covering the ENTIRE image including edges
-                # 7x7 grid = 49 points should catch divergence anywhere
+                # 11x11 grid = 121 points should catch divergence anywhere
                 gridsize=11
                 test_x = []
                 test_y = []
@@ -111,51 +149,54 @@ def check_wcs_needs_solving(fits_file, verbose=False):
                         test_x.append(x)
                         test_y.append(y)
 
-
                 test_x = numpy.array(test_x)
                 test_y = numpy.array(test_y)
 
-                # Test pix2world on all points at once
-                try:
-                    ra, dec = wcs.all_pix2world(test_x, test_y, 1)
-                except Exception as e:
-                    if verbose:
-                        print(f"WCS pix2world failed: {e}")
-                    return True
+                # Test with BOTH origin=1 (FITS convention) and origin=0 (numpy convention)
+                # cat2det uses origin=0, so we must test that too
+                for origin in [1, 0]:
+                    # Test pix2world on all points at once
+                    try:
+                        ra, dec = wcs.all_pix2world(test_x, test_y, origin)
+                    except Exception as e:
+                        if verbose:
+                            print(f"WCS pix2world (origin={origin}) failed: {e}")
+                        return True
 
-                # Check if results are valid (RA/Dec in sensible ranges)
-                if not (numpy.all((ra >= 0) & (ra <= 360)) and numpy.all((dec >= -90) & (dec <= 90))):
-                    if verbose:
-                        print(f"WCS gives invalid coordinates")
-                    return True
+                    # Check if results are valid (RA/Dec in sensible ranges)
+                    if not (numpy.all((ra >= 0) & (ra <= 360)) and numpy.all((dec >= -90) & (dec <= 90))):
+                        if verbose:
+                            print(f"WCS (origin={origin}) gives invalid coordinates")
+                        return True
 
-                # Test world2pix round-trip - this catches divergent solutions
-                try:
-                    x_back, y_back = wcs.all_world2pix(ra, dec, 1)
-                except astropy.wcs.wcs.NoConvergence as e:
-                    if verbose:
-                        print(f"WCS world2pix failed to converge (divergent solution)")
-                        if e.divergent is not None:
-                            print(f"  {len(e.divergent)} point(s) diverged out of {len(test_x)}")
-                    return True
-                except Exception as e:
-                    if verbose:
-                        print(f"WCS world2pix failed: {e}")
-                    return True
+                    # Test world2pix round-trip - this catches divergent solutions
+                    try:
+                        x_back, y_back = wcs.all_world2pix(ra, dec, origin)
+                    except astropy.wcs.wcs.NoConvergence as e:
+                        if verbose:
+                            print(f"WCS world2pix (origin={origin}) failed to converge (divergent solution)")
+                            if e.divergent is not None:
+                                print(f"  {len(e.divergent)} point(s) diverged out of {len(test_x)}")
+                        return True
+                    except Exception as e:
+                        if verbose:
+                            print(f"WCS world2pix (origin={origin}) failed: {e}")
+                        return True
 
-                # Check round-trip accuracy for all points
-                errors = numpy.sqrt((x_back - test_x)**2 + (y_back - test_y)**2)
-                max_error = numpy.max(errors)
-                bad_points = numpy.sum(errors > 1.0)
+                    # Check round-trip accuracy for all points
+                    errors = numpy.sqrt((x_back - test_x)**2 + (y_back - test_y)**2)
+                    max_error = numpy.max(errors)
+                    bad_points = numpy.sum(errors > 1.0)
 
-                if bad_points > 0:
-                    if verbose:
-                        print(f"WCS round-trip errors too large at {bad_points}/{len(test_x)} points")
-                        print(f"  Max error: {max_error:.2f} pixels")
-                    return True
+                    if bad_points > 0:
+                        if verbose:
+                            print(f"WCS (origin={origin}) round-trip errors too large at {bad_points}/{len(test_x)} points")
+                            print(f"  Max error: {max_error:.2f} pixels")
+                        return True
 
                 if verbose:
-                    print(f"WCS validation passed (max round-trip error: {max_error:.3f} pixels)")
+                    max_error_both = max(errors)  # Last origin's errors
+                    print(f"WCS validation passed (max round-trip error: {max_error_both:.3f} pixels)")
 
             except Exception as e:
                 if verbose:
@@ -273,6 +314,71 @@ def create_xyls_from_cat(cat_file, fits_file, output_xyls, verbose=False):
         if verbose:
             print(f"Error creating .xyls file: {e}")
         return (False, 0, 0)
+
+
+def solve_wcs_return_header(fits_file, cat_file=None, scale=None, time_limit=15, verbose=False):
+    """Solve WCS and return header keywords without modifying original file.
+
+    This is the new approach: instead of modifying the FITS file, we solve the WCS
+    and return the header keywords so they can be inserted into the .det file.
+
+    Args:
+        fits_file: FITS file to solve
+        cat_file: .cat file from phcat to use for solving (recommended)
+        scale: Optional pixel scale hint in arcsec/pixel
+        time_limit: Time limit for solve-field in seconds
+        verbose: Print debugging info
+
+    Returns:
+        Dictionary of WCS keywords if solving succeeds, None if it fails
+    """
+    if verbose:
+        print(f"Solving WCS for {fits_file}...")
+
+    # Auto-detect .cat file if not provided
+    if cat_file is None:
+        base = os.path.splitext(fits_file)[0]
+        potential_cat = base + ".cat"
+        if os.path.exists(potential_cat):
+            cat_file = potential_cat
+            if verbose:
+                print(f"Found catalog file: {cat_file}")
+
+    # Extract scale from header if not provided
+    if scale is None:
+        try:
+            with pyfits.open(fits_file) as hdul:
+                header = hdul[0].header
+                if 'CDELT1' in header:
+                    scale = abs(header['CDELT1']) * 3600.0  # Convert to arcsec
+                    if verbose:
+                        print(f"Using scale from header: {scale:.3f} arcsec/pixel")
+                elif 'CD1_1' in header:
+                    scale = abs(header['CD1_1']) * 3600.0
+                    if verbose:
+                        print(f"Using scale from CD matrix: {scale:.3f} arcsec/pixel")
+        except Exception as e:
+            if verbose:
+                print(f"Could not extract scale from header: {e}")
+
+    # Run the solver with return_wcs=True
+    solver = AstrometryScript(time=time_limit)
+
+    for zoom in ast_scales:
+        if verbose:
+            print(f"Trying solve-field with zoom={zoom}...")
+        result = solver.run(fits_file, scale=scale, zoom=zoom, replace=False,
+                           cat_file=cat_file, return_wcs=True)
+        if result is not None:
+            ra, dec, wcs_dict = result
+            if verbose:
+                print(f"Field solved successfully! RA={ra:.6f} Dec={dec:.6f}")
+            return wcs_dict
+
+    # Solving failed
+    if verbose:
+        print(f"Failed to solve field for {fits_file}")
+    return None
 
 
 def validate_and_fix_wcs(fits_file, cat_file=None, scale=None, time_limit=15, verbose=False):
@@ -412,7 +518,7 @@ class AstrometryScript:
         self.time = time
         self.odir = odir
 
-    def run(self, fits_file, scale=None, ra=None, dec=None, replace=False, naxis1=None, naxis2=None, zoom=None, cat_file=None):
+    def run(self, fits_file, scale=None, ra=None, dec=None, replace=False, naxis1=None, naxis2=None, zoom=None, cat_file=None, return_wcs=False):
         """Run the field recognition pipeline
 
         Args:
@@ -420,11 +526,16 @@ class AstrometryScript:
             scale: Pixel scale in arcsec/pixel
             ra: Initial RA guess (optional)
             dec: Initial Dec guess (optional)
-            replace: If True, replace original file with solved version
+            replace: If True, replace original file with solved version (ignored if return_wcs=True)
             naxis1, naxis2: Image dimensions (optional)
             zoom: Downsample factor for solve-field
             cat_file: Optional .cat file from pyrt-phcat to use for star positions
                      instead of letting solve-field detect stars
+            return_wcs: If True, return (ra, dec, wcs_dict) instead of modifying original file
+
+        Returns:
+            If return_wcs=False: [ra, dec] or None
+            If return_wcs=True: (ra, dec, wcs_dict) or None
         """
 
         # Use context manager for temporary directory
@@ -525,14 +636,31 @@ class AstrometryScript:
                 match=radecline.match(a)
                 if match:
                     ret=[dms.parseDMS(match.group(1)), dms.parseDMS(match.group(2))]
-            
-            # Always overwrite the original file if .new file exists and solution was found
-            new_file = os.path.join(odir, 'input.new')
-            if ret is not None and os.path.exists(new_file):
-                shutil.move(new_file, fits_file)
-            
+
+            # Handle the solved files based on return_wcs flag
+            if ret is not None:
+                new_file = os.path.join(odir, 'input.new')
+                wcs_file = os.path.join(odir, 'input.wcs')
+
+                if return_wcs:
+                    # Extract WCS from .wcs file and return it (don't modify original)
+                    if os.path.exists(wcs_file):
+                        wcs_dict = read_wcs_from_file(wcs_file)
+                        if wcs_dict is not None:
+                            return (ret[0], ret[1], wcs_dict)
+                        else:
+                            print(f"Warning: Could not read WCS from {wcs_file}")
+                            return None
+                    else:
+                        print(f"Warning: solve-field succeeded but no .wcs file found")
+                        return None
+                else:
+                    # Original behavior: overwrite the original file
+                    if os.path.exists(new_file):
+                        shutil.move(new_file, fits_file)
+
             # Temporary directory cleanup happens automatically via context manager
-            
+
         return ret
 
 def main():

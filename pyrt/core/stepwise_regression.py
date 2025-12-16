@@ -366,7 +366,7 @@ def try_term_robust(ffit, term, current_terms, fdata, initial_values=None):
 
         except Exception as e:
             print(f"Fitting failed for terms {terms_to_fit}: {str(e)}")
-            return float('inf'), None
+            return float('inf'), None, {}
 
         # Calculate residuals on all points
         residuals = new_ffit.residuals(new_ffit.fitvalues, thread_data)
@@ -384,16 +384,17 @@ def try_term_robust(ffit, term, current_terms, fdata, initial_values=None):
         prev_wssrndf = new_ffit.wssrndf
 
     total_time = time.time() - start_time
-    if total_time > 10:  # Only log if takes > 10 seconds
-        print(f"\n[DEBUG] try_term_robust: {iteration+1} iterations, {total_time:.1f}s total, final WSSR/NDF={new_ffit.wssrndf:.3f}, {n_masked} outliers masked")
 
-    return new_ffit.wssrndf, current_mask
+    # Extract fitted values to pass back for warm start
+    fitted_values = dict(zip(new_ffit.fitterms, new_ffit.fitvalues))
+
+    return new_ffit.wssrndf, current_mask, fitted_values
 
 def try_remove_term_parallel(term_to_remove, current_terms, ffit, fdata, initial_values):
     """Try removing a term in parallel context"""
     test_terms = [t for t in current_terms if t != term_to_remove]
-    new_wssrndf, new_mask = try_term_robust(ffit, None, test_terms, fdata, initial_values)
-    return term_to_remove, new_wssrndf, new_mask
+    new_wssrndf, new_mask, fitted_values = try_term_robust(ffit, None, test_terms, fdata, initial_values)
+    return term_to_remove, new_wssrndf, new_mask, fitted_values
 
 def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, always_selected=None):
     """
@@ -444,7 +445,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
     import time
     print(f"[DEBUG] Initial fit starting with {len(always_selected)} always-selected terms...")
     fit_start = time.time()
-    initial_wssrndf, initial_mask = try_term_robust(ffit, None, always_selected or [], fd.fotparams, initial_values_for_direct if 'initial_values_for_direct' in locals() else None)
+    initial_wssrndf, initial_mask, initial_fitted_values = try_term_robust(ffit, None, always_selected or [], fd.fotparams, initial_values_for_direct if 'initial_values_for_direct' in locals() else None)
     print(f"[DEBUG] Initial fit took {time.time()-fit_start:.1f}s, WSSR/NDF={initial_wssrndf:.3f}")
 
     # Store the photometry mask in the data object for plotting
@@ -464,6 +465,8 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
     combined_initial_values.update(fotfit_initial_values)
     if hasattr(options, '_combined_initial_values'):
         combined_initial_values.update(options._combined_initial_values)
+    # Add fitted values from initial fit for warm start
+    combined_initial_values.update(initial_fitted_values)
 
     # Track how many terms we started with before pre-selection
     initial_selected_count = len(selected_terms)
@@ -479,9 +482,11 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
     if len(selected_terms) > initial_selected_count:
         print(f"[DEBUG] Refit starting with {len(selected_terms)} selected terms (added {len(selected_terms) - initial_selected_count} pre-selected)...")
         refit_start = time.time()
-        best_wssrndf, initial_mask = try_term_robust(ffit, None, selected_terms, fd.fotparams, combined_initial_values)
+        best_wssrndf, initial_mask, refit_fitted_values = try_term_robust(ffit, None, selected_terms, fd.fotparams, combined_initial_values)
         print(f"[DEBUG] Refit took {time.time()-refit_start:.1f}s, WSSR/NDF={best_wssrndf:.3f}")
         data.add_mask('photometry', initial_mask)
+        # Update combined_initial_values with refit results
+        combined_initial_values.update(refit_fitted_values)
     else:
         print(f"[DEBUG] Skipping refit - no new terms pre-selected (still {len(selected_terms)} terms)")
 
@@ -501,6 +506,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
         best_new_term = None
         best_improvement = 0
         best_new_mask = None
+        best_new_fitted_values = None
 
         if remaining_terms:
             with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -516,10 +522,10 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
                     completed_forward += 1
                     total_checks += 1
                     print(f"\rStepwise regression: pass {iteration}, checking {completed_forward}/{len(remaining_terms)} terms for addition, total checks {total_checks}", end="", flush=True)
-                    
+
                     term = future_to_term[future]
                     try:
-                        new_wssrndf, new_mask = future.result()
+                        new_wssrndf, new_mask, fitted_values = future.result()
                         improvement = 1 - new_wssrndf/best_wssrndf
 
                         if improvement > improvement_threshold and improvement > best_improvement:
@@ -527,6 +533,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
                             best_new_term = term
                             best_new_mask = new_mask
                             best_new_wssrndf = new_wssrndf
+                            best_new_fitted_values = fitted_values
                     except Exception as e:
                         print(f"\nError trying term {term}: {str(e)}", flush=True)
 
@@ -542,6 +549,9 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
             # Apply the new mask to data
             data.apply_mask(best_new_mask, 'photometry')
 
+            # Update combined_initial_values with fitted values from successful addition
+            combined_initial_values.update(best_new_fitted_values)
+
         # Backward step - always try removing terms (independent of forward step)
         # Only consider removing terms that are not in always_selected
         removable_terms = [t for t in selected_terms if t not in always_selected]
@@ -550,6 +560,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
             worst_term = None
             smallest_degradation = float('inf')
             worst_new_mask = None
+            worst_new_fitted_values = None
 
             with concurrent.futures.ProcessPoolExecutor() as executor:
                 # Submit all term removal trials in parallel (only for removable terms)
@@ -566,9 +577,9 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
                     completed_backward += 1
                     total_checks += 1
                     print(f"\rStepwise regression: pass {iteration}, checking {completed_backward}/{len(removable_terms)} terms for removal, total checks {total_checks}", end="", flush=True)
-                    
+
                     try:
-                        term, new_wssrndf, new_mask = future.result()
+                        term, new_wssrndf, new_mask, fitted_values = future.result()
                         degradation = 1 - best_wssrndf/new_wssrndf
 #                        print(f"-- For term {term} got degradation {degradation}")
 
@@ -578,6 +589,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
                                 worst_term = term
                                 worst_new_wssrndf = new_wssrndf
                                 worst_new_mask = new_mask
+                                worst_new_fitted_values = fitted_values
                     except Exception as e:
                         print(f"\nError trying to remove term: {str(e)}", flush=True)
 
@@ -589,9 +601,12 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
                 selected_terms.remove(worst_term)
                 remaining_terms.append(worst_term)
                 made_change = True
-                
+
                 # Update the photometry mask after term removal
                 data.apply_mask(worst_new_mask, 'photometry')
+
+                # Update combined_initial_values with fitted values after term removal
+                combined_initial_values.update(worst_new_fitted_values)
 #            else:
 #                print(f"--- No terms removed (best candidate improvement: {-smallest_degradation:.3%} vs threshold: {-improvement_threshold:.1%})")
 

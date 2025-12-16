@@ -19,7 +19,7 @@ from astropy.coordinates import SkyCoord, EarthLocation
 from astropy.time import Time
 import astropy.units as u
 from pyrt.utils.file_utils import try_sex, try_ecsv, try_img
-from pyrt.cli.field_solve import validate_and_fix_wcs
+from pyrt.cli.field_solve import check_wcs_needs_solving, solve_wcs_return_header
 
 from typing import Optional, Tuple
 
@@ -355,15 +355,6 @@ def process_detections(det: astropy.table.Table,
 
     det.meta['FITSFILE'] = fits_path
 
-    # Validate and fix WCS if needed (before reading header)
-    # This checks if WCS is valid and runs solve-field if necessary
-    # Use the .cat file we already loaded for faster solving
-    wcs_ok = validate_and_fix_wcs(fits_path, cat_file=cat_path, verbose=verbose)
-    if not wcs_ok:
-        print(f"Error: WCS validation/fixing failed for {fits_path}")
-        print("The WCS solution is invalid and could not be repaired. Cannot continue.")
-        return None
-
     # remove zeros in the error column
     det['MAGERR_AUTO'] = np.sqrt(det['MAGERR_AUTO']*det['MAGERR_AUTO']+0.0005*0.0005)
     with astropy.io.fits.open(fits_path) as fitsfile:
@@ -386,8 +377,6 @@ def process_detections(det: astropy.table.Table,
     fix_time(det.meta, target_photometry=target_photometry, verbose=verbose)
     get_limits(det, verbose=verbose)
 
-    imgwcs = astropy.wcs.WCS(det.meta)
-
     fix_filter(det.meta, verbose=verbose, opt_filter=filter_override)
 
     det.meta['AIRMASS'] = 1.0
@@ -404,66 +393,91 @@ def process_detections(det: astropy.table.Table,
     with suppress(KeyError): obsid_d = c['SCRIPREP']
     det.meta['OBSID'] = f"{obsid_n:0d}.{obsid_d:02d}"
 
-    # RTS2 true target coordinates: ORIRA/ORIDEC
-    # it sounds stupid, but comes from complicated telescope pointing logic
-    if target_photometry:
-        det.meta['OBJRA'] = -100
-        with suppress(KeyError): det.meta['OBJRA'] = np.float64(c['ORIRA'])
-        det.meta['OBJDEC'] = -100
-        with suppress(KeyError): det.meta['OBJDEC'] = np.float64(c['ORIDEC'])
-
-        try:
-            tmp = imgwcs.all_world2pix(det.meta['OBJRA'], det.meta['OBJDEC'], 0)
-        except (RuntimeError, astropy.wcs.wcs.NoConvergence) as e:
-            print(f"Error: Bad astrometry ({type(e).__name__}), cannot continue")
-            return None
-
-        if verbose:
-            with suppress(KeyError):
-                print(f"Target is {det.meta['OBJECT']} at ra:{det.meta['OBJRA']} dec:{det.meta['OBJDEC']} -> x:{tmp[0]} y:{tmp[1]}")
-    else:
-        det.meta['OBJRA'] = -100
-        det.meta['OBJDEC'] = -100
-
     det.meta['CTRX'] = c['NAXIS1']/2
     det.meta['CTRY'] = c['NAXIS2']/2
     # NAXIS1/2 are bound to the image - they will not stay in the header
     det.meta['IMGAXIS1'] = c['NAXIS1']
     det.meta['IMGAXIS2'] = c['NAXIS2']
 
-    # Check if WCS has celestial information and is valid
-    if not imgwcs.has_celestial:
-        print("Error: No valid WCS/astrometry found in FITS header, cannot continue")
-        return None
+    # RTS2 true target coordinates: ORIRA/ORIDEC
+    if target_photometry:
+        det.meta['OBJRA'] = -100
+        with suppress(KeyError): det.meta['OBJRA'] = np.float64(c['ORIRA'])
+        det.meta['OBJDEC'] = -100
+        with suppress(KeyError): det.meta['OBJDEC'] = np.float64(c['ORIDEC'])
+    else:
+        det.meta['OBJRA'] = -100
+        det.meta['OBJDEC'] = -100
 
-    try:
-        rd = imgwcs.all_pix2world([[det.meta['CTRX'], det.meta['CTRY']], [0, 0], [det.meta['CTRX'], det.meta['CTRY']+1]], 0)
+    # Try to use WCS from header, if it fails solve and retry
+    wcs_retry_count = 0
+    max_wcs_retries = 1
+    wcs_ok = False
 
-        # Check if declination is within valid range
-        if abs(rd[0][1]) > 90:
-            print(f"Error: Invalid WCS transformation (dec={rd[0][1]:.1f}°), likely bad SIP solution. Cannot continue")
-            return None
+    while not wcs_ok and wcs_retry_count <= max_wcs_retries:
+        try:
+            imgwcs = astropy.wcs.WCS(det.meta)
 
-        det.meta['CTRRA'] = rd[0][0]
-        det.meta['CTRDEC'] = rd[0][1]
+            # Check if WCS has celestial information
+            if not imgwcs.has_celestial:
+                raise ValueError("No valid WCS/astrometry found in FITS header")
 
-        center = SkyCoord(rd[0][0]*astropy.units.deg, rd[0][1]*astropy.units.deg, frame='fk5')
-        corner = SkyCoord(rd[1][0]*astropy.units.deg, rd[1][1]*astropy.units.deg, frame='fk5')
-        pixel = SkyCoord(rd[2][0]*astropy.units.deg, rd[2][1]*astropy.units.deg, frame='fk5').separation(center)
-        field = center.separation(corner)
-        if verbose:
-            if field.deg > 10:
-                print(f"Diagonal field size: {field.deg*2:.1f}°, Pixel size: {pixel.arcsec:.3f}\"")
-            elif field.deg > 1:
-                print(f"Diagonal field size: {field.deg*2:.2f}°, Pixel size: {pixel.arcsec:.3f}\"")
+            # Test basic pixel to world transformation
+            rd = imgwcs.all_pix2world([[det.meta['CTRX'], det.meta['CTRY']],
+                                       [0, 0],
+                                       [det.meta['CTRX'], det.meta['CTRY']+1]], 0)
+
+            # Check if declination is within valid range
+            if abs(rd[0][1]) > 90:
+                raise ValueError(f"Invalid WCS transformation (dec={rd[0][1]:.1f}°), likely bad SIP solution")
+
+            # Test target coordinate transformation if needed
+            if target_photometry and det.meta['OBJRA'] != -100:
+                tmp = imgwcs.all_world2pix(det.meta['OBJRA'], det.meta['OBJDEC'], 0)
+                if verbose:
+                    with suppress(KeyError):
+                        print(f"Target is {det.meta['OBJECT']} at ra:{det.meta['OBJRA']} dec:{det.meta['OBJDEC']} -> x:{tmp[0]} y:{tmp[1]}")
+
+            # If we get here, WCS is OK
+            det.meta['CTRRA'] = rd[0][0]
+            det.meta['CTRDEC'] = rd[0][1]
+
+            center = SkyCoord(rd[0][0]*astropy.units.deg, rd[0][1]*astropy.units.deg, frame='fk5')
+            corner = SkyCoord(rd[1][0]*astropy.units.deg, rd[1][1]*astropy.units.deg, frame='fk5')
+            pixel = SkyCoord(rd[2][0]*astropy.units.deg, rd[2][1]*astropy.units.deg, frame='fk5').separation(center)
+            field = center.separation(corner)
+            if verbose:
+                if field.deg > 10:
+                    print(f"Diagonal field size: {field.deg*2:.1f}°, Pixel size: {pixel.arcsec:.3f}\"")
+                elif field.deg > 1:
+                    print(f"Diagonal field size: {field.deg*2:.2f}°, Pixel size: {pixel.arcsec:.3f}\"")
+                else:
+                    print(f"Diagonal field size: {field.deg*120:.1f}\', Pixel size: {pixel.arcsec:.3f}\"")
+
+            det.meta['FIELD'] = field.deg
+            det.meta['PIXEL'] = pixel.arcsec
+            wcs_ok = True
+
+        except (RuntimeError, ValueError, astropy.wcs.wcs.NoConvergence) as e:
+            if wcs_retry_count < max_wcs_retries:
+                # WCS failed, try to solve it
+                if verbose or wcs_retry_count == 0:
+                    print(f"WCS transformation failed ({type(e).__name__}: {e}), attempting to solve...")
+                wcs_dict = solve_wcs_return_header(fits_path, cat_file=cat_path, verbose=verbose)
+                if wcs_dict is None:
+                    print(f"Error: WCS solving failed for {fits_path}")
+                    print("The WCS solution is invalid and could not be repaired. Cannot continue.")
+                    return None
+                # Merge corrected WCS keywords into det.meta
+                for key, value in wcs_dict.items():
+                    det.meta[key] = value
+                if verbose:
+                    print(f"Corrected WCS inserted into .det metadata, retrying...")
+                wcs_retry_count += 1
             else:
-                print(f"Diagonal field size: {field.deg*120:.1f}\', Pixel size: {pixel.arcsec:.3f}\"")
-
-        det.meta['FIELD'] = field.deg
-        det.meta['PIXEL'] = pixel.arcsec
-    except (RuntimeError, ValueError) as e:
-        print(f"Error: Bad astrometry/WCS transformation ({e}), cannot continue")
-        return None
+                # Already tried solving, give up
+                print(f"Error: Bad astrometry ({type(e).__name__}), cannot continue even after WCS solving")
+                return None
 
     try:  # Normally we should have a FWHM value from phcat in the photometry file
         fwhm = det.meta['FWHM']
