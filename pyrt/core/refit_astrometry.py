@@ -2,7 +2,7 @@
 
 import os
 import numpy as np
-#import astropy.wcs
+import astropy.wcs
 #import astropy.io.fits
 from pyrt.core import zpnfit
 import logging
@@ -221,7 +221,16 @@ def select_best_projection(zpntest, data):
                 logging.info(msg)
                 print(msg)
 
-                if final_wssrndf < best_wssrndf:
+                # Validate that astropy can load this WCS
+                try:
+                    test_wcs = astropy.wcs.WCS(zpntest_test.wcs())
+                    wcs_valid = True
+                except (ValueError, RuntimeError) as e:
+                    wcs_valid = False
+                    logging.warning(f"{proj_name}: WCS validation failed - {e}")
+                    print(f"{proj_name}: WCS validation failed, rejecting")
+
+                if wcs_valid and final_wssrndf < best_wssrndf:
                     best_wssrndf = final_wssrndf
                     best_projection = proj_name
                     best_zpntest = zpntest_test
@@ -249,7 +258,19 @@ def select_best_projection(zpntest, data):
                 logging.info(msg)
                 print(msg)
 
-                if final_wssrndf < best_wssrndf:
+                # Validate that astropy can load this WCS
+                # This is crucial for ZPN as invalid PV parameters can cause astropy to fail
+                try:
+                    test_wcs = astropy.wcs.WCS(zpntest_test.wcs())
+                    # Also test that we can actually do transformations
+                    test_wcs.all_pix2world(100, 100, 0)
+                    wcs_valid = True
+                except (ValueError, RuntimeError, Exception) as e:
+                    wcs_valid = False
+                    logging.warning(f"{proj_name}: WCS validation failed - {e}")
+                    print(f"{proj_name}: WCS validation failed, rejecting")
+
+                if wcs_valid and final_wssrndf < best_wssrndf:
                     best_wssrndf = final_wssrndf
                     best_projection = proj_name
                     best_zpntest = zpntest_test
@@ -264,7 +285,16 @@ def select_best_projection(zpntest, data):
                 logging.info(msg)
                 print(msg)
 
-                if final_wssrndf < best_wssrndf:
+                # Validate that astropy can load this WCS
+                try:
+                    test_wcs = astropy.wcs.WCS(zpntest_test.wcs())
+                    wcs_valid = True
+                except (ValueError, RuntimeError) as e:
+                    wcs_valid = False
+                    logging.warning(f"{proj_name}: WCS validation failed - {e}")
+                    print(f"{proj_name}: WCS validation failed, rejecting")
+
+                if wcs_valid and final_wssrndf < best_wssrndf:
                     best_wssrndf = final_wssrndf
                     best_projection = proj_name
                     best_zpntest = zpntest_test
@@ -276,6 +306,12 @@ def select_best_projection(zpntest, data):
             continue
 
     # Report the winner
+    if best_zpntest is None:
+        msg = "ERROR: All projection types failed validation. Cannot create valid WCS."
+        logging.error(msg)
+        print(msg)
+        return None
+
     if best_terms:
         msg = f"Best projection: {best_projection} (WSSR/NDF = {best_wssrndf:.6f}) with terms {best_terms}"
     else:

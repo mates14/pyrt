@@ -96,8 +96,8 @@ def write_stars_file(data, ffit, imgwcs, filename="stars"):
     try:
         astx, asty = imgwcs.all_world2pix(fd_plot.ra, fd_plot.dec, 1)
         ast_residuals = np.sqrt((astx - fd_plot.coord_x)**2 + (asty - fd_plot.coord_y)**2)
-    except KeyError:
-        ast_residuals = np.zeros_like(fd_plot.x)  # If astrometric data is not available
+    except (KeyError, ValueError, RuntimeError, AttributeError):
+        ast_residuals = np.zeros_like(fd_plot.x)  # If astrometric data is not available or WCS is invalid
 
     # Create a table with all the data
     stars_table = Table([
@@ -921,8 +921,19 @@ def main():
                 astropy.io.fits.setval(newfits, key, 0, value=det.meta[key])
             zpntest.write(newfits)
             zpntest.write(det.meta)
-            imgwcs = astropy.wcs.WCS(zpntest.wcs())
-            logging.info(f"Saving a new fits with WCS took {time.time()-start:.3f}s")
+
+            # Create WCS object from the fitted solution
+            # Note: WCS validation already happened in select_best_projection,
+            # so this should succeed. Keep try/except as safety net.
+            try:
+                imgwcs = astropy.wcs.WCS(zpntest.wcs())
+                logging.info(f"Saving a new fits with WCS took {time.time()-start:.3f}s")
+            except (ValueError, RuntimeError) as e:
+                logging.error(f"UNEXPECTED: WCS validation failed after projection selection ({e})")
+                logging.error("This should not happen - WCS was validated during projection selection")
+                # Fall back to WCS from det.meta (original or solved WCS from cat2det)
+                imgwcs = astropy.wcs.WCS(det.meta)
+                logging.info(f"Using fallback WCS from det.meta")
     # ASTROMETRY END
 
     if options.stars:
