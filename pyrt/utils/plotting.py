@@ -2,6 +2,7 @@ import numpy as np
 import astropy.wcs
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
+from matplotlib.colors import hsv_to_rgb
 
 def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry'):
     """
@@ -190,22 +191,24 @@ def create_correction_volume_plots(data, output_base, ffit):
     for coord_name, param_idx, coord_values, label in coordinate_specs:
         if plot_idx >= 15:  # Limit to available subplot positions
             break
-            
-        # Create modified fotparams with this coordinate set to zero
-        modified_fotparams = list(fd.fotparams)
+
+        # Create reference fotparams with ALL parameters at reference values (median)
+        reference_fotparams = [
+            np.full_like(fd.fotparams[i], np.median(fd.fotparams[i]))
+            for i in range(len(fd.fotparams))
+        ]
+
+        # Now set ONLY the parameter of interest to its actual values
         if param_idx is not None:
-            if coord_name == 'magnitude':
-                # For magnitude, use the mean value instead of zero
-                modified_fotparams[param_idx] = np.full_like(coord_values, np.mean(coord_values))
-            else:
-                modified_fotparams[param_idx] = np.zeros_like(coord_values)
-        
-        # Calculate model with zeroed coordinate
-        if param_idx is not None:
-            model_zeroed = ffit.model(np.array(ffit.fitvalues), tuple(modified_fotparams))
-            correction = model_original - model_zeroed
+            reference_fotparams[param_idx] = coord_values
+
+            # Calculate model with only this parameter varying
+            model_only_this = ffit.model(np.array(ffit.fitvalues), tuple(reference_fotparams))
+
+            # Isolated effect: observations - F(all) + F(only this param)
+            correction = fd.x - model_original + model_only_this
         else:
-            # For derived quantities like radius, we can't directly zero them in the model
+            # For derived quantities like radius, we can't directly vary them in the model
             # Instead, we'll show the correlation with the original residuals
             residuals = fd.x - model_original
             correction = residuals
@@ -247,26 +250,90 @@ def create_correction_volume_plots(data, output_base, ffit):
         plot_idx += 1
     
     # Create x/y map of corrections - larger spatial plots at bottom
-    # Average correction per coordinate
-    avg_correction = np.mean([model_original - ffit.model(np.array(ffit.fitvalues), 
-                                                         (fd.fotparams[0], fd.fotparams[1], np.zeros_like(fd.coord_x), fd.fotparams[3], 
-                                                          fd.fotparams[4], fd.fotparams[5], fd.fotparams[6], fd.fotparams[7], 
-                                                          fd.fotparams[8], fd.fotparams[9], fd.fotparams[10], fd.fotparams[11], fd.fotparams[12], fd.fotparams[13])),
-                             model_original - ffit.model(np.array(ffit.fitvalues), 
-                                                         (fd.fotparams[0], fd.fotparams[1], fd.fotparams[2], np.zeros_like(fd.coord_y), 
-                                                          fd.fotparams[4], fd.fotparams[5], fd.fotparams[6], fd.fotparams[7], 
-                                                          fd.fotparams[8], fd.fotparams[9], fd.fotparams[10], fd.fotparams[11], fd.fotparams[12], fd.fotparams[13]))], axis=0)
+    # Calculate isolated effects for coord_x and coord_y
+
+    # For coord_x: reference model with only coord_x varying
+    ref_params_x = [np.full_like(fd.fotparams[i], np.median(fd.fotparams[i]))
+                    for i in range(len(fd.fotparams))]
+    ref_params_x[2] = fd.coord_x  # Keep coord_x actual values
+    model_only_x = ffit.model(np.array(ffit.fitvalues), tuple(ref_params_x))
+    correction_x = fd.x - model_original + model_only_x
+
+    # For coord_y: reference model with only coord_y varying
+    ref_params_y = [np.full_like(fd.fotparams[i], np.median(fd.fotparams[i]))
+                    for i in range(len(fd.fotparams))]
+    ref_params_y[3] = fd.coord_y  # Keep coord_y actual values
+    model_only_y = ffit.model(np.array(ffit.fitvalues), tuple(ref_params_y))
+    correction_y = fd.x - model_original + model_only_y
+
+    # Average the X and Y spatial corrections
+    avg_correction = np.mean([correction_x, correction_y], axis=0)
     
-    # X/Y spatial map - use 3 columns width
+    # X/Y spatial map - use 3 columns width with HSV color encoding
     ax = fig.add_subplot(gs[3:6, 0:3])
-    sc = ax.scatter(fd.coord_x[current_mask], fd.coord_y[current_mask], 
-                   c=avg_correction[current_mask], cmap='RdBu_r', s=8)
-    ax.scatter(fd.coord_x[~current_mask], fd.coord_y[~current_mask], 
+
+    # Prepare HSV colors for active points
+    # Hue: encode correction value (use 0-240° range: red->yellow->green->cyan->blue)
+    # Can be changed to 240-360° (blue->violet->red) by using hue_range=(240/360, 1.0)
+    correction_active = avg_correction[current_mask]
+    errors_active = fd.dy[current_mask]
+
+    # Normalize corrections to hue range [0, 0.667] (0-240 degrees)
+    # For blue->violet->red range, use [0.667, 1.0] instead
+    hue_range = (0.0, 0.667)  # Change to (0.667, 1.0) for 240-360° range
+    corr_min, corr_max = np.percentile(correction_active, [1, 99])
+    if corr_max > corr_min:
+        hue_normalized = (correction_active - corr_min) / (corr_max - corr_min)
+    else:
+        hue_normalized = np.full_like(correction_active, 0.5)
+    hue = hue_range[0] + hue_normalized * (hue_range[1] - hue_range[0])
+
+    # Saturation: encode precision (inverse of uncertainty)
+    # High precision (small error) = high saturation (vivid colors)
+    # Low precision (large error) = low saturation (washed out colors)
+    error_min, error_max = np.percentile(errors_active, [1, 99])
+    if error_max > error_min:
+        # Invert so small errors -> high saturation
+        saturation = 1.0 - (errors_active - error_min) / (error_max - error_min)
+        saturation = np.clip(saturation, 0.3, 1.0)  # Keep some minimum saturation
+    else:
+        saturation = np.ones_like(errors_active)
+
+    # Value: constant maximum brightness
+    value = np.ones_like(hue)
+
+    # Stack HSV and convert to RGB
+    hsv_colors = np.stack([hue, saturation, value], axis=-1)
+    rgb_colors = hsv_to_rgb(hsv_colors)
+
+    # Plot active points with HSV colors
+    ax.scatter(fd.coord_x[current_mask], fd.coord_y[current_mask],
+               c=rgb_colors, s=8, edgecolors='none')
+
+    # Plot masked points in gray
+    ax.scatter(fd.coord_x[~current_mask], fd.coord_y[~current_mask],
               c='gray', alpha=0.3, s=4)
+
     ax.set_xlabel('Coordinate X')
     ax.set_ylabel('Coordinate Y')
-    ax.set_title('X/Y Spatial Map of Corrections')
-    plt.colorbar(sc, ax=ax, label='Average XY Correction')
+    ax.set_title('X/Y Spatial Map of Corrections (Hue=Correction, Saturation=Precision)')
+
+    # Create a custom colorbar showing the hue scale
+    # Make a small sample of colors for the colorbar
+    n_colors = 256
+    cbar_hue = np.linspace(hue_range[0], hue_range[1], n_colors)
+    cbar_sat = np.ones(n_colors)
+    cbar_val = np.ones(n_colors)
+    cbar_hsv = np.stack([cbar_hue, cbar_sat, cbar_val], axis=-1)
+    cbar_rgb = hsv_to_rgb(cbar_hsv.reshape(1, -1, 3)).reshape(-1, 3)
+
+    # Create a dummy mappable for colorbar
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+    norm = Normalize(vmin=corr_min, vmax=corr_max)
+    sm = ScalarMappable(norm=norm, cmap=plt.cm.colors.ListedColormap(cbar_rgb))
+    sm.set_array([])
+    plt.colorbar(sm, ax=ax, label='Average XY Correction [mag]')
     
     # Subpixel X/Y map - compute actual subpixel correction
     # This is the difference between model at fractional vs integer positions
@@ -330,9 +397,13 @@ def create_correction_volume_plots(data, output_base, ffit):
     except Exception as e:
         print(f"Warning: Could not evaluate model grid: {e}")
 
-    # Data points: show data - model(floor(position))
-    # This is what's left after removing the model at integer pixel positions
-    data_residuals = fd.x - model_rounded
+    # Data points: show isolated subpixel effect
+    # Formula: observations - F(all) + F(only_subpixel)
+    # Where F(only_subpixel) ≈ F(fractional) - F(integer) when other params at reference
+    # Simplified: observations - model_full + (model_fractional - model_rounded)
+    subpixel_isolated = fd.x - model_original + (model_original - model_rounded)
+    # Which simplifies to: observations - model_rounded
+    data_residuals = subpixel_isolated
     data_residuals_clipped = np.clip(data_residuals, -0.1, 0.1)
 
     # Plot masked points as small gray dots
