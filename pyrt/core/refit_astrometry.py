@@ -222,8 +222,9 @@ def select_best_projection(zpntest, data):
                 print(msg)
 
                 # Validate that astropy can load this WCS
+                # Use relax=True to allow valid non-standard WCS configurations
                 try:
-                    test_wcs = astropy.wcs.WCS(zpntest_test.wcs())
+                    test_wcs = astropy.wcs.WCS(zpntest_test.wcs(), relax=True)
                     wcs_valid = True
                 except (ValueError, RuntimeError) as e:
                     wcs_valid = False
@@ -260,8 +261,9 @@ def select_best_projection(zpntest, data):
 
                 # Validate that astropy can load this WCS
                 # This is crucial for ZPN as invalid PV parameters can cause astropy to fail
+                # Use relax=True to allow valid non-standard WCS configurations (esp. ZPN+SIP)
                 try:
-                    test_wcs = astropy.wcs.WCS(zpntest_test.wcs())
+                    test_wcs = astropy.wcs.WCS(zpntest_test.wcs(), relax=True)
                     # Also test that we can actually do transformations
                     test_wcs.all_pix2world(100, 100, 0)
                     wcs_valid = True
@@ -286,8 +288,9 @@ def select_best_projection(zpntest, data):
                 print(msg)
 
                 # Validate that astropy can load this WCS
+                # Use relax=True to allow valid non-standard WCS configurations
                 try:
-                    test_wcs = astropy.wcs.WCS(zpntest_test.wcs())
+                    test_wcs = astropy.wcs.WCS(zpntest_test.wcs(), relax=True)
                     wcs_valid = True
                 except (ValueError, RuntimeError) as e:
                     wcs_valid = False
