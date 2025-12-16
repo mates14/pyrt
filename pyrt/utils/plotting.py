@@ -305,6 +305,8 @@ def create_correction_volume_plots(data, output_base, ffit):
     # Stack HSV and convert to RGB
     hsv_colors = np.stack([hue, saturation, value], axis=-1)
     rgb_colors = hsv_to_rgb(hsv_colors)
+    # Clip to valid range to handle floating point errors and outliers
+    rgb_colors = np.clip(rgb_colors, 0.0, 1.0)
 
     # Plot active points with HSV colors
     ax.scatter(fd.coord_x[current_mask], fd.coord_y[current_mask],
