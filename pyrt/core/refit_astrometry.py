@@ -596,6 +596,9 @@ def refit_astrometry(det, data, options):
     print(zpntest)
 
     if options.sip is not None:
+        # Save state before adding SIP in case we need to fall back
+        zpntest_before_sip = deepcopy(zpntest)
+
         zpntest.fixall()
         data.use_mask('photometry')
         if options.sip > 2:
@@ -606,6 +609,20 @@ def refit_astrometry(det, data, options):
             zpntest.add_sip_terms(options.sip)
             refine_fit(zpntest, data)
             refine_fit(zpntest, data)
+
+        # Validate the final Projection+SIP combination
+        # Some specific combinations of PV and SIP coefficients can fail WCSLIB validation
+        # even though they're mathematically valid
+        try:
+            test_wcs = astropy.wcs.WCS(zpntest.wcs(), relax=True)
+            test_wcs.all_pix2world(100, 100, 0)  # Test transformation works
+            logging.info("Final WCS validation passed (projection+SIP)")
+        except (ValueError, RuntimeError, Exception) as e:
+            logging.warning(f"Final WCS validation failed after adding SIP: {e}")
+            logging.warning("Falling back to projection without SIP distortion")
+            print(f"WARNING: Projection+SIP combination failed validation, using projection without SIP")
+            # Restore state before SIP was added
+            zpntest = zpntest_before_sip
 
     # Save the model and print results
     zpntest.savemodel("astmodel.ecsv")
