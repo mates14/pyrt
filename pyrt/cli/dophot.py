@@ -7,6 +7,8 @@ import logging
 import argparse
 from contextlib import suppress
 import subprocess
+import shutil
+import stat
 
 import numpy as np
 
@@ -912,7 +914,9 @@ def main():
             if os.path.isfile(newfits):
                 logging.info(f"Will overwrite {newfits}")
                 os.unlink(newfits)
-            os.system(f"cp {fitsbase}.fits {newfits}")
+            # Copy the file and ensure it's writable (even if source is read-only)
+            shutil.copy2(f"{fitsbase}.fits", newfits)
+            os.chmod(newfits, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
             for key in ['FIELD', 'PIXEL', 'FWHM']:
                 astropy.io.fits.setval(newfits, key, 0, value=det.meta[key])
             zpntest.write(newfits)
