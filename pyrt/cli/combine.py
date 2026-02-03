@@ -428,6 +428,11 @@ def find_valid_images_cluster(fits_files):
 
     # Calculate all pairwise distances
     n_images = len(centers)
+
+    # Handle single image case - no clustering needed
+    if n_images == 1:
+        return [all_headers[0][0]], []
+
     distances = np.zeros((n_images, n_images))
 
     for i in range(n_images):
@@ -998,7 +1003,7 @@ def process_single_image(input_data):
         # - Converts to TAN+SIP for complex projections (ZPN, or old-style distortions)
         # This handles the case where CTYPE says TAN but WCS interprets as PLA
         # due to old-style distortion coefficients
-        proj_tool = "mProjectPX"
+        proj_tool = "pyrt-mproject" # "mProjectPX"
         print(f"Using {proj_tool}")
 
         # Process weight map if present

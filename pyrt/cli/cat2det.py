@@ -190,16 +190,42 @@ def get_limits(det, verbose=False):
         # Don't set LIMFLX3/LIMFLX10/DLIMFLX3 - downstream code can check if they exist
         return
 
-    # Check if magnitude errors produce finite values
-    log_errors = np.log10(det['MAGERR_AUTO'] * np.log(2.5) * 3)
-    if not np.all(np.isfinite(log_errors)):
+    # Filter out detections with very small errors (unreliable, cause log10 issues)
+    # Use a more aggressive floor for error model fitting than the general 0.0005 floor
+    min_error = 0.001
+    valid_mask = det['MAGERR_AUTO'] >= min_error
+
+    if np.sum(valid_mask) < 3:
         if verbose:
-            print(f"Warning: Non-finite magnitude errors, cannot fit error model")
-        # Don't set LIMFLX3/LIMFLX10/DLIMFLX3 - downstream code can check if they exist
+            print(f"Warning: Only {np.sum(valid_mask)} detection(s) with MAGERR_AUTO >= {min_error}, cannot fit error model")
         return
 
+    # Fit only on detections with reasonable errors and finite magnitudes
+    mags_valid = det['MAG_AUTO'][valid_mask]
+    errors_valid = det['MAGERR_AUTO'][valid_mask]
+    log_errors = np.log10(errors_valid * np.log(2.5) * 3)
+
+    # Additional check: ensure magnitudes and log_errors are finite
+    finite_mask = np.isfinite(mags_valid) & np.isfinite(log_errors)
+    if np.sum(finite_mask) < 3:
+        if verbose:
+            total = len(det)
+            has_errors = np.sum(valid_mask)
+            finite_count = np.sum(finite_mask)
+            print(f"Warning: Cannot fit error model ({total} detections total, {has_errors} with MAGERR_AUTO >= {min_error}, {finite_count} with finite mag and errors)")
+        return
+
+    mags_valid = mags_valid[finite_mask]
+    log_errors = log_errors[finite_mask]
+
+    # Use data-driven initial guess instead of hardcoded [1, 2.5]
+    # L1 should be roughly around the median magnitude (where error ~ 1)
+    # Q should be around 2.5 (standard magnitude scale)
+    initial_L1 = np.median(mags_valid)
+    initial_Q = 2.5
+
     try:
-        res = opt.least_squares(errormodel, [1, 2.5], args=[(det['MAG_AUTO'], log_errors)])
+        res = opt.least_squares(errormodel, [initial_L1, initial_Q], args=[(mags_valid, log_errors)])
         det.meta['LIMFLX3'] = res.x[0]
         det.meta['LIMFLX10'] = res.x[0]+res.x[1]*np.log10(1.091/10) # FIXME: this is strange, I do not trust this is actually 10-sigma
 

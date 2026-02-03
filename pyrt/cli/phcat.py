@@ -17,6 +17,7 @@ from pyrt.utils.file_utils import get_sextractor_binary
 def read_options(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
     parser.add_argument("-a", "--aperture", help="Override an automated aperture choice", type=float)
+    parser.add_argument("-f", "--fwhm", help="Override automatic FWHM estimation for convolution matrix (useful for pathological images)", type=float)
     parser.add_argument("-I", "--noiraf", help="Do not use IRAF", action='store_true')
     parser.add_argument("-b", "--background", help="Save the background check image", action='store_true')
     parser.add_argument("-B", "--background-subtract", help="Save background, subtract it from image, and remove background file", action='store_true')
@@ -32,9 +33,14 @@ def gauss(r, sigma):
 
 def do_matrix(file, fwhm):
     '''Generate sextractor convolution matrix of a given FWHM'''
-    sigma = fwhm / np.sqrt(8.0*np.log(2.0))
+    # Clamp FWHM to max 5 to prevent oversized convolution matrices (>15x15)
+    fwhm_clamped = min(fwhm, 5.0)
+    if fwhm != fwhm_clamped:
+        print(f"Warning: FWHM clamped from {fwhm:.2f} to {fwhm_clamped:.2f} to avoid oversized convolution matrix")
+    sigma = fwhm_clamped / np.sqrt(8.0*np.log(2.0))
     q = int(sigma*3+0.5)
 #    base = os.path.splitext(file)[0]
+    print(f"Matrix: {file},{2*q+1}x{2*q+1} (fwhm={fwhm_clamped:.2f})")
     some_file = open(file, "w+")
     some_file.write("CONV NORM\n")
     some_file.write(f"# {2*q+1}x{2*q+1} convolution mask with FWHM = {fwhm} pixels.\n")
@@ -237,13 +243,20 @@ def process_photometry(file: str,
                       background: bool = False,
                       background_subtract: bool = False,
                       target_photometry: bool = True,
+                      fwhm_override: Optional[float] = None,
                       verbose: bool = False) -> astropy.table.Table:
     """Main photometry processing function that can be called programmatically"""
 
-    det = call_sextractor(file, 2.0)
-    new_fwhm = get_fwhm_from_detections(det)
-    if not np.isnan(new_fwhm):
-        det = call_sextractor(file, new_fwhm, bg=background or background_subtract)
+    # Use override FWHM if provided, otherwise estimate it
+    if fwhm_override is not None:
+        print(f"Using command-line FWHM override: {fwhm_override:.2f}")
+        det = call_sextractor(file, fwhm_override, bg=background or background_subtract)
+        new_fwhm = fwhm_override
+    else:
+        det = call_sextractor(file, 2.0)
+        new_fwhm = get_fwhm_from_detections(det)
+        if not np.isnan(new_fwhm):
+            det = call_sextractor(file, new_fwhm, bg=background or background_subtract)
 
     print("W/H:",det.meta['IMAGEW'],det.meta['IMAGEH'])
 
@@ -288,11 +301,14 @@ def process_photometry(file: str,
                 # Add target row to the end of detections
                 det = astropy.table.vstack([det, target_row])
 
-    # Compute FWHM before any photometry operations
-    fwhm = get_fwhm_from_detections(det)
-    if np.isnan(fwhm):
-        print("Warning: Could not determine FWHM from detections, using default")
-        fwhm = 2.0  # fallback to initial guess
+    # Compute FWHM before any photometry operations (use override if provided)
+    if fwhm_override is not None:
+        fwhm = fwhm_override
+    else:
+        fwhm = get_fwhm_from_detections(det)
+        if np.isnan(fwhm):
+            print("Warning: Could not determine FWHM from detections, using default")
+            fwhm = 2.0  # fallback to initial guess
     print(f'FWHM={fwhm}')
 
     det.meta['FWHM'] = fwhm
@@ -357,6 +373,7 @@ def main():
                                background=options.background,
                                background_subtract=options.background_subtract,
                                target_photometry=options.target_photometry,
+                               fwhm_override=options.fwhm,
                                verbose=True)
 
         tbl.write(base+".cat", format="ascii.ecsv", overwrite=True)

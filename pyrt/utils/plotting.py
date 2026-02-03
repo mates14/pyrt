@@ -53,7 +53,7 @@ def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry')
         ('CoordX', fd.coord_x),
         ('CoordY', fd.coord_y),
         ('Catalog', fd.x),
-        ('Airmass', fd.adif)
+        ('Airmass', fd.airmass)
     ]
 
     aparams = [

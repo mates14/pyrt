@@ -908,24 +908,37 @@ def main():
             zpntest = refit_astrometry(det, data, options)
             logging.info(f"Astrometric fit took {time.time()-start:.3f}s")
         if zpntest is not None:
-            # Update FITS file with new WCS
             start = time.time()
             fitsbase = os.path.splitext(arg)[0]
             newfits = fitsbase + "t.fits"
-            if os.path.isfile(newfits):
-                logging.info(f"Will overwrite {newfits}")
-                os.unlink(newfits)
-            # Copy the file and ensure it's writable (even if source is read-only)
-            shutil.copy2(f"{fitsbase}.fits", newfits)
-            os.chmod(newfits, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
-            for key in ['FIELD', 'PIXEL', 'FWHM']:
-                astropy.io.fits.setval(newfits, key, 0, value=det.meta[key])
-            zpntest.write(newfits)
-            zpntest.write(det.meta)
 
-            # Create WCS object from the fitted solution
-            # Use relax=True to handle ZPN+SIP and other valid but non-standard WCS configurations
-            imgwcs = astropy.wcs.WCS(zpntest.wcs(), relax=True)
+            # 1. Copy the original FITS to create the astrometrized version
+            try:
+                if os.path.isfile(newfits):
+                    logging.info(f"Will overwrite {newfits}")
+                    os.unlink(newfits)
+                shutil.copy2(f"{fitsbase}.fits", newfits)
+                os.chmod(newfits, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+            except OSError as e:
+                logging.warning(f"Cannot create astrometrized FITS (source {fitsbase}.fits missing or not copyable): {e}")
+                newfits = None
+
+            # 2. Write WCS solution and keywords into the copied FITS
+            if newfits is not None:
+                try:
+                    for key in ['FIELD', 'PIXEL', 'FWHM']:
+                        astropy.io.fits.setval(newfits, key, 0, value=det.meta[key])
+                    zpntest.write(newfits)
+                except Exception as e:
+                    logging.warning(f"Failed to write WCS headers into {newfits}: {e}")
+
+            # 3. Store WCS solution into det.meta for downstream use
+            try:
+                zpntest.write(det.meta)
+                imgwcs = astropy.wcs.WCS(zpntest.wcs(), relax=True)
+            except Exception as e:
+                logging.warning(f"Failed to update det.meta with WCS solution: {e}")
+
             logging.info(f"Saving a new fits with WCS took {time.time()-start:.3f}s")
     # ASTROMETRY END
 
