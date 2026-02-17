@@ -44,6 +44,7 @@ Key Features:
 - **Uniform weighting**: Optional equal weighting for uncalibrated data
 - **Smart MAGZERO handling**: Skips files without calibration, suggests --uniform
 - **Time-variable source support**: GRB mode with power-law brightness evolution
+- **Photometry file support**: Use measured magnitudes from dophot output for optimal SNR weighting
 - **Weight map handling**: Supports per-pixel weighting (vignetting correction)
 - **Parallel processing**: Multi-core image projection and reprojection
 - **Characteristic time**: Proper time tagging for transient observations
@@ -63,6 +64,10 @@ Photometric weighting (default):
 
   For time-variable sources (GRB mode), adjusts expected brightness using
   power-law decay model: mag(t) = mag0 + decay * log10(t/t0)
+
+  For measured photometry (--photfile mode), uses actual magnitudes from a
+  dophot-style output file. This is useful for combining images to maximize
+  SNR for precise astrometric position determination.
 
 Uniform weighting (--uniform):
   All images receive equal weight. Useful for:
@@ -786,6 +791,61 @@ def calculate_background_stats(data):
 
     return scale_factor * sigma, median
 
+def parse_photometry_file(photfile, input_files):
+    """Parse photometry file with measured magnitudes.
+
+    Reads a dophot-style output file and extracts magnitudes for each input file.
+    The file must contain entries for ALL input files.
+
+    Args:
+        photfile: Path to photometry file
+        input_files: List of input FITS file paths
+
+    Returns:
+        dict: Mapping from filename to (magnitude, error) tuple
+
+    Raises:
+        ValueError: If any input file is missing from the photometry file
+    """
+    photometry = {}
+
+    with open(photfile, 'r') as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 13:
+                continue
+            filename = parts[0]
+            try:
+                mag = float(parts[11])  # Column 12 (0-indexed: 11)
+                magerr = float(parts[12])  # Column 13 (0-indexed: 12)
+                # Skip invalid magnitudes (99.999 typically means not found)
+                if mag > 90:
+                    continue
+                photometry[filename] = (mag, magerr)
+            except ValueError:
+                continue
+
+    # Check that all input files have photometry
+    input_basenames = {os.path.basename(f): f for f in input_files}
+    missing = []
+    result = {}
+
+    for basename, fullpath in input_basenames.items():
+        if basename in photometry:
+            result[fullpath] = photometry[basename]
+        else:
+            missing.append(basename)
+
+    if missing:
+        raise ValueError(
+            f"Photometry file {photfile} missing entries for {len(missing)} file(s):\n"
+            + "\n".join(f"  - {f}" for f in missing[:10])
+            + (f"\n  ... and {len(missing)-10} more" if len(missing) > 10 else "")
+        )
+
+    return result
+
+
 def get_image_time(header):
     """Get image mid-exposure time in JD from FITS header.
 
@@ -833,7 +893,7 @@ def calculate_brightness(time, t0, mag0, rate):
     else:
         return mag0
 
-def compute_weights(files, gain, t0, mag0, rate, uniform=False):
+def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None):
     """Compute optimal weights for image combination.
 
     In weighted mode (default), uses photometric calibration (MAGZERO) and
@@ -849,6 +909,9 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False):
         mag0: Reference magnitude
         rate: Brightness change rate (mags/day)
         uniform: If True, use uniform weighting (default: False)
+        photometry: Optional dict mapping file paths to (mag, magerr) tuples.
+                   When provided, uses actual measured magnitudes instead of
+                   calculating from time and power-law model.
 
     Returns:
         tuple: (weights_dict, skipped_files_list)
@@ -880,6 +943,9 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False):
     # Weighted mode: calculate S/N-based weights
     total_counts = 0
 
+    if photometry:
+        print("Using measured magnitudes from photometry file")
+
     # First pass - calculate total counts, skip files without MAGZERO
     for f in files:
         with fits.open(f) as hdul:
@@ -889,8 +955,12 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False):
                 skipped.append(f)
                 continue
 
-            time = get_image_time(header)
-            mag = calculate_brightness(time, t0, mag0, rate)
+            # Get magnitude: from photometry file or calculate from time
+            if photometry:
+                mag, magerr = photometry[f]
+            else:
+                time = get_image_time(header)
+                mag = calculate_brightness(time, t0, mag0, rate)
             counts = gain * np.power(10, -0.4 * (mag - header['MAGZERO']))
 
             if counts <= 0:
@@ -917,8 +987,12 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False):
                 if data is None or len(data.shape) != 2:
                     raise ValueError(f"Invalid data array in {f}")
 
-                time = get_image_time(header)
-                mag = calculate_brightness(time, t0, mag0, rate)
+                # Get magnitude: from photometry file or calculate from time
+                if photometry:
+                    mag, magerr = photometry[f]
+                else:
+                    time = get_image_time(header)
+                    mag = calculate_brightness(time, t0, mag0, rate)
                 counts = gain * np.power(10, -0.4 * (mag - header['MAGZERO']))
 
                 # Calculate background stats
@@ -1227,6 +1301,9 @@ Examples:
   # GRB mode with time-variable source
   %(prog)s --grb 2459000.5,17.0,-1.2 grb*.fits
 
+  # Use measured magnitudes from photometry file
+  %(prog)s --photfile dophot.dat transient*.fits
+
   # Custom frame calculation parameters
   %(prog)s --sampling-factor 16 --scale-factor 2.0 *.fits
         """
@@ -1254,6 +1331,8 @@ Examples:
                        help="Factor to scale field size (default: 1.5)")
     parser.add_argument("--zoom-factor", type=float, default=1.0,
                        help="Additional zoom factor for output (default: 1.0)")
+    parser.add_argument("--out", action="store_true",
+                       help="Use partial coverage mode: largest rectangle with any coverage (default: full coverage by all images)")
 
     # Weighting and photometry
     parser.add_argument("-u", "--uniform", action="store_true",
@@ -1264,6 +1343,8 @@ Examples:
                        help="Reference source brightness in magnitudes (default: 17.0)")
     parser.add_argument("--grb", metavar="T0,MAG,DECAY",
                        help="GRB parameters: T0 (JD), magnitude at 1d, decay rate (mags/decade)")
+    parser.add_argument("--photfile", metavar="FILE",
+                       help="Photometry file with measured magnitudes (dophot output format: col 1=filename, col 12=mag, col 13=magerr)")
 
     # Processing options
     parser.add_argument("-z", "--drizzle", type=float, default=1.0,
@@ -1339,7 +1420,8 @@ def main():
             sampling_factor=args.sampling_factor,
             scale_factor=args.scale_factor,
             zoom_factor=args.zoom_factor,
-            num_processes=args.num_processes
+            num_processes=args.num_processes,
+            mode='out' if args.out else 'in'
         )
         write_montage_header(optimal_header, args.skeleton_only)
         print("\n" + "=" * 70)
@@ -1352,23 +1434,30 @@ def main():
         if not os.path.exists(skeleton_file):
             raise FileNotFoundError(f"Skeleton file not found: {skeleton_file}")
     else:
-        print("\nStage 2: WCS Frame - Calculating optimal frame")
+        print("\nStage 2: WCS Frame - Calculating optimal frame" +
+              (" (partial coverage)" if args.out else ""))
         optimal_header = find_optimal_frame(
             valid_inputs,
             sampling_factor=args.sampling_factor,
             scale_factor=args.scale_factor,
             zoom_factor=args.zoom_factor,
-            num_processes=args.num_processes
+            num_processes=args.num_processes,
+            mode='out' if args.out else 'in'
         )
         skeleton_file = 'skel.hdr'
         write_montage_header(optimal_header, skeleton_file)
 
     # Stage 3: Weight Calculation
+    photometry = None
     if args.uniform:
         print("\nStage 3: Weight Calculation - Using uniform weights")
     else:
         print("\nStage 3: Weight Calculation - Computing optimal weights")
-        if args.t0 is not None:
+        if args.photfile:
+            print(f"Using measured magnitudes from: {args.photfile}")
+            photometry = parse_photometry_file(args.photfile, valid_inputs)
+            print(f"Loaded magnitudes for {len(photometry)} files")
+        elif args.t0 is not None:
             print(f"GRB mode: T0={args.t0}, mag@1d={args.brightness}, decay={args.rate} mag/decade")
 
     weights, skipped = compute_weights(
@@ -1377,7 +1466,8 @@ def main():
         args.t0,
         args.brightness,
         args.rate,
-        uniform=args.uniform
+        uniform=args.uniform,
+        photometry=photometry
     )
 
     # Report skipped files
