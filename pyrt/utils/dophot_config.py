@@ -155,6 +155,8 @@ def parse_arguments(args=None):
     parser.add_argument("-W", "--save-model", help="Write model into a file", type=str)
     parser.add_argument("-y", "--fit-xy", action='store_true', help="Fit xy tilt for each image separately (i.e. terms PX/PY)")
     parser.add_argument("-z", "--refit-zpn", action='store_true', help="Refit the ZPN radial terms")
+    parser.add_argument("--save-wcs", nargs='?', const=True, default=False, metavar='FILE',
+                        help="Write WCS solution to .wcs file (astrometry.net format). Without FILE argument, uses input filename with .wcs extension")
     parser.add_argument("-Z", "--single-zeropoint", action='store_true', help="Use single common zeropoint instead of per-image zeropoints (enables all-sky fitting)")
     parser.add_argument("--szp", action='store_true', help="use SZP while fitting astrometry")
     parser.add_argument("--target-photometry", action='store_true', 
