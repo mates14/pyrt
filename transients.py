@@ -26,6 +26,7 @@ from sklearn.neighbors import KDTree,BallTree
 
 from pyrt.core import zpnfit
 from pyrt.core import fotfit
+from pyrt.utils.astrometry import apply_parallax_correction
 
 # TRAJECTORY-BASED MOVING OBJECT TRACKING
 class MovingObjectTrail:
@@ -533,6 +534,12 @@ for arg in options.files:
 #    cat = get_atlas(det.meta['CTRRA'], det.meta['CTRDEC'], width=enlarge*det.meta['FIELD'], height=enlarge*det.meta['FIELD'], mlim=det.meta['MAGLIMIT']+0.5)
     cat['radeg'] += epoch*cat['pmra']
     cat['decdeg'] += epoch*cat['pmdec']
+
+    # Apply parallax correction if parallax data is available
+    if 'parallax' in cat.colnames:
+        cat['radeg'], cat['decdeg'] = apply_parallax_correction(
+            cat['radeg'], cat['decdeg'], cat['parallax'], det.meta['JD']
+        )
 
     print("Catalog returned %d results"%(len(cat)))
     if options.usnox:
