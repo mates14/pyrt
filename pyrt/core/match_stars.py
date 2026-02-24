@@ -24,6 +24,7 @@ from pyrt.core import zpnfit
 from pyrt.core import fotfit
 #from catalogs import get_atlas, get_catalog
 from pyrt.catalog.catalog import Catalog, CatalogFilter
+from pyrt.utils.astrometry import apply_parallax_correction
 from pyrt.cli.cat2det import remove_junk
 from pyrt.core.refit_astrometry import refit_astrometry
 from pyrt.utils.file_utils import try_det, try_img, write_region_file
@@ -214,6 +215,51 @@ def estimate_rough_zeropoint(det, nearest_ind, cat, valid_cat_mask):
 
     return 0.0
 
+
+def apply_catalog_astrometric_corrections(cat, jd):
+    """
+    Apply proper motion and parallax corrections to catalog positions.
+
+    This corrects catalog coordinates from their reference epoch to the
+    observation epoch, accounting for both stellar motion and parallactic
+    shift due to Earth's orbital position.
+
+    Args:
+        cat: Catalog table with radeg, decdeg, pmra, pmdec columns
+             and optionally parallax column
+        jd: Julian date of observation
+
+    Returns:
+        Catalog with corrected radeg, decdeg columns (modified in place)
+    """
+    # Get reference epoch from catalog metadata
+    # Default to Gaia DR2/ATLAS epoch (2015.5 = JD 2457204.5)
+    ref_epoch_jd = cat.meta.get('astepoch', 2015.5)
+    if ref_epoch_jd < 3000:  # It's a year, not JD
+        # Convert year to JD: J2000.0 = 2451545.0
+        ref_epoch_jd = 2451545.0 + (ref_epoch_jd - 2000.0) * 365.2425
+
+    # Apply proper motion correction
+    if 'pmra' in cat.colnames and 'pmdec' in cat.colnames:
+        epoch_years = (jd - ref_epoch_jd) / 365.2425
+        cat['radeg'] = cat['radeg'] + epoch_years * cat['pmra']
+        cat['decdeg'] = cat['decdeg'] + epoch_years * cat['pmdec']
+        logging.info(f"Applied proper motion correction: {epoch_years:.2f} years from epoch {ref_epoch_jd:.1f}")
+
+    # Apply parallax correction
+    if 'parallax' in cat.colnames:
+        # Check if we have any meaningful parallax values
+        valid_parallax = cat['parallax'] > 0
+        if np.any(valid_parallax):
+            cat['radeg'], cat['decdeg'] = apply_parallax_correction(
+                cat['radeg'], cat['decdeg'], cat['parallax'], jd
+            )
+            n_corrected = np.sum(valid_parallax)
+            logging.info(f"Applied parallax correction to {n_corrected} stars with measured parallax")
+
+    return cat
+
+
 def get_catalog_with_dynamic_limit(det, estimated_zp, options):
     """
     Get catalog data with magnitude limit scaled from detection limit.
@@ -376,6 +422,10 @@ def process_image_with_dynamic_limits(det, options):
             if len(cat) == 0:
                 logging.warning(f"Empty catalog from {catalog_name} - no reference stars available")
                 return None, None, None, None
+
+        # Apply proper motion and parallax corrections to catalog positions
+        # This corrects from catalog epoch to observation epoch
+        cat = apply_catalog_astrometric_corrections(cat, det.meta['JD'])
 
         logging.info(f"Matching {len(det)} objects from file with {len(cat)} objects from the catalog")
         # Final matching with full catalog
