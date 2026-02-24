@@ -510,9 +510,10 @@ class Catalog(astropy.table.Table):
         result = result[complete_mask]
         logging.info(f"PanSTARRS: kept {len(result)} stars with complete g,r,i,z,y photometry")
 
-        # Add proper motion columns (not provided by PanSTARRS)
+        # Add proper motion and parallax columns (not provided by PanSTARRS)
         result['pmra'] = np.zeros(len(result), dtype=np.float64)
         result['pmdec'] = np.zeros(len(result), dtype=np.float64)
+        result['parallax'] = np.zeros(len(result), dtype=np.float64)
 
         return result
 
@@ -524,7 +525,7 @@ class Catalog(astropy.table.Table):
             config = self.KNOWN_CATALOGS[self.GAIA]
             query = f"""
             SELECT
-                source_id, ra, dec, pmra, pmdec,
+                source_id, ra, dec, pmra, pmdec, parallax,
                 phot_g_mean_mag, phot_g_mean_flux_over_error,
                 phot_bp_mean_mag, phot_bp_mean_flux_over_error,
                 phot_rp_mean_mag, phot_rp_mean_flux_over_error
@@ -565,6 +566,14 @@ class Catalog(astropy.table.Table):
                 result['pmdec'] = np.float64(gaia_cat['pmdec']) / (3.6e6)  # mas/yr to deg/yr
             except TypeError:
                 result['pmdec'] = 0
+
+            # Parallax in mas (for parallax correction)
+            try:
+                result['parallax'] = np.float64(gaia_cat['parallax'])  # mas
+            except TypeError:
+                result['parallax'] = 0.0
+            # Replace NaN with 0 (distant stars with unmeasured parallax)
+            result['parallax'] = np.nan_to_num(result['parallax'], nan=0.0)
 
             # Map columns according to configuration
             for gaia_name, our_name in config['column_mapping'].items():
@@ -791,11 +800,13 @@ class Catalog(astropy.table.Table):
         if len(cat) == 0:
             return None
 
-        # Ensure proper motion columns exist
+        # Ensure proper motion and parallax columns exist
         if 'pmra' not in cat.columns:
             cat['pmra'] = np.zeros(len(cat), dtype=np.float64)
         if 'pmdec' not in cat.columns:
             cat['pmdec'] = np.zeros(len(cat), dtype=np.float64)
+        if 'parallax' not in cat.columns:
+            cat['parallax'] = np.zeros(len(cat), dtype=np.float64)
 
         # Strip units from all columns to ensure compatibility
         for col in cat.colnames:
