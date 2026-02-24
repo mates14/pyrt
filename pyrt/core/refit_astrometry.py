@@ -624,15 +624,19 @@ def refit_astrometry(det, data, options):
             # Restore state before SIP was added
             zpntest = zpntest_before_sip
 
-    # Save the model and print results
-    zpntest.savemodel("astmodel.ecsv")
+    # Save WCS solution if requested
+    if options.save_wcs:
+        if options.save_wcs is True:
+            # Use input filename with .wcs extension
+            base_filename = os.path.splitext(det.meta['FITSFILE'])[0]
+            wcs_filename = f"{base_filename}.wcs"
+        else:
+            wcs_filename = options.save_wcs
+        zpntest.write_wcs(wcs_filename)
+
     print(zpntest)
 
-    # Create diagnostic plot of astrometric residuals if plotting is enabled
-    if options.plot:
-        base_filename = os.path.splitext(det.meta['FITSFILE'])[0]
-        plot_filename = f"{base_filename}-ast.png"
-        plot_astrometric_residuals(zpntest, data, plot_filename, arrow_scale=2.5)
+    # Astrometric arrow plot now generated in dophot.py using plot_astrometric_arrows()
 
     # Error model analysis removed - now done in transients.py with full catalog
 
