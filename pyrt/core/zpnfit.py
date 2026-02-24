@@ -144,6 +144,43 @@ class zpnfit(termfit.termfit):
                     if i + j > 0)
         return x + dx, y + dy
 
+    def write_wcs(self, filename):
+        """Write a minimal WCS-only FITS file (like astrometry.net .wcs output).
+
+        Parameters
+        ----------
+        filename : str
+            Output filename (typically with .wcs extension)
+        """
+        # Create a minimal primary HDU with no data
+        hdr = fits.Header()
+
+        # Standard FITS header keywords
+        hdr['SIMPLE'] = (True, 'Standard FITS file')
+        hdr['BITPIX'] = (8, 'ASCII or bytes array')
+        hdr['NAXIS'] = (0, 'Minimal header')
+        hdr['EXTEND'] = (True, 'There may be FITS extensions')
+
+        # Get WCS parameters from our model
+        wcs_dict = self.wcs()
+        for key, value in wcs_dict.items():
+            hdr[key] = value
+
+        # Add provenance
+        hdr['HISTORY'] = 'WCS solution created by pyrt/zpnfit'
+
+        # Add quality metrics if available
+        if hasattr(self, 'sigma') and not np.isnan(self.sigma):
+            hdr['ASTSIGMA'] = (self.sigma, 'Astrometric fit sigma (pixels)')
+        if hasattr(self, 'wssrndf') and not np.isnan(self.wssrndf):
+            hdr['ASTWSSR'] = (self.wssrndf, 'Astrometric WSSR/NDF')
+
+        # Create primary HDU with no data and write
+        primary_hdu = fits.PrimaryHDU(header=hdr)
+        hdul = fits.HDUList([primary_hdu])
+        hdul.writeto(filename, overwrite=True)
+        logging.info(f"WCS solution written to {filename}")
+
     def write(self, output, clean_header=True):
         """Write the fitted WCS solution to a FITS file or dictionary.
 
