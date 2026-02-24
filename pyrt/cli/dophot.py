@@ -34,7 +34,7 @@ from pyrt.core.data_handling import PhotometryData, make_pairs_to_fit, compute_z
 from pyrt.core.match_stars import process_image_with_dynamic_limits
 from pyrt.core.stepwise_regression import perform_stepwise_regression, parse_terms, expand_pseudo_term
 
-from pyrt.utils.plotting import create_residual_plots, create_correction_volume_plots
+from pyrt.utils.plotting import create_residual_plots, create_correction_volume_plots, plot_astrometric_arrows
 from pyrt.utils.filter_matching import determine_filter
 
 if sys.version_info[0]*1000+sys.version_info[1]<3008:
@@ -950,8 +950,24 @@ def main():
     if options.plot:
         start = time.time()
         base_filename = os.path.splitext(det.meta['detf'])[0]
-        create_residual_plots(data, base_filename, ffit, zpntest, 'photometry')
+        create_residual_plots(data, base_filename, ffit, zpntest)
         create_correction_volume_plots(data, base_filename, ffit)
+        # Arrow plot for astrometric residuals on the image
+        if zpntest is not None:
+            image_scale = max(det.meta['IMGAXIS1'], det.meta['IMGAXIS2']) / 1024.0
+            image_shape = (det.meta['IMGAXIS2'], det.meta['IMGAXIS1'])
+            try:
+                fitsfile = det.meta.get('filename') or det.meta.get('FITSFILE')
+                if fitsfile and os.path.isfile(fitsfile):
+                    image_data = astropy.io.fits.getdata(fitsfile)
+                else:
+                    image_data = None
+                    logging.info("FITS image not available, using white background for arrow plot")
+            except Exception as e:
+                image_data = None
+                logging.warning(f"Could not load FITS image: {e}, using white background")
+            plot_astrometric_arrows(image_data, data, zpntest, base_filename,
+                                    scale=image_scale, image_shape=image_shape)
         logging.info(f"Generating plots took {time.time()-start:.3f}s")
 
     if not options.remove_spatial:
