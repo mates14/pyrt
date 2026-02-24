@@ -2,7 +2,9 @@ import numpy as np
 import astropy.wcs
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-from matplotlib.colors import hsv_to_rgb
+from matplotlib.colors import hsv_to_rgb, Normalize
+from matplotlib.cm import ScalarMappable
+from scipy.optimize import curve_fit
 
 def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry'):
     """
@@ -428,10 +430,174 @@ def create_correction_volume_plots(data, output_base, ffit):
     ax.set_ylim(0, 1)
     
     plt.tight_layout()
-    
+
     # Save the plot
     output_filename = f"{output_base}-corr.png"
     plt.savefig(output_filename, dpi=100, bbox_inches='tight')
     plt.close()
-    
+
+    return output_filename
+
+
+def _log_scale_image(data):
+    """
+    Apply logarithmic scaling to 16-bit image data for display.
+
+    Uses quantile-based curve fitting to map dynamic range to 0-255,
+    similar to the approach in f2cj.py.
+
+    Args:
+        data: 2D numpy array of image data
+
+    Returns:
+        Scaled image as uint8 array (0-255)
+    """
+    data = data.astype(float)
+
+    # Filter out saturated pixels for quantile calculation
+    saturation_level = 60000
+    unsaturated_data = data[data <= saturation_level]
+
+    if len(unsaturated_data) == 0:
+        unsaturated_data = data
+
+    # Calculate quantiles
+    fractions = [0.1, 0.5, 0.9, 0.9995]
+    quantiles = [np.quantile(unsaturated_data, q) for q in fractions]
+
+    # Prepare data for fitting
+    x_data = np.array(quantiles)
+    y_data_log = np.log10(np.array([1, 255./8, 255./4, 255.]))
+
+    # Fix C to noise floor
+    C_fixed = quantiles[0] - (quantiles[2] - quantiles[0]) / 1000
+
+    def log_func(x, A, B):
+        return A + B * np.log10(x - C_fixed)
+
+    try:
+        popt, _ = curve_fit(log_func, x_data, y_data_log, p0=[1.0, 1.0])
+        A, B = popt
+    except:
+        # Fallback to simple linear scaling
+        vmin, vmax = np.percentile(data, [1, 99])
+        return np.clip((data - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
+
+    # Apply transformation
+    data_clamped = np.maximum(data, C_fixed + 1e-10)
+    transformed = 10 ** log_func(data_clamped, A, B)
+
+    return np.clip(transformed, 0, 255).astype(np.uint8)
+
+
+def plot_astrometric_arrows(image_data, data, afit, output_base, scale=1.0):
+    """
+    Plot astrometric residuals as arrows overlaid on the astronomical image.
+
+    This recreates the classic visualization from Fortran-era astrometry tools,
+    showing enlarged residual vectors directly on the image.
+
+    Args:
+        image_data: 2D numpy array (the FITS image)
+        data: PhotometryData object containing star data
+        afit: Astrometric fit object with WCS
+        output_base: Base filename for output (without extension)
+        scale: Arrow scale multiplier (1.0 = automatic based on image size)
+
+    Returns:
+        Output filename
+    """
+    # Get fit data
+    data.use_mask('photometry')
+    current_mask = data.get_current_mask()
+    data.use_mask('default')
+
+    fd = data.get_fitdata('ra', 'dec', 'coord_x', 'coord_y', 'image_x', 'image_y')
+
+    # Get predicted positions from WCS
+    imgwcs = astropy.wcs.WCS(afit.wcs())
+    astx, asty = imgwcs.all_world2pix(fd.ra, fd.dec, 1)
+
+    # Residuals (measured - predicted)
+    dx = fd.image_x - astx
+    dy = fd.image_y - asty
+    residual_mag = np.sqrt(dx**2 + dy**2)
+
+    # Scale image for display
+    scaled_image = _log_scale_image(image_data)
+
+    # Scale: base 50 multiplied by user-provided scale (typically image_size/1024)
+    base_scale = 50.0
+    effective_scale = base_scale * scale
+
+    # Minimum arrow length also scales
+    base_min_length = 12.0
+    min_arrow_length = base_min_length * scale
+
+    fig, ax = plt.subplots(figsize=(12, 12))
+
+    # Display image (inverted grayscale - black stars on white)
+    ax.imshow(255 - scaled_image, origin='lower', cmap='gray')
+
+    # Color mapping: rainbow based on residual magnitude
+    # Inverted: red=small (good), blue=large (bad) - blue is more visible
+    sigma_res = afit.sigma if hasattr(afit, 'sigma') else np.std(residual_mag[current_mask])
+
+    # Normalize residuals for coloring: 0 to 3*sigma maps to full rainbow (inverted)
+    norm = Normalize(vmin=0, vmax=3 * sigma_res)
+    cmap = plt.cm.rainbow_r  # reversed: red=small, blue=large
+
+    # Add minimum arrow length so small residuals still show a visible tip
+    arrow_mag = residual_mag * effective_scale
+    # Scale factor to ensure minimum length while preserving direction
+    length_factor = np.where(arrow_mag > 0,
+                             np.maximum(1.0, min_arrow_length / arrow_mag),
+                             1.0)
+    dx_scaled = dx * effective_scale * length_factor
+    dy_scaled = dy * effective_scale * length_factor
+
+    # Plot rejected points in gray first
+    rejected = ~current_mask
+    if np.any(rejected):
+        ax.quiver(astx[rejected], asty[rejected],
+                  dx_scaled[rejected], dy_scaled[rejected],
+                  angles='xy', scale_units='xy', scale=1,
+                  color='gray', alpha=0.5,
+                  width=0.0025, headwidth=3, headlength=4, headaxislength=3)
+
+    # Plot active points with color coding by residual magnitude
+    active = current_mask
+    if np.any(active):
+        colors = cmap(norm(residual_mag[active]))
+        ax.quiver(astx[active], asty[active],
+                  dx_scaled[active], dy_scaled[active],
+                  angles='xy', scale_units='xy', scale=1,
+                  color=colors,
+                  width=0.003, headwidth=3, headlength=4, headaxislength=3)
+
+    # Add colorbar
+    sm = ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, label='Residual magnitude [pixels]',
+                        fraction=0.046, pad=0.04)
+
+    # Add scale reference arrow in corner (position scales with image size)
+    ref_pos = 50 * scale
+    ref_length = sigma_res * effective_scale  # 1-sigma reference
+    ax.annotate('', xy=(ref_pos + ref_length, ref_pos), xytext=(ref_pos, ref_pos),
+                arrowprops=dict(arrowstyle='->', color='black', lw=2))
+    ax.text(ref_pos + ref_length/2, ref_pos * 0.6, f'1σ = {sigma_res:.3f} px (x{effective_scale:.0f})',
+            ha='center', fontsize=10, color='black',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    ax.set_title(f'Astrometric Residuals (x{effective_scale:.0f}, σ={sigma_res:.3f} px)')
+    ax.set_xlabel('X [pixels]')
+    ax.set_ylabel('Y [pixels]')
+
+    plt.tight_layout()
+
+    output_filename = f"{output_base}-arrows.png"
+    plt.savefig(output_filename, dpi=150, bbox_inches='tight')
+    plt.close()
+
     return output_filename
