@@ -6,14 +6,15 @@ from matplotlib.colors import hsv_to_rgb, Normalize
 from matplotlib.cm import ScalarMappable
 from scipy.optimize import curve_fit
 
-def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry'):
+def create_residual_plots(data, output_base, ffit, afit):
     """
-    Create residual plots similar to the gnuplot script.
+    Create residual plots for photometry and astrometry.
 
     Args:
         data: PhotometryData object containing the star data
         output_base: Base filename for output (without extension)
-        plot_type: 'photometry' or 'astrometry' to determine plot type
+        ffit: Photometric fit object
+        afit: Astrometric fit object (can be None)
     """
     # Get the current mask and data arrays
     #current_mask = data.get_current_mask()
@@ -46,10 +47,8 @@ def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry')
 
     # List of parameters to plot
     params = [
-    #    ('Color x Airmass', fd.adif * fd.color1),
         ('Radius', radius),
         ('Color3', fd.color3),
-    #    ('Color4', fd.color4),
         ('Color1', fd.color1),
         ('Color2', fd.color2),
         ('CoordX', fd.coord_x),
@@ -58,78 +57,71 @@ def create_residual_plots(data, output_base, ffit, afit, plot_type='photometry')
         ('Airmass', fd.airmass)
     ]
 
+    # Astrometry parameters
     aparams = [
-    #    ('Color x Airmass', fd.adif * fd.color1),
+    #    ('Color x Airmass', fd.airmass * fd.color1),
         ('CoordX', fd.coord_x),
         ('CoordY', fd.coord_y)
     ]
 
-    # Color mapping for points based on errors
-    error_colors = plt.cm.hsv(np.log10(fd.dy))
+    # Magnitude residuals
+    residuals = fd.x - model_mags
+    sigma = ffit.sigma
+    ylim = (-sigma*7, sigma*7)
 
-    if plot_type == 'photometry':
-        # Magnitude residuals, up higher values, should me "measured brighter"
-        residuals = fd.x - model_mags
-        # I'd like to have 10-sigma here
-        sigma = ffit.sigma
-        ylim = (-sigma*7, sigma*7)
+    for idx, (label, param) in enumerate(params):
+        ax = fig.add_subplot(gs[idx // 2 + 1, idx % 2])
 
-        for idx, (label, param) in enumerate(params):
-            ax = fig.add_subplot(gs[idx // 2 + 1, idx % 2 ])
+        # Plot masked points in gray
+        ax.scatter(param[~current_mask], residuals[~current_mask],
+                  c='gray', alpha=0.3, s=2)
 
-            # Plot masked points in gray
-            ax.scatter(param[~current_mask], residuals[~current_mask],
-                      c='gray', alpha=0.3, s=2)
+        # Plot unmasked points with color coding
+        sc = ax.scatter(param[current_mask], residuals[current_mask],
+                      c=fd.dy[current_mask], cmap='hsv', s=2)
 
-            # Plot unmasked points with color coding
-            sc = ax.scatter(param[current_mask], residuals[current_mask],
-                          c=fd.dy[current_mask], cmap='hsv', s=2)
+        ax.set_ylabel('Magnitude Residuals')
+        ax.set_xlabel(label)
+        ax.set_ylim(ylim)
+        ax.grid(True, alpha=0.2)
 
-            ax.set_ylabel('Magnitude Residuals')
-            ax.set_xlabel(label)
-            ax.set_ylim(ylim)
-            ax.grid(True, alpha=0.2)
+    # Astrometric residuals in top row
+    try:
+        dx = fd.image_x - astx
+        dy = fd.image_y - asty
+        asigma = afit.sigma
+    except:
+        dx = np.zeros_like(fd.image_x)
+        dy = np.zeros_like(fd.image_x)
+        asigma = 0.01
 
-#    else:  # astrometry
+    aylim = (-asigma*7, asigma*7)
 
-        try:
-            dx = fd.image_x - astx
-            dy = fd.image_y - asty
-            sigma = afit.sigma
-        except:
-            dx=np.zeros_like(fd.image_x)
-            dy=np.zeros_like(fd.image_x)
-            sigma=0.01
+    for idx, (label, param) in enumerate(aparams):
+        ax = fig.add_subplot(gs[idx // 2, idx % 2])
 
-        ylim = (-sigma*7, sigma*7)
+        # Plot X residuals
+        ax.scatter(param[~current_mask], dx[~current_mask],
+                  c='#ffaaaa', alpha=0.3, s=2, label='X (masked)')
+        ax.scatter(param[~current_mask], dy[~current_mask],
+                  c='#aaffaa', alpha=0.3, s=2, label='Y (masked)')
 
-#        for idx, (label, param) in enumerate(params):
-        for idx, (label, param) in enumerate(aparams):
-            ax = fig.add_subplot(gs[idx // 2, idx % 2])
+        ax.scatter(param[current_mask], dx[current_mask],
+                  c='#aa0000', s=2, label='X')
+        ax.scatter(param[current_mask], dy[current_mask],
+                  c='#00aa00', s=2, label='Y')
 
-            # Plot X residuals
-            ax.scatter(param[~current_mask], dx[~current_mask],
-                      c='#ffaaaa', alpha=0.3, s=2, label='X (masked)')
-            ax.scatter(param[~current_mask], dy[~current_mask],
-                      c='#aaffaa', alpha=0.3, s=2, label='Y (masked)')
+        if idx == 0:
+            ax.legend(markerscale=3)
 
-            ax.scatter(param[current_mask], dx[current_mask],
-                      c='#aa0000', s=2, label='X')
-            ax.scatter(param[current_mask], dy[current_mask],
-                      c='#00aa00', s=2, label='Y')
-
-            if idx == 0:  # Only show legend for first plot
-                ax.legend(markerscale=3)
-
-            ax.set_ylabel('Position Residuals')
-            ax.set_xlabel(label)
-            ax.set_ylim(ylim)
-            ax.grid(True, alpha=0.2)
+        ax.set_ylabel('Position Residuals')
+        ax.set_xlabel(label)
+        ax.set_ylim(aylim)
+        ax.grid(True, alpha=0.2)
 
     plt.tight_layout()
 
-    # Save the plot
-    output_filename = f"{output_base}-{'ast' if plot_type == 'astrometry' else 'phot'}.png"
+    output_filename = f"{output_base}-phot.png"
     plt.savefig(output_filename, dpi=100, bbox_inches='tight')
     plt.close()
 
@@ -490,7 +482,7 @@ def _log_scale_image(data):
     return np.clip(transformed, 0, 255).astype(np.uint8)
 
 
-def plot_astrometric_arrows(image_data, data, afit, output_base, scale=1.0):
+def plot_astrometric_arrows(image_data, data, afit, output_base, scale=1.0, image_shape=None):
     """
     Plot astrometric residuals as arrows overlaid on the astronomical image.
 
@@ -498,11 +490,12 @@ def plot_astrometric_arrows(image_data, data, afit, output_base, scale=1.0):
     showing enlarged residual vectors directly on the image.
 
     Args:
-        image_data: 2D numpy array (the FITS image)
+        image_data: 2D numpy array (the FITS image), or None for white background
         data: PhotometryData object containing star data
         afit: Astrometric fit object with WCS
         output_base: Base filename for output (without extension)
         scale: Arrow scale multiplier (1.0 = automatic based on image size)
+        image_shape: (height, width) tuple, required if image_data is None
 
     Returns:
         Output filename
@@ -523,8 +516,18 @@ def plot_astrometric_arrows(image_data, data, afit, output_base, scale=1.0):
     dy = fd.image_y - asty
     residual_mag = np.sqrt(dx**2 + dy**2)
 
-    # Scale image for display
-    scaled_image = _log_scale_image(image_data)
+    # Handle image or white background
+    if image_data is not None:
+        scaled_image = _log_scale_image(image_data)
+        img_shape = image_data.shape
+    else:
+        # White background - need image_shape
+        if image_shape is None:
+            # Fallback: estimate from star coordinates
+            img_shape = (int(fd.image_y.max() + 100), int(fd.image_x.max() + 100))
+        else:
+            img_shape = image_shape
+        scaled_image = np.zeros(img_shape, dtype=np.uint8)  # Will become white after inversion
 
     # Scale: base 50 multiplied by user-provided scale (typically image_size/1024)
     base_scale = 50.0
@@ -536,7 +539,7 @@ def plot_astrometric_arrows(image_data, data, afit, output_base, scale=1.0):
 
     fig, ax = plt.subplots(figsize=(12, 12))
 
-    # Display image (inverted grayscale - black stars on white)
+    # Display image (inverted grayscale - black stars on white, or just white if no image)
     ax.imshow(255 - scaled_image, origin='lower', cmap='gray')
 
     # Color mapping: rainbow based on residual magnitude
