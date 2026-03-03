@@ -542,13 +542,25 @@ def plot_astrometric_arrows(image_data, data, afit, output_base, scale=1.0, imag
     # Display image (inverted grayscale - black stars on white, or just white if no image)
     ax.imshow(255 - scaled_image, origin='lower', cmap='gray')
 
-    # Color mapping: rainbow based on residual magnitude
-    # Inverted: red=small (good), blue=large (bad) - blue is more visible
+    # Color mapping: custom colormap with constant brightness and saturation
+    # Rotates through hues at ~50% lightness and high saturation for visibility
     sigma_res = afit.sigma if hasattr(afit, 'sigma') else np.std(residual_mag[current_mask])
 
-    # Normalize residuals for coloring: 0 to 3*sigma maps to full rainbow (inverted)
+    # Normalize residuals for coloring: 0 to 3*sigma
     norm = Normalize(vmin=0, vmax=3 * sigma_res)
-    cmap = plt.cm.rainbow_r  # reversed: red=small, blue=large
+
+    # Create custom colormap: hue rotation at constant lightness=0.5, saturation=0.9
+    import colorsys
+    n_colors = 256
+    hue_start, hue_end = 0.0, 0.50  # red to purple (avoid full circle)
+    colors = []
+    for i in range(n_colors):
+        h = hue_start + (hue_end - hue_start) * i / (n_colors - 1)
+        h = h + 0.65
+        if h>1: h=h-1
+        r, g, b = colorsys.hls_to_rgb(h, 0.40, 0.85)  # L=0.45, S=0.95
+        colors.append((r, g, b))
+    cmap = plt.cm.colors.ListedColormap(colors)
 
     # Add minimum arrow length so small residuals still show a visible tip
     arrow_mag = residual_mag * effective_scale
