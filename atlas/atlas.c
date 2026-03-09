@@ -545,9 +545,18 @@ int main(int argc, char **argv)
    (classic "chord through interior" case).  Apply in both directions:
    - RA fill: for each dec band, mark all tiles between the leftmost
      and rightmost marked tile (handles a rectangle narrow in Dec).
+     Handle RA wrap-around (e.g. 356 deg to 4 deg): if the gap between
+     the two extreme marked tiles spans more than 180 deg, the rectangle
+     crosses RA=0 and the short arc is the complement.
    - Dec fill: for each RA column, mark all tiles between the bottommost
-     and topmost marked tile (handles a rectangle narrow in RA). */
-   if(rect) {
+     and topmost marked tile (handles a rectangle narrow in RA).
+   Skip this entirely when the field contains a celestial pole: adoffset()
+   reflects corners that cross the pole to RA+180, producing bogus seeds
+   for the fill.  In that case step 2 (dot-product test above) is already
+   correct and sufficient because cos(Dec)->0 near the pole makes the RA
+   constraint trivially satisfied, so all tiles in the high-Dec bands are
+   already marked without needing the fill. */
+   if(rect && dec0+ddec < pi/2 && dec0-ddec > -pi/2) {
       int ramin, ramax, decmin_i, decmax_i;
       for(j=0; j<180; j++) {
 	 ramin = 360; ramax = -1;
@@ -557,7 +566,14 @@ int main(int argc, char **argv)
 	       if(i > ramax) ramax = i;
 	    }
 	 }
-	 for(i=ramin; i<=ramax; i++) degin[i+j*360] = 1;
+	 if(ramax < 0) continue;	/* no marked tiles in this band */
+	 if(ramax - ramin > 180) {
+	    /* wrap-around: fill [ramax..359] and [0..ramin] */
+	    for(i=ramax; i<360; i++) degin[i+j*360] = 1;
+	    for(i=0; i<=ramin; i++) degin[i+j*360] = 1;
+	 } else {
+	    for(i=ramin; i<=ramax; i++) degin[i+j*360] = 1;
+	 }
       }
       for(i=0; i<360; i++) {
 	 decmin_i = 180; decmax_i = -1;
