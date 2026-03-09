@@ -573,7 +573,7 @@ def refit_astrometry(det, data, options):
     zpntest.fit(ad.astparams)
 
     # Refine the fit - use stepwise for unknown cameras with refit_zpn
-    is_known_camera = camera in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]
+    is_known_camera = camera in ["C0", "C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]
     is_zpn = (zpntest.fixvalues[zpntest.fixterms.index("PROJ")] == zpntest.projections.index("ZPN"))
 
     if options.refit_zpn and not is_known_camera and is_zpn:
@@ -674,6 +674,14 @@ def setup_initial_wcs(zpntest, meta):
 
 def setup_camera_params(zpntest, camera, refit_zpn):
     """Set up camera-specific parameters."""
+    if camera == "C0":
+        if refit_zpn:
+            zpntest.fitterm(["PV2_3"], [300])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], [543,530])
+        else:
+            zpntest.fixterm(["PV2_3", "PV2_5"], [7.5, 386.1])
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], [2090,2043])
+
     if camera == "C1":
         if refit_zpn:
             zpntest.fitterm(["PV2_3", "PV2_5"], [7.5, 386.1])

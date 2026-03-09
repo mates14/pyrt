@@ -191,6 +191,7 @@ def estimate_rough_zeropoint(det, nearest_ind, cat, valid_cat_mask):
     valid_matches = [i for i, inds in enumerate(nearest_ind) if len(inds) > 0]
 
     if not valid_matches:
+        logging.warning(f"estimate_rough_zeropoint: no valid matches -> returning 0")
         return 0.0
 
     # Get matched magnitudes
@@ -213,6 +214,7 @@ def estimate_rough_zeropoint(det, nearest_ind, cat, valid_cat_mask):
         logging.info(f"Initial zeropoint estimate: {zp:.3f} using {np.sum(bright_mask)} bright stars")
         return zp
 
+    logging.warning(f"estimate_rough_zeropoint: default end -> returning 0")
     return 0.0
 
 

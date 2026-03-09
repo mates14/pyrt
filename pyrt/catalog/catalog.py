@@ -365,6 +365,8 @@ class Catalog(astropy.table.Table):
         """Get data from one magnitude split of ATLAS catalog"""
         with tempfile.NamedTemporaryFile(suffix=".ecsv", delete=False) as tmp:
             try:
+                # atlas -rect takes angular arc half-extents (+/-dR, +/-dD deg from the
+                # N-S, E-W great circles), so width/height are passed directly.
                 cmd =   f'atlas {self._query_params.ra} {self._query_params.dec} '\
                         f'-rect {self._query_params.width},{self._query_params.height} '\
                         f'-dir {directory} -mlim {self._query_params.mlim:.2f} -ecsv '
@@ -523,6 +525,10 @@ class Catalog(astropy.table.Table):
             from astroquery.gaia import Gaia
 
             config = self.KNOWN_CATALOGS[self.GAIA]
+            # ADQL BOX takes longitude coordinate degrees (not arc-degrees) for width,
+            # so at high declination the RA extent must be divided by cos(DEC).
+            cos_dec = np.cos(np.radians(self._query_params.dec))
+            ra_width = 2 * self._query_params.width / cos_dec
             query = f"""
             SELECT
                 source_id, ra, dec, pmra, pmdec, parallax,
@@ -533,7 +539,7 @@ class Catalog(astropy.table.Table):
             WHERE 1=CONTAINS(
                 POINT('ICRS', ra, dec),
                 BOX('ICRS', {self._query_params.ra}, {self._query_params.dec},
-                    {2*self._query_params.width}, {2*self._query_params.height}))
+                    {ra_width}, {2*self._query_params.height}))
                 AND phot_g_mean_mag < {self._query_params.mlim}
                 AND ruwe < 1.4
                 AND visibility_periods_used >= 8
