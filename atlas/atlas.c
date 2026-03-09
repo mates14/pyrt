@@ -541,6 +541,36 @@ int main(int argc, char **argv)
       }
    }
    
+/* Fill in interior tiles that have no corner inside the rectangle
+   (classic "chord through interior" case).  Apply in both directions:
+   - RA fill: for each dec band, mark all tiles between the leftmost
+     and rightmost marked tile (handles a rectangle narrow in Dec).
+   - Dec fill: for each RA column, mark all tiles between the bottommost
+     and topmost marked tile (handles a rectangle narrow in RA). */
+   if(rect) {
+      int ramin, ramax, decmin_i, decmax_i;
+      for(j=0; j<180; j++) {
+	 ramin = 360; ramax = -1;
+	 for(i=0; i<360; i++) {
+	    if(degin[i+j*360]) {
+	       if(i < ramin) ramin = i;
+	       if(i > ramax) ramax = i;
+	    }
+	 }
+	 for(i=ramin; i<=ramax; i++) degin[i+j*360] = 1;
+      }
+      for(i=0; i<360; i++) {
+	 decmin_i = 180; decmax_i = -1;
+	 for(j=0; j<180; j++) {
+	    if(degin[i+j*360]) {
+	       if(j < decmin_i) decmin_i = j;
+	       if(j > decmax_i) decmax_i = j;
+	    }
+	 }
+	 for(j=decmin_i; j<=decmax_i; j++) degin[i+j*360] = 1;
+      }
+   }
+
    if(VERBOSE > 1) {
       fprintf(stderr, "Sqdeg with corners inside area:  ");
       for(k=0; k<360*180; k++) {
