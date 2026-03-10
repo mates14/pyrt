@@ -1150,7 +1150,9 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
         skeleton_file: Path to skeleton header file
         args: Parsed command-line arguments
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
+    home_tmp = Path.home() / "tmp"
+    home_tmp.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=home_tmp) as tmpdir:
         tmpdir = Path(tmpdir)
 
         # Copy skeleton header to temp directory
