@@ -1238,10 +1238,9 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
         max_workers = min(mp.cpu_count(), len(process_inputs))
         print(f"Processing images using {max_workers} processes...")
 
-        processed_files = []
         with mp.Pool(processes=max_workers) as pool:
             results = pool.map(process_single_image, process_inputs)
-            processed_files = [r for r in results if r is not None]
+        processed_files = [r for r in results if r is not None]
 
         if not processed_files:
             raise RuntimeError("No valid processed images produced")
@@ -1317,7 +1316,36 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
             except Exception as e:
                 raise RuntimeError(f"Failed to apply combined weight map: {str(e)}")
 
+        # Save output weight map for future coaddition if requested
+        if args.keep_weightmap:
+            print("Computing output weight map...")
+            with fits.open(output) as ref_hdul:
+                ref_shape = ref_hdul[0].data.shape
+                ref_header = ref_hdul[0].header.copy()
+            wmap_sum = np.zeros(ref_shape, dtype=np.float32)
+            for proc_input, proc_result in zip(process_inputs, results):
+                if proc_result is None:
+                    continue
+                w_i = proc_input[1]  # scalar weight
+                if proc_result['weight_map'] is not None:
+                    with fits.open(proc_result['weight_map']) as whdul:
+                        wmap_sum += w_i * np.nan_to_num(whdul[0].data, nan=0.0).astype(np.float32)
+                else:
+                    with fits.open(proc_result['image']) as ihdul:
+                        coverage = np.isfinite(ihdul[0].data) & (ihdul[0].data != 0)
+                        wmap_sum += w_i * coverage.astype(np.float32)
+            fits.writeto(args.keep_weightmap, wmap_sum, header=ref_header)
+            print(f"Output weight map saved to {args.keep_weightmap}")
+
     update_output_header(output, inputs, weights, args)
+
+    if args.keep_weightmap:
+        result = subprocess.run(
+            ["fitsheader", "-w", f"WGHTFILE={args.keep_weightmap}", output],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(f"Warning: Could not set WGHTFILE header in {output}: {result.stderr}")
 
 # ============================================================================
 # Argument Parsing and Main
@@ -1396,6 +1424,9 @@ Examples:
     # Processing options
     parser.add_argument("-B", "--background-subtract", action="store_true",
                        help="Subtract background from each image before combining (uses pyrt-phcat -B)")
+    parser.add_argument("-W", "--keep-weightmap", metavar="FILE", nargs='?', const='__auto__',
+                       help="Save output weight map for future coaddition (default name: {output}w.fits). "
+                            "The weight map is the scalar-weighted sum of per-pixel weights across all frames.")
     parser.add_argument("-z", "--drizzle", type=float, default=1.0,
                        help="Drizzle scale factor, range (0, 2] (default: 1.0)")
     parser.add_argument("--num-processes", type=int, default=None,
@@ -1428,12 +1459,20 @@ Examples:
     if args.gain <= 0:
         parser.error("Gain must be positive")
 
+    # Resolve auto weight map filename
+    if args.keep_weightmap == '__auto__':
+        stem = os.path.splitext(args.output)[0]
+        args.keep_weightmap = stem + 'w.fits'
+
     # Critical safety check: Prevent overwriting existing FITS files
     if args.skeleton_only:
         if os.path.exists(args.skeleton_only):
             parser.error(f"Operation would overwrite an existing file: {args.skeleton_only}")
     elif os.path.exists(args.output):
         parser.error(f"Output file {args.output} already exists")
+
+    if args.keep_weightmap and os.path.exists(args.keep_weightmap):
+        parser.error(f"Weight map output file already exists: {args.keep_weightmap}")
 
     return args
 
