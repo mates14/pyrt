@@ -157,17 +157,26 @@ def safe_add_label_to_image(img, label_text, fits_header):
 def main():
     parser = argparse.ArgumentParser(description='Convert FITS file to JPEG with logarithmic scaling')
     parser.add_argument('fits_file', help='Input FITS file')
-    parser.add_argument('-o', '--output', help='Output JPEG filename (default: auto-generated from input filename)')
+    parser.add_argument('-o', '--output', help='Output filename (default: auto-generated from input filename)')
     parser.add_argument('-c', '--color', choices=['heat', 'cool'], help='Color palette: heat or cool')
     parser.add_argument('-i', '--inverted', action='store_true', help='Invert colors (grayscale) or use cool palette (with -c heat)')
     parser.add_argument('-l', '--label', help='Label text to add at bottom of image (supports FITS header expansion like %%H:%%M)')
-    
+    parser.add_argument('-F', '--fits-out', action='store_true', help='Save as FITS with full header and 8-bit grayscale data (for Aladin)')
+
     args = parser.parse_args()
     fits_file = args.fits_file
-    
+    save_as_fits = args.fits_out
+
     # Generate output filename first (needed for error cases)
     if args.output:
         output_filename = args.output
+        # Auto-detect fits output from extension
+        if output_filename.endswith('.fits') or output_filename.endswith('.fit'):
+            save_as_fits = True
+    elif save_as_fits:
+        output_filename = fits_file.replace('.fits', '_8bit.fits').replace('.fit', '_8bit.fit')
+        if output_filename == fits_file:
+            output_filename = fits_file + '_8bit.fits'
     else:
         output_filename = fits_file.replace('.fits', '.jpg').replace('.fit', '.jpg')
         if output_filename == fits_file:  # No .fits extension found
@@ -240,17 +249,26 @@ def main():
         # Clamp to 0-255 range and convert to uint8
         transformed = np.clip(transformed, 0, 255).astype(np.uint8)
         
+        if save_as_fits:
+            # Save as FITS with full original header and 8-bit grayscale data
+            out_header = header.copy()
+            out_header['BITPIX'] = 8
+            out_hdu = fits.PrimaryHDU(data=transformed, header=out_header)
+            out_hdu.writeto(output_filename, overwrite=True)
+            print(f"FITS (8-bit) saved as: {output_filename}")
+            return
+
         # Apply color palette and inversion
         palette = args.color or 'none'
         is_inverted = args.inverted
-        
+
         # Handle cool palette as inverted heat
         if args.color == 'cool':
             palette = 'heat'
             is_inverted = True
-        
+
         colored_data = safe_apply_color_palette(transformed, palette, is_inverted)
-        
+
         # Create JPEG
         if palette == 'none':
             # Grayscale image
@@ -258,11 +276,11 @@ def main():
         else:
             # Color image
             img = Image.fromarray(colored_data, mode='RGB')
-        
+
         # Add label if specified
         if args.label:
             img = safe_add_label_to_image(img, args.label, header)
-        
+
         img.save(output_filename, 'JPEG', quality=95)
         print(f"JPEG saved as: {output_filename}")
         
@@ -288,7 +306,12 @@ def main():
             except:
                 pass
         
-        img.save(output_filename, 'JPEG', quality=95)
+        if save_as_fits:
+            # Write a minimal blank 8-bit FITS as fallback
+            blank = np.zeros((fallback_height, fallback_width), dtype=np.uint8)
+            fits.PrimaryHDU(data=blank).writeto(output_filename, overwrite=True)
+        else:
+            img.save(output_filename, 'JPEG', quality=95)
         print(f"Fallback image saved as: {output_filename}")
 
 if __name__ == "__main__":
