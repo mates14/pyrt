@@ -1045,14 +1045,17 @@ def process_single_image(input_data):
     Applies scalar weight, reprojects to target WCS using mProjectPP or mProjectPX,
     and handles associated weight maps for vignetting correction.
 
+    Optionally subtracts the background (via pyrt-phcat -B) and applies synthetic
+    flat field correction before combination.
+
     Args:
         input_data: Tuple of (input_file, scalar_weight, weighted_dir, proj_dir,
-                    skel_hdr, drizzle, weights_dir, projw_dir)
+                    skel_hdr, drizzle, weights_dir, projw_dir, subtract_background)
 
     Returns:
         dict: {'image': projected_file, 'weight_map': projected_weight_map or None}
     """
-    input_file, scalar_weight, weighted_dir, proj_dir, skel_hdr, drizzle, weights_dir, projw_dir = input_data
+    input_file, scalar_weight, weighted_dir, proj_dir, skel_hdr, drizzle, weights_dir, projw_dir, subtract_background = input_data
 
     base_name = Path(input_file).stem
     output_weighted = weighted_dir / f"{base_name}_weighted.fits"
@@ -1062,15 +1065,53 @@ def process_single_image(input_data):
     weight_map_weighted = None
     weight_map_proj = None
 
-    with fits.open(input_file) as hdul:
+    # Step 1: Background subtraction (optional, -B flag)
+    if subtract_background:
+        base_path = Path(input_file)
+        bgsub_file = base_path.parent / f"{base_path.stem}s.fits"
+        cat_file = base_path.parent / f"{base_path.stem}.cat"
+        import shutil as _shutil
+        phcat_cmd = "pyrt-phcat" if _shutil.which("pyrt-phcat") else f"{sys.executable} -m pyrt.cli.phcat"
+        result = subprocess.run(
+            [*phcat_cmd.split(), "-B", input_file],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0 and bgsub_file.exists():
+            if cat_file.exists():
+                cat_file.unlink()
+            working_file = str(bgsub_file)
+            print(f"Background subtracted: {input_file} -> {bgsub_file.name}")
+        else:
+            print(f"Warning: Background subtraction failed for {input_file}, using original")
+            if result.stderr:
+                print(f"  phcat error: {result.stderr.strip()}")
+            working_file = input_file
+    else:
+        working_file = input_file
+
+    with fits.open(working_file) as hdul:
         # Check for weight map
         has_weight_map = 'WGHTFILE' in hdul[0].header
         if has_weight_map:
-            print(f"File {hdul[0].header['WGHTFILE']} is a weight map for {input_file}")
+            print(f"File {hdul[0].header['WGHTFILE']} is a weight map for {working_file}")
             weight_map_file = hdul[0].header['WGHTFILE']
             if not os.path.exists(weight_map_file):
                 print(f"Warning: Weight file {weight_map_file} not found")
                 has_weight_map = False
+
+        # Steps 2-3: Synthetic flat field correction
+        # Flat is named {filebase}f.fits where weight is {filebase}w.fits
+        flat_data = None
+        if has_weight_map and weight_map_file.endswith('w.fits'):
+            flat_file = weight_map_file[:-len('w.fits')] + 'f.fits'
+            if os.path.exists(flat_file):
+                with fits.open(flat_file) as fhdul:
+                    raw_flat = fhdul[0].data.astype(float)
+                    flat_median = np.median(raw_flat[raw_flat != 0]) if np.any(raw_flat != 0) else 1.0
+                    flat_data = raw_flat / flat_median
+                print(f"Applying flat field correction from {flat_file} (median={flat_median:.4g})")
+            else:
+                print(f"Note: No synthetic flat found for {working_file} (expected {flat_file})")
 
         # Always use mProjectPX - it's a smart wrapper that:
         # - Calls mProjectPP directly for natively supported projections
@@ -1079,6 +1120,9 @@ def process_single_image(input_data):
         # due to old-style distortion coefficients
         proj_tool = "pyrt-mproject" # "mProjectPX"
         print(f"Using {proj_tool}")
+
+        # Apply flat field correction to image data if available
+        img_data = hdul[0].data / flat_data if flat_data is not None else hdul[0].data
 
         # Process weight map if present
         if has_weight_map:
@@ -1093,13 +1137,13 @@ def process_single_image(input_data):
                     new_whdul = fits.HDUList([new_whdu])
                     new_whdul.writeto(weight_map_weighted)
 
-                    weighted_data = hdul[0].data * scalar_weight * weighted_wmap
+                    weighted_data = img_data * scalar_weight * weighted_wmap
             except:
                 print("weightmap preparation failed, resetting to no weightmap")
                 has_weight_map = False
 
         if not has_weight_map:
-            weighted_data = hdul[0].data * scalar_weight
+            weighted_data = img_data * scalar_weight
 
         # Write weighted image
         new_hdu = fits.PrimaryHDU(weighted_data, header=hdul[0].header)
@@ -1183,7 +1227,8 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
                 tmpdir / "skel.hdr",
                 args.drizzle,
                 weights_dir,
-                projw_dir
+                projw_dir,
+                args.background_subtract
             )
             for f in inputs
             if weights[f] > 0
@@ -1349,6 +1394,8 @@ Examples:
                        help="Photometry file with measured magnitudes (dophot output format: col 1=filename, col 12=mag, col 13=magerr)")
 
     # Processing options
+    parser.add_argument("-B", "--background-subtract", action="store_true",
+                       help="Subtract background from each image before combining (uses pyrt-phcat -B)")
     parser.add_argument("-z", "--drizzle", type=float, default=1.0,
                        help="Drizzle scale factor, range (0, 2] (default: 1.0)")
     parser.add_argument("--num-processes", type=int, default=None,
