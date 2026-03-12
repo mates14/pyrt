@@ -1427,13 +1427,27 @@ def combine_images_direct(output, inputs, skeleton_file, args):
                             wmap /= wmap_max
                         weighted_data = (data.astype(np.float64) * w * wmap).astype(np.float32)
                         scaled_wmap = (wmap * w).astype(np.float32)
-                        fits.writeto(stagew_dir / f"{base}_w.fits", scaled_wmap,
+                        wmap_stem = Path(wghtfile).stem
+                        fits.writeto(stagew_dir / f"{wmap_stem}.fits", scaled_wmap,
                                      header=whdul[0].header)
+                        # Copy area file for the weight map if present
+                        wmap_area = Path(wghtfile).parent / f"{wmap_stem}_area.fits"
+                        if wmap_area.exists():
+                            subprocess.run(["cp", str(wmap_area),
+                                            str(stagew_dir / f"{wmap_stem}_area.fits")],
+                                           check=True, capture_output=True)
                     has_any_wmap = True
                 else:
                     weighted_data = (data.astype(np.float64) * w).astype(np.float32)
 
-                fits.writeto(staged_dir / f"{base}_staged.fits", weighted_data, header=header)
+                fits.writeto(staged_dir / f"{base}.fits", weighted_data, header=header)
+                # Copy the companion area file so mAdd can find it
+                area_src = Path(f).parent / f"{base}_area.fits"
+                if area_src.exists():
+                    subprocess.run(["cp", str(area_src), str(staged_dir / f"{base}_area.fits")],
+                                   check=True, capture_output=True)
+                else:
+                    print(f"Warning: area file not found for {f}: {area_src}")
 
         # mAdd on staged images
         img_tbl = tmpdir / "images.tbl"
