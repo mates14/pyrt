@@ -9,6 +9,15 @@ calculation.
 Usage Modes:
 -----------
 
+5. Pre-projected mode (-P):
+   For frames already on the same WCS grid with WGHT scalar weights in their
+   headers and per-pixel weight maps referenced via WGHTFILE. Skips selection,
+   frame calculation, weight computation, and reprojection — feeds frames
+   directly to mAdd and always produces combinedw.fits alongside combined.fits.
+
+   Example:
+       combine-images -P --skel tile.hdr -o combined.fits frame*t.fits
+
 1. Automatic weighted mode (default):
    Performs outlier rejection, calculates optimal WCS frame, computes S/N-based
    weights, and combines images. Requires MAGZERO keyword in FITS headers.
@@ -1347,6 +1356,145 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
         if result.returncode != 0:
             print(f"Warning: Could not set WGHTFILE header in {output}: {result.stderr}")
 
+def combine_images_direct(output, inputs, skeleton_file, args):
+    """Stack pre-projected images directly via mAdd, skipping reprojection.
+
+    Frames must already be on the same WCS grid as the skeleton.
+    Reads WGHT scalar weight from each frame's FITS header (default: 1.0).
+    Per-pixel weights from WGHTFILE headers are used when present.
+
+    Always writes a weight map alongside the output image.
+
+    Args:
+        output: Output FITS file path
+        inputs: List of input FITS file paths (pre-projected)
+        skeleton_file: Path to skeleton header file for mAdd
+        args: Parsed command-line arguments
+    """
+    # Determine output weight map path
+    stem = os.path.splitext(output)[0]
+    wmap_output = args.keep_weightmap if args.keep_weightmap else stem + 'w.fits'
+
+    # Read scalar weights from headers
+    weights = {}
+    for f in inputs:
+        with fits.open(f) as hdul:
+            w = float(hdul[0].header.get('WGHT', 1.0))
+            if 'WGHT' not in hdul[0].header:
+                print(f"Warning: {f} has no WGHT keyword, using 1.0")
+            weights[f] = w
+
+    total_w = sum(weights.values())
+    n = len(inputs)
+    # Normalize so weights sum to N: mAdd averages (divides by N), so this
+    # recovers a proper weighted average in the final result.
+    norm_weights = {f: w * n / total_w for f, w in weights.items()}
+
+    print(f"Direct stacking {n} pre-projected frames (weight sum={total_w:.4g})...")
+    for f, w in weights.items():
+        print(f"  {os.path.basename(f)}: WGHT={w:.6g}  (normalized={norm_weights[f]:.6g})")
+
+    home_tmp = Path.home() / "tmp"
+    home_tmp.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=home_tmp) as tmpdir:
+        tmpdir = Path(tmpdir)
+
+        skel = tmpdir / "skel.hdr"
+        subprocess.run(["cp", skeleton_file, str(skel)], check=True, capture_output=True)
+
+        staged_dir = tmpdir / "staged"
+        stagew_dir = tmpdir / "stagew"
+        staged_dir.mkdir()
+        stagew_dir.mkdir()
+
+        has_any_wmap = False
+
+        for f in inputs:
+            base = Path(f).stem
+            w = norm_weights[f]
+
+            with fits.open(f) as hdul:
+                header = hdul[0].header
+                data = hdul[0].data
+                wghtfile = header.get('WGHTFILE')
+                has_wmap = bool(wghtfile and os.path.exists(wghtfile))
+
+                if has_wmap:
+                    with fits.open(wghtfile) as whdul:
+                        wmap = whdul[0].data.astype(np.float64)
+                        wmap_max = np.max(wmap)
+                        if wmap_max > 0:
+                            wmap /= wmap_max
+                        weighted_data = (data.astype(np.float64) * w * wmap).astype(np.float32)
+                        scaled_wmap = (wmap * w).astype(np.float32)
+                        fits.writeto(stagew_dir / f"{base}_w.fits", scaled_wmap,
+                                     header=whdul[0].header)
+                    has_any_wmap = True
+                else:
+                    weighted_data = (data.astype(np.float64) * w).astype(np.float32)
+
+                fits.writeto(staged_dir / f"{base}_staged.fits", weighted_data, header=header)
+
+        # mAdd on staged images
+        img_tbl = tmpdir / "images.tbl"
+        result = subprocess.run(["mImgtbl", str(staged_dir), str(img_tbl)],
+                                 capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"mImgtbl failed: {result.stderr}")
+
+        print("Combining staged frames with mAdd...")
+        result = subprocess.run(
+            ["mAdd", "-p", str(staged_dir), str(img_tbl), str(skel), output],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"mAdd failed: {result.stderr}")
+
+        if has_any_wmap:
+            wmap_tbl = tmpdir / "wmaps.tbl"
+            result = subprocess.run(["mImgtbl", str(stagew_dir), str(wmap_tbl)],
+                                     capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"mImgtbl (wmaps) failed: {result.stderr}")
+
+            wmap_tmp = str(tmpdir / "combinedw_tmp.fits")
+            print("Combining weight maps with mAdd...")
+            result = subprocess.run(
+                ["mAdd", "-p", str(stagew_dir), str(wmap_tbl), str(skel), wmap_tmp],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"mAdd (wmaps) failed: {result.stderr}")
+
+            # Divide by combined weight map to normalise the weighted average
+            with fits.open(output, mode='update') as hdul, fits.open(wmap_tmp) as whdul:
+                wdata = whdul[0].data
+                hdul[0].data = np.where(wdata > 0,
+                                        hdul[0].data / wdata, np.nan).astype(np.float32)
+                hdul.flush()
+
+            subprocess.run(["cp", wmap_tmp, wmap_output], check=True, capture_output=True)
+        else:
+            # No per-pixel weight maps: derive coverage weight map from combined image
+            with fits.open(output) as hdul:
+                coverage = np.isfinite(hdul[0].data) & (hdul[0].data != 0)
+                wmap_hdr = hdul[0].header.copy()
+            fits.writeto(wmap_output, (coverage.astype(np.float32) * total_w / n), header=wmap_hdr)
+
+    # Tag the output with WGHTFILE
+    result = subprocess.run(
+        ["fitsheader", "-w", f"WGHTFILE={wmap_output}", output],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"Warning: Could not set WGHTFILE in {output}: {result.stderr}")
+
+    update_output_header(output, inputs, norm_weights, args)
+
+    print(f"Combined image written to {output}")
+    print(f"Weight map written to {wmap_output}")
+
+
 # ============================================================================
 # Argument Parsing and Main
 # ============================================================================
@@ -1386,6 +1534,14 @@ Examples:
 
     # Positional arguments
     parser.add_argument("inputs", nargs="+", help="Input FITS files to combine")
+
+    # Pre-projected mode
+    parser.add_argument("-P", "--pre-projected", action="store_true",
+                       help="Stack pre-projected frames directly via mAdd. Skips selection, "
+                            "frame calculation, and reprojection. Reads WGHT scalar weight "
+                            "from each frame's header; per-pixel weights from WGHTFILE. "
+                            "Always writes a weight map (combinedw.fits or -W path). "
+                            "Use --skel to supply the target frame (required by mAdd).")
 
     # Output control
     parser.add_argument("-o", "--output", default="combined.fits",
@@ -1474,6 +1630,12 @@ Examples:
     if args.keep_weightmap and os.path.exists(args.keep_weightmap):
         parser.error(f"Weight map output file already exists: {args.keep_weightmap}")
 
+    # In pre-projected mode the weight map is always written; check the auto path too
+    if args.pre_projected and not args.keep_weightmap:
+        auto_wmap = os.path.splitext(args.output)[0] + 'w.fits'
+        if os.path.exists(auto_wmap):
+            parser.error(f"Weight map output file already exists: {auto_wmap}")
+
     return args
 
 def main():
@@ -1483,6 +1645,31 @@ def main():
     print("=" * 70)
     print("combine-images: Intelligent FITS Image Combination")
     print("=" * 70)
+
+    # Pre-projected fast path: skip selection, frame calc, and weight computation
+    if args.pre_projected:
+        print("\nMode: Pre-projected (direct mAdd stack)")
+        skeleton_file = args.skeleton
+        if skeleton_file:
+            print(f"Using skeleton: {skeleton_file}")
+            if not os.path.exists(skeleton_file):
+                raise FileNotFoundError(f"Skeleton file not found: {skeleton_file}")
+        else:
+            # Derive skeleton from the first frame's header
+            print("No skeleton provided — deriving from first frame header")
+            first = args.inputs[0]
+            with fits.open(first) as hdul:
+                derived_hdr = hdul[0].header
+            skeleton_file = 'skel_derived.hdr'
+            write_montage_header(dict(derived_hdr), skeleton_file)
+            print(f"Derived skeleton written to {skeleton_file}")
+
+        combine_images_direct(args.output, args.inputs, skeleton_file, args)
+
+        print("\n" + "=" * 70)
+        print(f"Successfully stacked {len(args.inputs)} pre-projected frames into {args.output}")
+        print("=" * 70)
+        return
 
     # Stage 1: Image Selection
     if args.no_selection:
