@@ -1440,22 +1440,24 @@ def combine_images_direct(output, inputs, skeleton_file, args):
         result = subprocess.run(["mImgtbl", str(staged_dir), str(img_tbl)],
                                  capture_output=True, text=True)
         if result.returncode != 0:
-            raise RuntimeError(f"mImgtbl failed: {result.stderr}")
+            raise RuntimeError(f"mImgtbl failed: {result.stdout} {result.stderr}")
 
         print("Combining staged frames with mAdd...")
         result = subprocess.run(
             ["mAdd", "-p", str(staged_dir), str(img_tbl), str(skel), output],
             capture_output=True, text=True
         )
+        if result.stdout:
+            print(result.stdout.strip())
         if result.returncode != 0:
-            raise RuntimeError(f"mAdd failed: {result.stderr}")
+            raise RuntimeError(f"mAdd failed (rc={result.returncode}): {result.stdout} {result.stderr}")
 
         if has_any_wmap:
             wmap_tbl = tmpdir / "wmaps.tbl"
             result = subprocess.run(["mImgtbl", str(stagew_dir), str(wmap_tbl)],
                                      capture_output=True, text=True)
             if result.returncode != 0:
-                raise RuntimeError(f"mImgtbl (wmaps) failed: {result.stderr}")
+                raise RuntimeError(f"mImgtbl (wmaps) failed: {result.stdout} {result.stderr}")
 
             wmap_tmp = str(tmpdir / "combinedw_tmp.fits")
             print("Combining weight maps with mAdd...")
@@ -1463,8 +1465,10 @@ def combine_images_direct(output, inputs, skeleton_file, args):
                 ["mAdd", "-p", str(stagew_dir), str(wmap_tbl), str(skel), wmap_tmp],
                 capture_output=True, text=True
             )
+            if result.stdout:
+                print(result.stdout.strip())
             if result.returncode != 0:
-                raise RuntimeError(f"mAdd (wmaps) failed: {result.stderr}")
+                raise RuntimeError(f"mAdd (wmaps) failed (rc={result.returncode}): {result.stdout} {result.stderr}")
 
             # Divide by combined weight map to normalise the weighted average
             with fits.open(output, mode='update') as hdul, fits.open(wmap_tmp) as whdul:
