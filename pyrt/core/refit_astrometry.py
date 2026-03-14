@@ -6,6 +6,8 @@ import astropy.wcs
 #import astropy.io.fits
 from pyrt.core import zpnfit
 import logging
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from copy import deepcopy
 

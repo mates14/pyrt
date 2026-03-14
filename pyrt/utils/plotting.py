@@ -1,5 +1,7 @@
 import numpy as np
 import astropy.wcs
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from matplotlib.colors import hsv_to_rgb, Normalize
