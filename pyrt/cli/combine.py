@@ -1009,7 +1009,9 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None)
 
                 # Calculate weight using signal-to-noise optimization
                 # Weight each image by its contribution to final S/N
-                denominator = counts + gain*gain*sigma*sigma*2*2*3.1415
+                # Use actual FWHM from header if available, else fall back to 4 px
+                fwhm = header.get('FWHM', 4.0)
+                denominator = counts + np.pi * (fwhm / 2) ** 2 * (gain * sigma) ** 2
                 if denominator <= 0:
                     raise ValueError(f"Invalid weight calculation in {f}")
 
@@ -1139,14 +1141,15 @@ def process_single_image(input_data):
                 weight_map_weighted = weights_dir / f"{base_name}_wmap_weighted.fits"
                 weight_map_proj = projw_dir / f"{base_name}_wmap_proj.fits"
 
-                # Copy and scale weight map
+                # Copy and scale weight map, including scalar weight so that
+                # mAdd's division produces sum(w_i*spatial_i*img_i)/sum(w_i*spatial_i)
                 with fits.open(weight_map_file) as whdul:
-                    weighted_wmap = whdul[0].data / np.max(whdul[0].data)
+                    weighted_wmap = whdul[0].data / np.max(whdul[0].data) * scalar_weight
                     new_whdu = fits.PrimaryHDU(weighted_wmap, header=whdul[0].header)
                     new_whdul = fits.HDUList([new_whdu])
                     new_whdul.writeto(weight_map_weighted)
 
-                    weighted_data = img_data * scalar_weight * weighted_wmap
+                    weighted_data = img_data * weighted_wmap
             except:
                 print("weightmap preparation failed, resetting to no weightmap")
                 has_weight_map = False
@@ -1337,9 +1340,11 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
                     continue
                 w_i = proc_input[1]  # scalar weight
                 if proc_result['weight_map'] is not None:
+                    # Projected weight map already contains w_i (fixed above)
                     with fits.open(proc_result['weight_map']) as whdul:
-                        wmap_sum += w_i * np.nan_to_num(whdul[0].data, nan=0.0).astype(np.float32)
+                        wmap_sum += np.nan_to_num(whdul[0].data, nan=0.0).astype(np.float32)
                 else:
+                    # No per-pixel weight map: assume uniform coverage, weight by scalar w_i
                     with fits.open(proc_result['image']) as ihdul:
                         coverage = np.isfinite(ihdul[0].data) & (ihdul[0].data != 0)
                         wmap_sum += w_i * coverage.astype(np.float32)
