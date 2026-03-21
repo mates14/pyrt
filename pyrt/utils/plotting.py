@@ -607,6 +607,9 @@ def plot_astrometric_arrows(image_data, data, afit, output_base, scale=1.0, imag
             ha='center', fontsize=10, color='black',
             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
+    ax.set_xlim(-0.5, img_shape[1] - 0.5)
+    ax.set_ylim(-0.5, img_shape[0] - 0.5)
+
     ax.set_title(f'Astrometric Residuals (x{effective_scale:.0f}, σ={sigma_res:.3f} px)')
     ax.set_xlabel('X [pixels]')
     ax.set_ylabel('Y [pixels]')

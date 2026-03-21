@@ -63,6 +63,7 @@ pyrt-dophot = "pyrt.cli.dophot:main"
 
 # Source extraction and detection table preparation
 pyrt-phcat = "pyrt.cli.phcat:main"
+pyrt-galaxy-phcat = "pyrt.cli.galaxy_phcat:main"
 pyrt-cat2det = "pyrt.cli.cat2det:main"
 
 # Astrometric utilities
