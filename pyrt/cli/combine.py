@@ -533,6 +533,52 @@ def write_montage_header(header, output_file='skel.hdr'):
                 f.write(f'{key:8s}= {value}\n')
     print(f"Written skeleton header to {output_file}")
 
+
+def fits_to_skeleton(fits_path, hdr_path='skel.hdr'):
+    """Extract WCS header from a FITS file into a Montage-compatible .hdr file.
+
+    Uses mGetHdr from the Montage toolkit, which is the same tool used
+    internally when building skeleton headers during frame estimation.
+
+    Args:
+        fits_path: Path to the input FITS file
+        hdr_path: Output .hdr file path (default: skel.hdr)
+
+    Returns:
+        hdr_path
+    """
+    result = subprocess.run(
+        ["mGetHdr", fits_path, hdr_path],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"mGetHdr failed for {fits_path}: {result.stderr.strip()}")
+    print(f"Extracted WCS header from FITS file {fits_path} -> {hdr_path}")
+    return hdr_path
+
+
+def resolve_skeleton(skeleton_arg):
+    """Resolve a --skeleton/--skel argument.
+
+    If the argument points to a FITS file (.fits/.fit/.fts), its WCS header
+    is extracted with mGetHdr and written to skel.hdr, which is returned.
+    Otherwise the argument is returned unchanged.
+
+    Args:
+        skeleton_arg: Path passed to --skeleton/--skel, or None
+
+    Returns:
+        Path to a Montage-compatible .hdr file, or None
+    """
+    if skeleton_arg is None:
+        return None
+    if skeleton_arg.lower().endswith(('.fits', '.fit', '.fts')):
+        if not os.path.exists(skeleton_arg):
+            raise FileNotFoundError(f"Skeleton FITS file not found: {skeleton_arg}")
+        return fits_to_skeleton(skeleton_arg, 'skel.hdr')
+    return skeleton_arg
+
+
 # ============================================================================
 # Weighting and Combination Functions (from combine2w)
 # ============================================================================
@@ -1672,7 +1718,7 @@ def main():
     # Pre-projected fast path: skip selection, frame calc, and weight computation
     if args.pre_projected:
         print("\nMode: Pre-projected (direct mAdd stack)")
-        skeleton_file = args.skeleton
+        skeleton_file = resolve_skeleton(args.skeleton)
         if skeleton_file:
             print(f"Using skeleton: {skeleton_file}")
             if not os.path.exists(skeleton_file):
@@ -1728,7 +1774,7 @@ def main():
         return
     elif args.skeleton:
         print(f"\nStage 2: WCS Frame - SKIPPED (using provided skeleton: {args.skeleton})")
-        skeleton_file = args.skeleton
+        skeleton_file = resolve_skeleton(args.skeleton)
         if not os.path.exists(skeleton_file):
             raise FileNotFoundError(f"Skeleton file not found: {skeleton_file}")
     else:
