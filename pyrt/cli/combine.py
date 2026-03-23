@@ -109,6 +109,7 @@ import subprocess
 import tempfile
 import multiprocessing as mp
 import datetime
+from tqdm import tqdm
 
 # This is to silence a particular annoying warning (MJD not present in a fits file)
 import warnings
@@ -948,7 +949,7 @@ def calculate_brightness(time, t0, mag0, rate):
     else:
         return mag0
 
-def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None):
+def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None, quiet=False):
     """Compute optimal weights for image combination.
 
     In weighted mode (default), uses photometric calibration (MAGZERO) and
@@ -978,8 +979,9 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None)
 
     if uniform:
         # Uniform weighting mode: assign weight 1.0 to all files
-        print("Using uniform weighting (all images weighted equally)")
-        for f in files:
+        if not quiet:
+            print("Using uniform weighting (all images weighted equally)")
+        for f in tqdm(files, desc="Computing weights", unit="img", disable=not quiet):
             weights[f] = 1.0
             # Update FITS header with weight
             result = subprocess.run(
@@ -992,7 +994,8 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None)
 
         n_images = len(files)
         normalized_weights = {f: float(n_images) for f in files}
-        print(f"Normalized {n_images} images with uniform weight")
+        if not quiet:
+            print(f"Normalized {n_images} images with uniform weight")
         return normalized_weights, skipped
 
     # Weighted mode: calculate S/N-based weights
@@ -1001,6 +1004,11 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None)
     if photometry:
         print("Using measured magnitudes from photometry file")
 
+    # Two-pass weight calculation; pass 1 is ~40x faster than pass 2, so use a
+    # single progress bar with total=41*N: pass 1 advances 1 per file, pass 2 advances 40.
+    _pbar = tqdm(total=41 * len(files), desc="Computing weights", unit="img",
+                 disable=not quiet)
+
     # First pass - calculate total counts, skip files without MAGZERO
     for f in files:
         with fits.open(f) as hdul:
@@ -1008,6 +1016,7 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None)
             if 'MAGZERO' not in header:
                 print(f"Warning: Skipping {f} - MAGZERO keyword missing")
                 skipped.append(f)
+                _pbar.update(1)
                 continue
 
             # Get magnitude: from photometry file or calculate from time
@@ -1021,17 +1030,21 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None)
             if counts <= 0:
                 print(f"Warning: Skipping {f} - invalid counts: {counts}")
                 skipped.append(f)
+                _pbar.update(1)
                 continue
 
             total_counts += counts
+        _pbar.update(1)
 
     if total_counts <= 0:
+        _pbar.close()
         raise ValueError("No valid images with MAGZERO for weight calculation")
 
     # Second pass - calculate weights
     for f in files:
         if f in skipped:
             weights[f] = 0.0
+            _pbar.update(40)
             continue
 
         try:
@@ -1063,7 +1076,8 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None)
 
                 weight = np.power(counts/total_counts, 2) / denominator
                 weights[f] = weight
-                print(f"Weight for {f}: {weight:.6e}")
+                if not quiet:
+                    print(f"Weight for {f}: {weight:.6e}")
 
                 # Update FITS header with weight
                 result = subprocess.run(
@@ -1079,19 +1093,25 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None)
             weights[f] = 0.0
             if f not in skipped:
                 skipped.append(f)
+        finally:
+            _pbar.update(40)
+
+    _pbar.close()
 
     if all(w == 0 for w in weights.values()):
         raise ValueError("No valid weights calculated")
 
     total_weights = sum(weights.values())
-    print(f"Sum of all weights: {total_weights:.6e}")
-    print(f"Number of images with weight > 0: {sum(1 for w in weights.values() if w > 0)}")
+    if not quiet:
+        print(f"Sum of all weights: {total_weights:.6e}")
+        print(f"Number of images with weight > 0: {sum(1 for w in weights.values() if w > 0)}")
 
     # Normalize and scale weights: sum = N (compensates for mAdd's automatic averaging)
     if total_weights > 0:
         n_images = sum(1 for w in weights.values() if w > 0)
         normalized_weights = {f: w * n_images / total_weights for f, w in weights.items()}
-        print(f"Normalized weights to sum={n_images} (compensates for mAdd averaging)")
+        if not quiet:
+            print(f"Normalized weights to sum={n_images} (compensates for mAdd averaging)")
         return normalized_weights, skipped
     else:
         return weights, skipped
@@ -1112,7 +1132,7 @@ def process_single_image(input_data):
     Returns:
         dict: {'image': projected_file, 'weight_map': projected_weight_map or None}
     """
-    input_file, scalar_weight, weighted_dir, proj_dir, skel_hdr, drizzle, weights_dir, projw_dir, subtract_background = input_data
+    input_file, scalar_weight, weighted_dir, proj_dir, skel_hdr, drizzle, weights_dir, projw_dir, subtract_background, quiet = input_data
 
     base_name = Path(input_file).stem
     output_weighted = weighted_dir / f"{base_name}_weighted.fits"
@@ -1137,7 +1157,8 @@ def process_single_image(input_data):
             if cat_file.exists():
                 cat_file.unlink()
             working_file = str(bgsub_file)
-            print(f"Background subtracted: {input_file} -> {bgsub_file.name}")
+            if not quiet:
+                print(f"Background subtracted: {input_file} -> {bgsub_file.name}")
         else:
             print(f"Warning: Background subtraction failed for {input_file}, using original")
             if result.stderr:
@@ -1176,7 +1197,8 @@ def process_single_image(input_data):
         # This handles the case where CTYPE says TAN but WCS interprets as PLA
         # due to old-style distortion coefficients
         proj_tool = "pyrt-mproject" # "mProjectPX"
-        print(f"Using {proj_tool}")
+        if not quiet:
+            print(f"Using {proj_tool}")
 
         # Apply flat field correction to image data if available
         img_data = hdul[0].data / flat_data if flat_data is not None else hdul[0].data
@@ -1209,28 +1231,30 @@ def process_single_image(input_data):
         new_hdul.writeto(output_weighted)
 
         # Project the image
-        print(proj_tool, output_weighted)
+        if not quiet:
+            print(proj_tool, output_weighted)
         result = subprocess.run([
             proj_tool,
             "-z", str(drizzle),
             str(output_weighted),
             str(output_proj),
             str(skel_hdr)
-        ])
+        ], capture_output=quiet)
 
         if result.returncode != 0:
             raise RuntimeError(f"Failed to project image: {result.stderr}")
 
         # Project weight map if present
         if has_weight_map:
-            print(proj_tool, weight_map_weighted)
+            if not quiet:
+                print(proj_tool, weight_map_weighted)
             result = subprocess.run([
                 proj_tool,
                 "-z", str(drizzle),
                 str(weight_map_weighted),
                 str(weight_map_proj),
                 str(skel_hdr)
-            ])
+            ], capture_output=quiet)
 
             if result.returncode != 0:
                 raise RuntimeError(f"Failed to project weight map: {result.stderr}")
@@ -1275,6 +1299,8 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
         proj_dir.mkdir()
         projw_dir.mkdir()
 
+        quiet = getattr(args, 'quiet', False)
+
         # Prepare input data for parallel processing
         process_inputs = [
             (
@@ -1286,7 +1312,8 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
                 args.drizzle,
                 weights_dir,
                 projw_dir,
-                args.background_subtract
+                args.background_subtract,
+                quiet,
             )
             for f in inputs
             if weights[f] > 0
@@ -1294,10 +1321,19 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
 
         # Process images and weight maps in parallel
         max_workers = min(mp.cpu_count(), len(process_inputs))
-        print(f"Processing images using {max_workers} processes...")
+        if not quiet:
+            print(f"Processing images using {max_workers} processes...")
 
         with mp.Pool(processes=max_workers) as pool:
-            results = pool.map(process_single_image, process_inputs)
+            if quiet:
+                results = list(tqdm(
+                    pool.imap(process_single_image, process_inputs),
+                    total=len(process_inputs),
+                    desc="Projecting images",
+                    unit="img",
+                ))
+            else:
+                results = pool.map(process_single_image, process_inputs)
         processed_files = [r for r in results if r is not None]
 
         if not processed_files:
@@ -1656,6 +1692,8 @@ Examples:
                        help="Drizzle scale factor, range (0, 2] (default: 1.0)")
     parser.add_argument("--num-processes", type=int, default=None,
                        help="Number of parallel processes (default: auto)")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                       help="Suppress mProject output and show progress bars instead")
 
     args = parser.parse_args()
 
@@ -1811,7 +1849,8 @@ def main():
         args.brightness,
         args.rate,
         uniform=args.uniform,
-        photometry=photometry
+        photometry=photometry,
+        quiet=args.quiet,
     )
 
     # Report skipped files
