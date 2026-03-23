@@ -54,7 +54,7 @@ from pyrt.utils import dms
 #from kapteyn import wcs
 
 #ast_scales=[4,5,6,8,10,12,14]
-ast_scales=[1,2,3,4] # ,5,6,8,10,12,14]
+ast_scales=[2,3,4] # 1,5,6,8,10,12,14]
 
 
 def read_wcs_from_file(wcs_file):
