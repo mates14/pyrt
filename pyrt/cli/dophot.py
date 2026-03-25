@@ -951,7 +951,7 @@ def main():
         start = time.time()
         base_filename = os.path.splitext(det.meta['detf'])[0]
         create_residual_plots(data, base_filename, ffit, zpntest)
-        create_correction_volume_plots(data, base_filename, ffit)
+        # create_correction_volume_plots(data, base_filename, ffit)
         # Arrow plot for astrometric residuals on the image
         if zpntest is not None:
             image_scale = max(det.meta['IMGAXIS1'], det.meta['IMGAXIS2']) / 1024.0

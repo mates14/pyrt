@@ -63,7 +63,13 @@ def call_sextractor(file, fwhm, bg=False):
 #    some_file.write( "VERBOSE_TYPE     QUIET\n")
     some_file.write( "DETECT_THRESH 1\n")
     some_file.write( "ANALYSIS_THRESH 1\n")
+<<<<<<< Updated upstream
     some_file.write(f"BACK_SIZE  {int(fwhm*3.0)+1}\n")
+=======
+#    some_file.write(f"BACK_SIZE  {int(fwhm*1.5)+1}\n")
+    some_file.write(f"BACK_SIZE 256\n") 
+#   some_file.write(f"BACK_FILTERSIZE  3\n")
+>>>>>>> Stashed changes
     some_file.write(f"BACK_FILTERSIZE  5\n")
     #some_file.write(f"BACK_SIZE 5\n")
     #some_file.write("BACK_FILTERSIZE  1\n")
