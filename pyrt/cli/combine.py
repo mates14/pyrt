@@ -1659,7 +1659,7 @@ Examples:
                        help="Skip outlier rejection, use all input files")
 
     # Frame calculation control
-    parser.add_argument("--skeleton", "--skel", metavar="FILE",
+    parser.add_argument("-S", "--skel", metavar="FILE",
                        help="Use provided skeleton header (skip frame calculation)")
     parser.add_argument("--sampling-factor", type=int, default=8,
                        help="Sampling factor for WCS calculations (default: 8)")
