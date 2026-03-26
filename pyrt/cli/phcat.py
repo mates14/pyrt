@@ -67,8 +67,6 @@ def call_sextractor(file, fwhm, bg=False):
     some_file.write(f"BACK_SIZE 256\n") 
 #   some_file.write(f"BACK_FILTERSIZE  3\n")
     some_file.write(f"BACK_FILTERSIZE  5\n")
-    #some_file.write(f"BACK_SIZE 5\n")
-    #some_file.write("BACK_FILTERSIZE  1\n")
     some_file.write(f"PARAMETERS_NAME  {base}.param\n")
     some_file.write(f"FILTER_NAME      {base}.conv\n")
     some_file.write(f"CATALOG_NAME     {base}.cat\n")
