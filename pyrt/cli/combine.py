@@ -1160,18 +1160,21 @@ def process_single_image(input_data):
             if not quiet:
                 print(f"Background subtracted: {input_file} -> {bgsub_file.name}")
         else:
+            bgsub_file = None  # nothing to clean up
             print(f"Warning: Background subtraction failed for {input_file}, using original")
             if result.stderr:
                 print(f"  phcat error: {result.stderr.strip()}")
             working_file = input_file
     else:
+        bgsub_file = None
         working_file = input_file
 
     with fits.open(working_file) as hdul:
         # Check for weight map
         has_weight_map = 'WGHTFILE' in hdul[0].header
         if has_weight_map:
-            print(f"File {hdul[0].header['WGHTFILE']} is a weight map for {working_file}")
+            if not quiet:
+                print(f"File {hdul[0].header['WGHTFILE']} is a weight map for {working_file}")
             weight_map_file = hdul[0].header['WGHTFILE']
             if not os.path.exists(weight_map_file):
                 print(f"Warning: Weight file {weight_map_file} not found")
@@ -1187,9 +1190,11 @@ def process_single_image(input_data):
                     raw_flat = fhdul[0].data.astype(float)
                     flat_median = np.median(raw_flat[raw_flat != 0]) if np.any(raw_flat != 0) else 1.0
                     flat_data = raw_flat / flat_median
-                print(f"Applying flat field correction from {flat_file} (median={flat_median:.4g})")
+                if not quiet:
+                    print(f"Applying flat field correction from {flat_file} (median={flat_median:.4g})")
             else:
-                print(f"Note: No synthetic flat found for {working_file} (expected {flat_file})")
+                if not quiet:
+                    print(f"Note: No synthetic flat found for {working_file} (expected {flat_file})")
 
         # Always use mProjectPX - it's a smart wrapper that:
         # - Calls mProjectPP directly for natively supported projections
@@ -1258,6 +1263,10 @@ def process_single_image(input_data):
 
             if result.returncode != 0:
                 raise RuntimeError(f"Failed to project weight map: {result.stderr}")
+
+    # Clean up background-subtracted temp file (it has been projected into proj_dir)
+    if bgsub_file is not None and Path(bgsub_file).exists():
+        Path(bgsub_file).unlink()
 
     return {
         'image': str(output_proj),
@@ -1692,10 +1701,11 @@ Examples:
                        help="Drizzle scale factor, range (0, 2] (default: 1.0)")
     parser.add_argument("--num-processes", type=int, default=None,
                        help="Number of parallel processes (default: auto)")
-    parser.add_argument("-q", "--quiet", action="store_true",
-                       help="Suppress mProject output and show progress bars instead")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                       help="Show full output from mProject and weight computation (default: progress bars)")
 
     args = parser.parse_args()
+    args.quiet = not args.verbose
 
     # Parse GRB parameters if provided
     if args.grb:
