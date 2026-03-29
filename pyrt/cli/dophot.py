@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import logging
+import signal
 import argparse
 from contextlib import suppress
 import subprocess
@@ -973,6 +974,13 @@ def main():
     if not options.remove_spatial:
         write_results(data, ffit, options, alldet, target, zpntest)
 
+def _sigterm_handler(signum, frame):
+    sys.exit(0)
+
 # this way, the variables local to main() are not globally available, avoiding some programming errors
 if __name__ == "__main__":
-    main()
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
