@@ -400,9 +400,13 @@ def process_image_with_dynamic_limits(det, options):
             detection_limit = det.meta['LIMFLX3'] + estimated_zp
             maglim = detection_limit - options.margin
 
-            # configuration option is a pure override
-            if options.maglim is not None:
-                maglim = options.maglim
+            # For shallow images the margin formula can be over-restrictive (e.g.
+            # detection limit ~11 mag → catalog limit ~9 → only ~30 matched stars,
+            # too few for the astrometric model).  Use the initial query limit as
+            # a floor so we never end up with fewer stars than the first query gave.
+            if maglim < recommended_mag:
+                logging.info(f"Catalog limit {maglim:.2f} raised to initial query limit {recommended_mag:.1f}")
+                maglim = recommended_mag
 
             det.meta['MAGLIM'] = maglim
 
