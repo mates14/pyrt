@@ -215,7 +215,7 @@ class termfit:
 
             try:
                 cov = np.linalg.inv(jac_matrix)
-                logging.debug("Using direct inverse method")
+#                logging.debug("Using direct inverse method")
                 self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
                 return
             except np.linalg.LinAlgError:
@@ -233,7 +233,7 @@ class termfit:
                 rank_threshold = 1e-12
                 effective_rank = sum(s > rank_threshold * s[0])
                 cov = np.linalg.pinv(jac_matrix, rcond=rank_threshold)
-                logging.debug("Using SVD pseudo-inverse method")
+#                logging.debug("Using SVD pseudo-inverse method")
                 self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
 
                 # Check for zero or very small errors
@@ -244,7 +244,7 @@ class termfit:
 
                 return
             except Exception as e:
-                logging.debug(f"SVD failed: {str(e)}")
+ #               logging.debug(f"SVD failed: {str(e)}")
                 pass
 
             # Method 3: Add small regularization term
@@ -252,14 +252,14 @@ class termfit:
                 epsilon = 1e-10 * np.trace(jac_matrix) / jac_matrix.shape[0]
                 reg_matrix = jac_matrix + epsilon * np.eye(jac_matrix.shape[0])
                 cov = np.linalg.inv(reg_matrix)
-                logging.debug("Using regularized inverse method")
+#                logging.debug("Using regularized inverse method")
                 self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
                 return
             except:
                 pass
 
             # Fallback: Estimate errors using parameter perturbation
-            logging.debug("Using parameter perturbation method")
+#            logging.debug("Using parameter perturbation method")
             param_errors = []
             delta = 1e-6  # Small perturbation
             for i in range(len(self.fitvalues)):
