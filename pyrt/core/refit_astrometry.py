@@ -745,7 +745,7 @@ def setup_camera_params(zpntest, camera, refit_zpn):
 
     # Default TAN approximation for unknown cameras when refit_zpn is requested
     # NOTE: Don't set up PV2_3/PV2_5 here - stepwise regression will handle it
-    if refit_zpn and camera not in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
+    if refit_zpn and camera not in ["C0", "C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
         # Stepwise regression will determine which terms to include
         logging.info(f"ZPN projection will use stepwise regression to determine distortion terms")
 
