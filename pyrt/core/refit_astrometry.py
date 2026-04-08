@@ -544,7 +544,7 @@ def refit_astrometry(det, data, options):
 #        zpntest.fitterm(["PV2_2"], [1e-6])
 
     # Initialize ZPN fit object based on camera type
-    elif camera in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
+    elif camera in ["C0", "C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
         logging.info(f"ZPN projectin activated")
         zpntest = zpnfit.zpnfit(proj="ZPN")
         zpntest.fixterm(["PV2_1"], [1])
@@ -681,8 +681,8 @@ def setup_camera_params(zpntest, camera, refit_zpn):
             zpntest.fitterm(["PV2_3"], [300])
             zpntest.fitterm(["CRPIX1", "CRPIX2"], [543,530])
         else:
-            zpntest.fixterm(["PV2_3", "PV2_5"], [7.5, 386.1])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], [2090,2043])
+            zpntest.fixterm(["PV2_3"], [300])
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], [543, 530])
 
     if camera == "C1":
         if refit_zpn:
