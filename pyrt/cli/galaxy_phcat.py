@@ -3,6 +3,11 @@
 pyrt-galaxy-phcat: photometry pipeline for images with a host galaxy.
 
 Workflow:
+  0. If {base}h.fits does not already exist, prepare it automatically:
+       a. Locate the PS1 master template ~/ps1-templates/{target}-{filter}.fits
+          (TARGET/OBJECT and FILTER keywords from the science image header).
+       b. Reproject the master to the science frame WCS with pyrt-combine.
+       c. Run hotpants to produce {base}h.fits.
   1. Run pyrt-phcat on the original image to build the reference catalog.
   2. Capture the auto-selected FWHM and APERTURE from that run.
   3. Run pyrt-phcat on the hotpants-subtracted image ({base}h.fits) using
@@ -16,7 +21,10 @@ Workflow:
 """
 
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import argparse
 
 import numpy as np
@@ -25,6 +33,94 @@ import astropy.wcs
 import astropy.table
 
 from pyrt.cli.phcat import process_photometry
+
+PS1_TEMPLATE_DIR  = os.path.expanduser("~/ps1-templates")
+HOTPANTS_FALLBACK = "/home/mates/src/hotpants-master/hotpants"
+
+
+def _find_hotpants():
+    hp = shutil.which("hotpants") or (
+        HOTPANTS_FALLBACK if os.path.exists(HOTPANTS_FALLBACK) else None
+    )
+    return hp
+
+
+def prepare_and_subtract(science_file, outfile):
+    """Reproject PS1 master template and run hotpants -> outfile.
+
+    Reads TARGET (or OBJECT) and FILTER from the science image header to
+    locate ~/ps1-templates/{target}-{filter}.fits.  The reprojected template
+    is a temporary file that is removed when done.
+
+    Returns True on success, False on any recoverable error.
+    """
+    hdr = astropy.io.fits.getheader(science_file)
+
+    filt   = hdr.get("FILTER",  "").strip().removeprefix("Sloan-")
+    target = f"{int(hdr['TARGET']):05d}" if "TARGET" in hdr else str(hdr.get("OBJECT", "")).strip().replace(" ", "_")
+
+    if not filt:
+        print("ERROR: FILTER keyword missing — cannot locate PS1 master", file=sys.stderr)
+        return False
+    if not target:
+        print("ERROR: TARGET/OBJECT keyword missing — cannot locate PS1 master", file=sys.stderr)
+        return False
+
+    master = os.path.join(PS1_TEMPLATE_DIR, f"{target}-{filt}.fits")
+    if not os.path.exists(master):
+        orira  = hdr.get("ORIRA")
+        oridec = hdr.get("ORIDEC")
+        if orira is None or oridec is None:
+            print(f"ERROR: PS1 master not found and ORIRA/ORIDEC missing: {master}", file=sys.stderr)
+            return False
+        print(f"PS1 master not found — downloading {master}")
+        os.makedirs(PS1_TEMPLATE_DIR, exist_ok=True)
+        from pyrt.cli.ps1mosaic import main as ps1mosaic_main
+        ps1mosaic_main([str(orira), str(oridec), "30", filt, master])
+        if not os.path.exists(master):
+            print(f"ERROR: ps1mosaic failed to create {master}", file=sys.stderr)
+            return False
+
+    hotpants = _find_hotpants()
+    if not hotpants:
+        print(f"ERROR: hotpants not found in PATH or at {HOTPANTS_FALLBACK}", file=sys.stderr)
+        return False
+
+    combine_cmd = shutil.which("pyrt-combine") or f"{sys.executable} -m pyrt.cli.combine"
+
+    # Reproject master into a temp dir so pyrt-combine's overwrite guard is happy
+    with tempfile.TemporaryDirectory(dir=os.path.expanduser("~/tmp")) as tmpdir:
+        template_reproj = os.path.join(tmpdir, "ps1_template.fits")
+
+        print(f"\nReprojecting PS1 master  {os.path.basename(master)}")
+        print(f"  -> science frame WCS of {os.path.basename(science_file)}")
+        result = subprocess.run(
+            [*combine_cmd.split(),
+             "--skel", science_file, "--no-selection",
+             "-o", template_reproj, master],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"ERROR: pyrt-combine failed:\n{result.stderr}", file=sys.stderr)
+            return False
+
+        print(f"Running hotpants  {os.path.basename(science_file)} → {os.path.basename(outfile)}")
+        result = subprocess.run([
+            hotpants,
+            "-il", "-10000", "-iu", "10000",
+            "-c", "t", "-n", "i",
+            "-tl", "-10000", "-tu", "20000",
+            "-inim",   science_file,
+            "-tmplim", template_reproj,
+            "-outim",  outfile,
+        ], capture_output=True, text=True)
+
+        if result.returncode != 0:
+            print(f"ERROR: hotpants failed:\n{result.stderr}", file=sys.stderr)
+            return False
+
+    print(f"Subtracted image: {outfile}")
+    return True
 
 
 def read_options(args=sys.argv[1:]):
@@ -48,9 +144,11 @@ def run_one(file, noiraf=False, aperture_override=None, max_target_dist=10.0):
     if not os.path.exists(file):
         print(f"ERROR: {file} not found", file=sys.stderr)
         return False
+
     if not os.path.exists(hfile):
-        print(f"ERROR: hotpants image {hfile} not found", file=sys.stderr)
-        return False
+        print(f"No hotpants image found — running template preparation and subtraction")
+        if not prepare_and_subtract(file, hfile):
+            return False
 
     # ------------------------------------------------------------------ #
     # Step 1 – run phcat on the original image
@@ -126,7 +224,7 @@ def run_one(file, noiraf=False, aperture_override=None, max_target_dist=10.0):
     nearby_mask = dist <= max_target_dist
     n_nearby = int(np.sum(nearby_mask))
     if n_nearby > 1:
-        print(f"\nERROR: {n_nearby} detections within {max_target_dist:.0f} px "
+        print(f"\nWARNING: {n_nearby} detections within {max_target_dist:.0f} px "
               f"of target in hotpants catalog:", file=sys.stderr)
         for i in np.where(nearby_mask)[0]:
             row = htbl[i]
@@ -135,8 +233,19 @@ def run_one(file, noiraf=False, aperture_override=None, max_target_dist=10.0):
                   f"dist={float(dist[i]):.1f} px  "
                   f"MAG={float(row['MAG_AUTO']):.3f}",
                   file=sys.stderr)
-        print("Subtraction may not be clean. Aborting.", file=sys.stderr)
-        return False
+        # Prefer NUMBER=0 (injected placeholder) if present among nearby detections
+        nearby_indices = np.where(nearby_mask)[0]
+        zero_indices = [i for i in nearby_indices if int(htbl[i]["NUMBER"]) == 0]
+        if zero_indices:
+            nearest_idx = zero_indices[0]
+            print("Using NUMBER=0 (injected entry) as target.", file=sys.stderr)
+        else:
+            print(f"Using nearest detection (NUMBER={int(htbl[nearest_idx]['NUMBER'])}).",
+                  file=sys.stderr)
+        target_row = htbl[nearest_idx:nearest_idx + 1]
+        print(f"Found target  dist={float(dist[nearest_idx]):.2f} px  "
+              f"MAG={float(target_row['MAG_AUTO'][0]):.3f} ± "
+              f"{float(target_row['MAGERR_AUTO'][0]):.3f}  (revised)")
 
     # ------------------------------------------------------------------ #
     # Step 6 – splice hotpants target row into original catalog as NUMBER=0

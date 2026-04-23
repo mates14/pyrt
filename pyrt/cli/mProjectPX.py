@@ -65,6 +65,39 @@ warnings.simplefilter('ignore', category=FITSFixedWarning)
 # All other projections (e.g., ZPN) require conversion to TAN+SIP
 MPROJECT_PP_PROJECTIONS = {'TAN', 'SIN', 'ZEA', 'STG', 'ARC'}
 
+def read_template_header(hdr_path):
+    """Parse a Montage .hdr text file into an astropy FITS Header.
+
+    Strips CONTINUE cards (long-string continuations copied verbatim by mGetHdr)
+    before parsing — they are not needed for WCS and astropy rejects them in
+    text-format headers.
+    """
+    with open(hdr_path) as f:
+        lines = f.readlines()
+    lines = [l for l in lines if not l.startswith('CONTINUE')]
+    return fits.Header.fromstring(''.join(lines), sep='\n')
+
+
+def write_template_hdr(fitter, naxis1, naxis2, hdr_path):
+    """Write a fitted TAN+SIP WCS as a Montage-compatible .hdr file."""
+    wcs = WCS(fitter.wcs())
+    header = wcs.to_header(relax=True)   # relax=True emits SIP keywords
+    with open(hdr_path, 'w') as f:
+        f.write("SIMPLE  = T\n")
+        f.write("BITPIX  = -32\n")
+        f.write("NAXIS   = 2\n")
+        f.write(f"NAXIS1  = {naxis1}\n")
+        f.write(f"NAXIS2  = {naxis2}\n")
+        for key, val in header.items():
+            if key in ('WCSAXES',):
+                continue
+            if isinstance(val, str):
+                f.write(f"{key:8s}= '{val}'\n")
+            else:
+                f.write(f"{key:8s}= {val}\n")
+        f.write("END\n")
+
+
 def parse_args():
     """Parse command line arguments to match mProject/mProjectPP interface.
 
@@ -159,24 +192,10 @@ def check_projection_handling(header, force_convert=False):
         except Exception as e:
             return f'unsupported: {str(e)}'
 
-def build_mprojectpp_command(args, temp_input=None):
-    """Build mProjectPP command with all relevant arguments.
-
-    Constructs the command-line invocation for mProjectPP, passing through all
-    arguments that were provided by the user.
-
-    Args:
-        args (argparse.Namespace): Parsed command line arguments
-        temp_input (str, optional): Path to temporary input file. If provided,
-                                   used instead of args.input_file (for converted
-                                   projections)
-
-    Returns:
-        list: Command and arguments ready for subprocess execution
-    """
+def build_mprojectpp_command(args, effective_input=None, effective_template=None):
+    """Build mProjectPP command with all relevant arguments."""
     cmd = ['mProjectPP']
 
-    # Add all optional arguments that were provided
     if args.factor: cmd.extend(['-z', str(args.factor)])
     if args.debug: cmd.extend(['-d', str(args.debug)])
     if args.status: cmd.extend(['-s', args.status])
@@ -192,23 +211,18 @@ def build_mprojectpp_command(args, temp_input=None):
     if args.altout: cmd.extend(['-o', args.altout])
     if args.altin: cmd.extend(['-i', args.altin])
 
-    # Add positional arguments
-    cmd.append(temp_input if temp_input else args.input_file)
+    cmd.append(effective_input    or args.input_file)
     cmd.append(args.output_file)
-    cmd.append(args.template_file)
+    cmd.append(effective_template or args.template_file)
 
     return cmd
 
 def main():
     """Main execution function implementing the projection handling logic.
 
-    This function orchestrates the entire workflow:
-    1. Parse command line arguments
-    2. Read the input FITS header to determine projection type
-    3. Choose handling strategy (passthrough vs convert)
-    4. For passthrough: directly invoke mProjectPP
-    5. For convert: create TAN+SIP approximation, then invoke mProjectPP
-    6. Report errors and exit codes appropriately
+    Handles ZPN (or other unsupported) projections on both sides:
+    - Input ZPN  → convert input FITS  to TAN+SIP temp file
+    - Template ZPN → convert template .hdr to TAN+SIP temp .hdr
 
     Exit codes:
         0: Success
@@ -216,57 +230,71 @@ def main():
     """
     args = parse_args()
 
-    # Read input FITS file
+    # Read input FITS header
     try:
         with fits.open(args.input_file) as hdul:
-            header = hdul[args.hdu].header.copy()  # Make a copy to avoid modifying original
+            header = hdul[args.hdu].header.copy()
     except Exception as e:
         write_status(args.status, f"Error reading input file: {str(e)}")
         sys.exit(1)
 
-    # Determine how to handle the projection
-    handling = check_projection_handling(header)
+    # Check template projection (the output grid)
+    try:
+        tmpl_header = read_template_header(args.template_file)
+        tmpl_handling = check_projection_handling(tmpl_header)
+    except Exception as e:
+        write_status(args.status, f"Error reading template file: {str(e)}")
+        sys.exit(1)
 
-    if handling == 'passthrough':
-        # Use mProjectPP directly for supported projections (TAN, SIN, etc.)
-        write_status(args.status, f"Using mProjectPP directly for projection {header['CTYPE1']}")
-        cmd = build_mprojectpp_command(args)
+    input_handling = check_projection_handling(header)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        effective_input    = args.input_file
+        effective_template = args.template_file
+
+        # Convert input if needed
+        if input_handling == 'convert':
+            temp_fits = os.path.join(tmpdir, 'input_tan.fits')
+            shutil.copy2(args.input_file, temp_fits)
+            try:
+                fitter, rms = zpn_to_tan_mesh(header, ngrid=200, sip_order=args.sip_order)
+                fitter.write(temp_fits)
+                write_status(args.status,
+                    f"Input: converted {header['CTYPE1'][5:]} to TAN+SIP (RMS {rms:.3f} px)")
+                effective_input = temp_fits
+            except Exception as e:
+                write_status(args.status, f"Error converting input projection: {str(e)}")
+                sys.exit(1)
+        elif input_handling == 'passthrough':
+            write_status(args.status, f"Input: using mProjectPP directly ({header['CTYPE1']})")
+        else:
+            write_status(args.status, f"Unsupported input projection: {input_handling}")
+            sys.exit(1)
+
+        # Convert template (output grid) if needed
+        if tmpl_handling == 'convert':
+            temp_hdr = os.path.join(tmpdir, 'template_tan.hdr')
+            try:
+                fitter, rms = zpn_to_tan_mesh(tmpl_header, ngrid=200, sip_order=args.sip_order)
+                write_template_hdr(fitter,
+                                   tmpl_header['NAXIS1'], tmpl_header['NAXIS2'],
+                                   temp_hdr)
+                write_status(args.status,
+                    f"Template: converted {tmpl_header['CTYPE1'][5:]} to TAN+SIP (RMS {rms:.3f} px)")
+                effective_template = temp_hdr
+            except Exception as e:
+                write_status(args.status, f"Error converting template projection: {str(e)}")
+                sys.exit(1)
+        elif tmpl_handling != 'passthrough':
+            write_status(args.status, f"Unsupported template projection: {tmpl_handling}")
+            sys.exit(1)
+
+        cmd = build_mprojectpp_command(args, effective_input, effective_template)
         try:
             subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError as e:
             write_status(args.status, f"Error running mProjectPP: {e}")
             sys.exit(1)
-
-    elif handling == 'convert':
-        # Convert unsupported projections (like ZPN) to TAN+SIP approximation
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Convert to TAN+SIP
-            temp_fits = os.path.join(tmpdir, 'temp_tan.fits')
-#            write_status(args.status, f"Converting {header['CTYPE1']} to TAN+SIP")
-
-            # Copy input file to temp location
-            shutil.copy2(args.input_file, temp_fits)
-
-            try:
-                # Convert to TAN+SIP using mesh-based fitting
-                # ngrid=200 creates a 200x200 mesh of sample points
-                # sip_order controls polynomial complexity (higher = more accurate but slower)
-                fitter, rms = zpn_to_tan_mesh(header, ngrid=200, sip_order=args.sip_order)
-
-                # Write converted file
-                fitter.write(temp_fits)
-                write_status(args.status, f"Converted {header['CTYPE1'][5:]} to TAN-SIP with RMS error {rms:.3f} pixels")
-
-                # Build and run mProjectPP command on the converted image
-                cmd = build_mprojectpp_command(args, temp_fits)
-                subprocess.run(cmd, check=True)
-
-            except Exception as e:
-                write_status(args.status, f"Error during conversion: {str(e)}")
-                sys.exit(1)
-    else:
-        write_status(args.status, f"Unsupported projection: {handling}")
-        sys.exit(1)
 
 if __name__ == "__main__":
     main()

@@ -82,6 +82,7 @@ pyrt-combine = "pyrt.cli.combine:main"
 pyrt-cphead = "pyrt.cli.cphead:main"
 pyrt-edhead = "pyrt.cli.edhead:main"
 pyrt-sky2xy = "pyrt.cli.sky2xy:main"
+pyrt-ps1mosaic = "pyrt.cli.ps1mosaic:main"
 
 [tool.setuptools]
 packages = [

@@ -26,12 +26,14 @@ class PhotometryPipeline:
                  phdb_root: str = "~/phdb",
                  png_root: str = "~/png",
                  dophot_path: str = "pyrt-dophot",
-                 calib_dir_template: str = "/home/mates/flat{year}/"):
+                 calib_dir_template: str = "/home/mates/flat{year}/",
+                 verbose: bool = False):
 
         self.phdb_root = Path(phdb_root).expanduser()
         self.png_root = Path(png_root).expanduser()
         self.dophot_path = Path(dophot_path).expanduser()
         self.calib_dir_template = calib_dir_template
+        self.verbose = verbose
 
         # Initialize image processor
         self.image_processor = ImageProcessor(calib_dir_template=calib_dir_template)
@@ -74,11 +76,17 @@ class PhotometryPipeline:
         return None
 
     def _run_step(self, cmd: List[str], temp_dir: Path, step_name: str) -> bool:
-        """Run a pipeline step, return True on success."""
-        logger.debug(f"  Running {step_name}: {' '.join(cmd)}")
-        result = subprocess.run(cmd, cwd=temp_dir, text=True)
+        """Run a pipeline step, streaming output when verbose, capturing otherwise."""
+        logger.info(f"--- {step_name} ---")
+        if self.verbose:
+            result = subprocess.run(cmd, cwd=temp_dir, text=True)
+        else:
+            result = subprocess.run(cmd, cwd=temp_dir, text=True,
+                                    capture_output=True)
         if result.returncode != 0:
             logger.error(f"{step_name} failed (exit {result.returncode})")
+            if not self.verbose and result.stderr:
+                logger.error(result.stderr.rstrip())
             return False
         return True
 
@@ -307,14 +315,12 @@ def main():
 
     args = parser.parse_args()
 
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-
     pipeline = PhotometryPipeline(
         phdb_root=args.phdb_root,
         png_root=args.png_root,
         dophot_path=args.dophot_path,
-        calib_dir_template=args.calib_dir
+        calib_dir_template=args.calib_dir,
+        verbose=args.verbose,
     )
 
     pipeline.process_images(

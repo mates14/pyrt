@@ -1038,7 +1038,9 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None,
 
     if total_counts <= 0:
         _pbar.close()
-        raise ValueError("No valid images with MAGZERO for weight calculation")
+        print("Warning: no MAGZERO found in any input file — falling back to uniform weighting")
+        n = len(files)
+        return {f: float(n) for f in files}, []
 
     # Second pass - calculate weights
     for f in files:
@@ -1247,7 +1249,12 @@ def process_single_image(input_data):
         ], capture_output=quiet)
 
         if result.returncode != 0:
-            raise RuntimeError(f"Failed to project image: {result.stderr}")
+            out = (result.stdout or b'').decode('utf-8', errors='replace') if quiet else ''
+            err = (result.stderr or b'').decode('utf-8', errors='replace') if quiet else ''
+            raise RuntimeError(
+                f"Failed to project image (rc={result.returncode}):\n"
+                f"stdout: {out}\nstderr: {err}"
+            )
 
         # Project weight map if present
         if has_weight_map:
@@ -1273,6 +1280,25 @@ def process_single_image(input_data):
         'weight_map': str(weight_map_proj) if has_weight_map else None
     }
 
+def _convert_skeleton_if_needed(skel_path):
+    """If the skeleton header has a projection mProjectPP can't handle (e.g. ZPN),
+    convert it to TAN+SIP in-place so mProjectPX and mAdd use the same WCS."""
+    from pyrt.cli.mProjectPX import (read_template_header,
+                                      check_projection_handling,
+                                      write_template_hdr)
+    from pyrt.cli.zpn_to_tan import zpn_to_tan_mesh
+    try:
+        header = read_template_header(skel_path)
+        if check_projection_handling(header) == 'convert':
+            fitter, rms = zpn_to_tan_mesh(header, ngrid=200, sip_order=3)
+            write_template_hdr(fitter, header['NAXIS1'], header['NAXIS2'], skel_path)
+            print(f"Skeleton: converted {header.get('CTYPE1','?')[5:]} → TAN+SIP (RMS {rms:.3f} px)")
+    except Exception as e:
+        import traceback
+        print(f"Warning: skeleton projection check/conversion failed: {e}")
+        traceback.print_exc()
+
+
 def combine_images_montage(output, inputs, weights, skeleton_file, args):
     """Combine images using Montage's mProjectPP/mProjectPX and mAdd.
 
@@ -1290,13 +1316,17 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
     with tempfile.TemporaryDirectory(dir=home_tmp) as tmpdir:
         tmpdir = Path(tmpdir)
 
-        # Copy skeleton header to temp directory
+        # Copy skeleton header to temp directory, converting ZPN→TAN+SIP if needed.
+        # mProjectPP handles ZPN input images internally, but mAdd also needs the
+        # skeleton to match the projected images — so the conversion must happen here
+        # once, and all downstream tools (mProjectPX, mAdd) use the same header.
         subprocess.run(
             ["cp", skeleton_file, str(tmpdir / "skel.hdr")],
             check=True,
             capture_output=True,
             text=True
         )
+        _convert_skeleton_if_needed(str(tmpdir / "skel.hdr"))
 
         # Create directories
         weighted_dir = tmpdir / "weighted"
@@ -1360,7 +1390,7 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
             text=True
         )
         if result.returncode != 0:
-            raise RuntimeError(f"Failed to create image table: {result.stderr}")
+            raise RuntimeError(f"Failed to create image table: {result.stdout} {result.stderr}")
 
         # Combine main images
         print("Combining projected images...")
@@ -1373,7 +1403,7 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
         ], capture_output=True, text=True)
 
         if result.returncode != 0:
-            raise RuntimeError(f"Failed to combine images: {result.stderr}")
+            raise RuntimeError(f"Failed to combine images: {result.stdout} {result.stderr}")
 
         print("Images combined with normalized weights")
         try:
@@ -1396,7 +1426,7 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
                 text=True
             )
             if result.returncode != 0:
-                raise RuntimeError(f"Failed to create weight map table: {result.stderr}")
+                raise RuntimeError(f"Failed to create weight map table: {result.stdout} {result.stderr}")
 
             # Combine weight maps
             result = subprocess.run([
@@ -1408,7 +1438,7 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
             ], capture_output=True, text=True)
 
             if result.returncode != 0:
-                raise RuntimeError(f"Failed to combine weight maps: {result.stderr}")
+                raise RuntimeError(f"Failed to combine weight maps: {result.stdout} {result.stderr}")
 
             # Apply combined weight map to final image
             print("Applying combined weight map...")

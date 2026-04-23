@@ -133,7 +133,15 @@ def zpn_to_tan_mesh(header, ngrid=100, sip_order=4):
             if key in header:
                 cd_terms.append(key)
                 cd_values.append(header[key])
-    
+
+    # Header may use PC matrix + CDELT instead of CD matrix; derive equivalent
+    if not cd_terms:
+        cd = w_zpn.pixel_scale_matrix
+        for i in range(2):
+            for j in range(2):
+                cd_terms.append(f'CD{i+1}_{j+1}')
+                cd_values.append(float(cd[i, j]))
+
     fitter.fitterm(cd_terms, cd_values)
     
     # Prepare fit data with weights
