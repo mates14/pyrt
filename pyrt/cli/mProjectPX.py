@@ -133,17 +133,21 @@ def parse_args():
     
     return parser.parse_args()
 
-def write_status(status_file, message):
-    """Write status message to file if specified, and print to stdout.
+def write_status(status_file, message, error=False):
+    """Write status message to file if specified, and print to stdout or stderr.
 
     Args:
         status_file (str or None): Path to status file, or None to skip file output
         message (str): Status message to write
+        error (bool): If True, write to stderr instead of stdout
     """
     if status_file:
         with open(status_file, 'a') as f:
             f.write(message + '\n')
-    print(message)
+    if error:
+        print(message, file=sys.stderr)
+    else:
+        print(message)
 
 def check_projection_handling(header, force_convert=False):
     """Determine the appropriate handling strategy for the projection type.
@@ -293,8 +297,39 @@ def main():
         try:
             subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError as e:
-            write_status(args.status, f"Error running mProjectPP: {e}")
+            write_status(args.status, f"Error running mProjectPP: {e}", error=True)
             sys.exit(1)
+
+    elif handling == 'convert':
+        # Convert unsupported projections (like ZPN) to TAN+SIP approximation
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Convert to TAN+SIP
+            temp_fits = os.path.join(tmpdir, 'temp_tan.fits')
+#            write_status(args.status, f"Converting {header['CTYPE1']} to TAN+SIP")
+
+            # Copy input file to temp location
+            shutil.copy2(args.input_file, temp_fits)
+
+            try:
+                # Convert to TAN+SIP using mesh-based fitting
+                # ngrid=200 creates a 200x200 mesh of sample points
+                # sip_order controls polynomial complexity (higher = more accurate but slower)
+                fitter, rms = zpn_to_tan_mesh(header, ngrid=200, sip_order=args.sip_order)
+
+                # Write converted file
+                fitter.write(temp_fits)
+                write_status(args.status, f"Converted {header['CTYPE1'][5:]} to TAN-SIP with RMS error {rms:.3f} pixels")
+
+                # Build and run mProjectPP command on the converted image
+                cmd = build_mprojectpp_command(args, temp_fits)
+                subprocess.run(cmd, check=True)
+
+            except Exception as e:
+                write_status(args.status, f"Error during conversion: {str(e)}", error=True)
+                sys.exit(1)
+    else:
+        write_status(args.status, f"Unsupported projection: {handling}", error=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

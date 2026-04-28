@@ -344,26 +344,53 @@ def solve_wcs_return_header(fits_file, cat_file=None, scale=None, time_limit=15,
             if verbose:
                 print(f"Found catalog file: {cat_file}")
 
-    # Extract scale from header if not provided
+    # Extract scale and RA/DEC hints from header if not provided
+    ra_hint = None
+    dec_hint = None
     if scale is None:
         try:
             with pyfits.open(fits_file) as hdul:
                 header = hdul[0].header
-                if 'CDELT1' in header:
-                    scale = abs(header['CDELT1']) * 3600.0  # Convert to arcsec
-                    if verbose:
-                        print(f"Using scale from header: {scale:.3f} arcsec/pixel")
-                elif 'CD1_1' in header:
-                    scale = abs(header['CD1_1']) * 3600.0
+                if 'CD1_1' in header:
+                    cd11 = header['CD1_1']
+                    cd12 = header.get('CD1_2', 0.0)
+                    scale = math.sqrt(cd11**2 + cd12**2) * 3600.0
                     if verbose:
                         print(f"Using scale from CD matrix: {scale:.3f} arcsec/pixel")
+                elif 'CDELT1' in header:
+                    scale = abs(header['CDELT1']) * 3600.0
+                    if verbose:
+                        print(f"Using scale from header: {scale:.3f} arcsec/pixel")
+                for key in ('OBJRA', 'RASC', 'RA', 'TELRA'):
+                    if key in header:
+                        ra_hint = float(header[key])
+                        break
+                for key in ('OBJDEC', 'DECL', 'DEC', 'TELDEC'):
+                    if key in header:
+                        dec_hint = float(header[key])
+                        break
         except Exception as e:
             if verbose:
-                print(f"Could not extract scale from header: {e}")
+                print(f"Could not extract hints from header: {e}")
 
     # Run the solver with return_wcs=True
     solver = AstrometryScript(time=time_limit)
 
+    # Pass 1: fast solve with RA/DEC hints
+    if ra_hint is not None and dec_hint is not None:
+        if verbose:
+            print(f"Pass 1: trying with RA/DEC hints (RA={ra_hint:.4f} Dec={dec_hint:.4f})...")
+        result = solver.run(fits_file, scale=scale, ra=ra_hint, dec=dec_hint,
+                            zoom=2, replace=False, cat_file=cat_file, return_wcs=True)
+        if result is not None:
+            ra, dec, wcs_dict = result
+            if verbose:
+                print(f"Field solved with hints! RA={ra:.6f} Dec={dec:.6f}")
+            return wcs_dict
+        if verbose:
+            print("Pass 1 failed, trying without RA/DEC hints...")
+
+    # Pass 2: no RA/DEC hints, try multiple zoom levels
     for zoom in ast_scales:
         if verbose:
             print(f"Trying solve-field with zoom={zoom}...")
@@ -427,26 +454,52 @@ def validate_and_fix_wcs(fits_file, cat_file=None, scale=None, time_limit=15, ve
             if verbose:
                 print(f"Found catalog file: {cat_file}")
 
-    # Extract scale from header if not provided
+    # Extract scale and RA/DEC hints from header if not provided
+    ra_hint = None
+    dec_hint = None
     if scale is None:
         try:
             with pyfits.open(fits_file) as hdul:
                 header = hdul[0].header
-                if 'CDELT1' in header:
-                    scale = abs(header['CDELT1']) * 3600.0  # Convert to arcsec
-                    if verbose:
-                        print(f"Using scale from header: {scale:.3f} arcsec/pixel")
-                elif 'CD1_1' in header:
-                    scale = abs(header['CD1_1']) * 3600.0
+                if 'CD1_1' in header:
+                    cd11 = header['CD1_1']
+                    cd12 = header.get('CD1_2', 0.0)
+                    scale = math.sqrt(cd11**2 + cd12**2) * 3600.0
                     if verbose:
                         print(f"Using scale from CD matrix: {scale:.3f} arcsec/pixel")
+                elif 'CDELT1' in header:
+                    scale = abs(header['CDELT1']) * 3600.0
+                    if verbose:
+                        print(f"Using scale from header: {scale:.3f} arcsec/pixel")
+                for key in ('OBJRA', 'RASC', 'RA', 'TELRA'):
+                    if key in header:
+                        ra_hint = float(header[key])
+                        break
+                for key in ('OBJDEC', 'DECL', 'DEC', 'TELDEC'):
+                    if key in header:
+                        dec_hint = float(header[key])
+                        break
         except Exception as e:
             if verbose:
-                print(f"Could not extract scale from header: {e}")
+                print(f"Could not extract hints from header: {e}")
 
     # Run the solver
     solver = AstrometryScript(time=time_limit)
 
+    # Pass 1: fast solve with RA/DEC hints
+    if ra_hint is not None and dec_hint is not None:
+        if verbose:
+            print(f"Pass 1: trying with RA/DEC hints (RA={ra_hint:.4f} Dec={dec_hint:.4f})...")
+        result = solver.run(fits_file, scale=scale, ra=ra_hint, dec=dec_hint,
+                            zoom=2, replace=True, cat_file=cat_file)
+        if result is not None:
+            if verbose:
+                print(f"Field solved with hints! RA={result[0]:.6f} Dec={result[1]:.6f}")
+            return True
+        if verbose:
+            print("Pass 1 failed, trying without RA/DEC hints...")
+
+    # Pass 2: no RA/DEC hints, try multiple zoom levels
     for zoom in ast_scales:
         if verbose:
             print(f"Trying solve-field with zoom={zoom}...")
@@ -524,8 +577,8 @@ class AstrometryScript:
         Args:
             fits_file: FITS image file to solve
             scale: Pixel scale in arcsec/pixel
-            ra: Initial RA guess (optional)
-            dec: Initial Dec guess (optional)
+            ra: Initial RA guess in degrees (optional, greatly speeds up solving)
+            dec: Initial Dec guess in degrees (optional, greatly speeds up solving)
             replace: If True, replace original file with solved version (ignored if return_wcs=True)
             naxis1, naxis2: Image dimensions (optional)
             zoom: Downsample factor for solve-field
@@ -557,13 +610,11 @@ class AstrometryScript:
                     img_height = None
                     print(f"Warning: Could not create .xyls from {cat_file}, solve-field will detect stars")
 
-            #solve_field=[self.astrometry_bin + '/solve-field', '-D', odir,'--no-plots', '--no-fits2fits']
             solve_field=[self.astrometry_bin + '/solve-field', '-D', odir,'--no-plots']
-
 
             if zoom is None:
                 zoom = self.zoom
-            
+
             if scale is not None:
                 scale_low=scale*(1-self.scale_relative_error)
                 scale_high=scale*(1+self.scale_relative_error)
@@ -573,12 +624,14 @@ class AstrometryScript:
                 solve_field.append(str(scale_low))
                 solve_field.append('-H')
                 solve_field.append(str(scale_high))
-            
-            # stupen polynomu pro fit, standardni 2 pro WF snimky nekdy nestacil
-            # sergej: --order 4 --radius 1 -z 4 --scale-error 1
-    #        solve_field.append('--scale-error 1')
-    #        solve_field.append('--radius 1')
-    #        solve_field.append('-t%d'%self.poly)
+
+            if ra is not None and dec is not None:
+                solve_field.append('--ra')
+                solve_field.append(str(ra))
+                solve_field.append('--dec')
+                solve_field.append(str(dec))
+                solve_field.append('--radius')
+                solve_field.append('5')
 
             solve_field.append('-T')
             solve_field.append('-l%d'%self.time)
@@ -586,22 +639,6 @@ class AstrometryScript:
             solve_field.append('-y')
             solve_field.append('--uniformize')
             solve_field.append('10')
-
-    # This produces problematic results (bad precision):
-    #        if naxis1 is not None and naxis2 is not None:
-    #            solve_field.append('--crpix-x')
-    #            solve_field.append(str(naxis1/2))
-    #            solve_field.append('--crpix-y')
-    #            solve_field.append(str(naxis2/2))
-
-    # This is virtually useless apart of speed (if it does not work when it should, it helps not):
-    #        if ra is not None and dec is not None:
-    #            solve_field.append('--ra')
-    #            solve_field.append(str(ra))
-    #            solve_field.append('--dec')
-    #            solve_field.append(str(dec))
-    #            solve_field.append('--radius')
-    #            solve_field.append('15')
 
             # Always pass the FITS image (needed for WCS output)
             solve_field.append(infpath)
@@ -617,10 +654,6 @@ class AstrometryScript:
                 solve_field.append('--sort-column')
                 solve_field.append('FLUX')
                 solve_field.append(xyls_file)
-
-            #print(solve_field)
-          
-            print(solve_field)
 
             proc = subprocess.Popen(solve_field, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -710,19 +743,62 @@ Examples:
         print(f"Warning: Catalog file '{args.cat_file}' not found, solve-field will detect stars")
         args.cat_file = None
 
+    # Read hints from FITS header
+    ra_hint = None
+    dec_hint = None
+    scale = args.scale
+    try:
+        with pyfits.open(args.fits_file, 'readonly') as ff:
+            hdr = ff[0].header
+            # RA hint: try OBJRA first (telescope commanded position), then RASC
+            for key in ('OBJRA', 'RASC', 'RA', 'TELRA'):
+                if key in hdr:
+                    ra_hint = float(hdr[key])
+                    break
+            # DEC hint
+            for key in ('OBJDEC', 'DECL', 'DEC', 'TELDEC'):
+                if key in hdr:
+                    dec_hint = float(hdr[key])
+                    break
+            # Scale from header if not provided on command line
+            if scale is None:
+                if 'CD1_1' in hdr:
+                    cd11 = hdr['CD1_1']
+                    cd12 = hdr.get('CD1_2', 0.0)
+                    scale = math.sqrt(cd11**2 + cd12**2) * 3600.0
+                    print(f"Scale from CD matrix: {scale:.4f} arcsec/pixel")
+                elif 'CDELT1' in hdr:
+                    scale = abs(hdr['CDELT1']) * 3600.0
+                    print(f"Scale from CDELT1: {scale:.4f} arcsec/pixel")
+    except Exception as e:
+        print(f"Warning: Could not read hints from FITS header: {e}")
+
+    if ra_hint is not None and dec_hint is not None:
+        print(f"Hints from header: RA={ra_hint:.4f} Dec={dec_hint:.4f}")
+
     a = AstrometryScript(time=args.time)
 
-    # Try different zoom levels until one succeeds
+    # Pass 1: fast solve with RA/DEC hints + scale (if hints available)
     ret = None
-    for zoom in ast_scales:
-        ret = a.run(args.fits_file, scale=args.scale, zoom=zoom, replace=True, cat_file=args.cat_file)
+    if ra_hint is not None and dec_hint is not None:
+        print("Pass 1: trying with RA/DEC hints...")
+        ret = a.run(args.fits_file, scale=scale, ra=ra_hint, dec=dec_hint,
+                    zoom=2, replace=True, cat_file=args.cat_file)
         if ret is not None:
-            print(f"Field solved successfully at zoom level {zoom}")
-            print(f"Field center: RA={ret[0]:.6f} Dec={ret[1]:.6f}")
-            break
+            print(f"Field solved with hints: RA={ret[0]:.6f} Dec={ret[1]:.6f}")
+
+    # Pass 2: no RA/DEC hints, but still use scale; try multiple zoom levels
+    if ret is None:
+        if ra_hint is not None:
+            print("Pass 2: hints failed or unavailable, trying without RA/DEC hints...")
+        for zoom in ast_scales:
+            ret = a.run(args.fits_file, scale=scale, zoom=zoom, replace=True, cat_file=args.cat_file)
+            if ret is not None:
+                print(f"Field solved at zoom level {zoom}: RA={ret[0]:.6f} Dec={ret[1]:.6f}")
+                break
 
     if ret is None:
-        print("Field solving failed at all zoom levels")
+        print("Field solving failed")
         sys.exit(1)
 
     sys.exit(0)

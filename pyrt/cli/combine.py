@@ -1246,7 +1246,7 @@ def process_single_image(input_data):
             str(output_weighted),
             str(output_proj),
             str(skel_hdr)
-        ], capture_output=quiet)
+        ], stdout=subprocess.PIPE if quiet else None, stderr=subprocess.PIPE)
 
         if result.returncode != 0:
             out = (result.stdout or b'').decode('utf-8', errors='replace') if quiet else ''
@@ -1266,10 +1266,10 @@ def process_single_image(input_data):
                 str(weight_map_weighted),
                 str(weight_map_proj),
                 str(skel_hdr)
-            ], capture_output=quiet)
+            ], stdout=subprocess.PIPE if quiet else None, stderr=subprocess.PIPE)
 
             if result.returncode != 0:
-                raise RuntimeError(f"Failed to project weight map: {result.stderr}")
+                raise RuntimeError(f"Failed to project weight map {weight_map_weighted} (exit {result.returncode}): {result.stderr.decode(errors='replace')}")
 
     # Clean up background-subtracted temp file (it has been projected into proj_dir)
     if bgsub_file is not None and Path(bgsub_file).exists():

@@ -54,7 +54,15 @@ def fit_sip_in_pixel_space(zpn_wcs, tan_wcs, pixels, order=4):
     """
     # Get coordinates in both systems
     sky = zpn_wcs.all_pix2world(pixels, 0)
-    tan_pixels = tan_wcs.all_world2pix(sky, 0)
+    tan_pixels = tan_wcs.all_world2pix(sky, 0, quiet=True)
+
+    # Drop any points where the inverse transform diverged
+    valid = np.all(np.isfinite(tan_pixels), axis=1)
+    if not np.any(valid):
+        raise RuntimeError("all_world2pix diverged for all mesh points during SIP fitting")
+    sky = sky[valid]
+    pixels = pixels[valid]
+    tan_pixels = tan_pixels[valid]
     
     # Work in CRPIX-relative coordinates
     crpix = tan_wcs.wcs.crpix
@@ -170,10 +178,11 @@ def zpn_to_tan_mesh(header, ngrid=100, sip_order=4):
  
     w_new = WCS(fitter.wcs())
     
-    # For validation, compute RMS in pixels
-    pixels_back = w_new.all_world2pix(sky, 0)
-    diff = pixels - pixels_back
-    rms = np.sqrt(np.mean(weights * (diff[:,0]**2 + diff[:,1]**2)))
+    # For validation, compute RMS in pixels (quiet=True returns NaN for diverging points)
+    pixels_back = w_new.all_world2pix(sky, 0, quiet=True)
+    valid = np.all(np.isfinite(pixels_back), axis=1)
+    diff = pixels[valid] - pixels_back[valid]
+    rms = np.sqrt(np.mean(weights[valid] * (diff[:,0]**2 + diff[:,1]**2)))
 
     # Print before/after residuals for sample points
     tan_pix = w_tan.all_world2pix(sky[:10], 0)  # first 10 points
