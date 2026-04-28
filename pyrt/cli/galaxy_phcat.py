@@ -254,8 +254,9 @@ def run_one(file, noiraf=False, aperture_override=None, max_target_dist=10.0):
     target_row["NUMBER"] = np.int32(0)
     target_row.meta.clear()  # avoid vstack metadata merge warnings
 
-    # Drop any pre-existing NUMBER=0 placeholder from original catalog
-    tbl_rest = tbl[tbl["NUMBER"] != 0]
+    # Drop any original-image detections near the target (galaxy contamination)
+    orig_dist = np.sqrt((tbl["X_IMAGE"] - tx) ** 2 + (tbl["Y_IMAGE"] - ty) ** 2)
+    tbl_rest = tbl[orig_dist > max_target_dist]
 
     merged = astropy.table.vstack([target_row, tbl_rest],
                                   metadata_conflicts="silent")
