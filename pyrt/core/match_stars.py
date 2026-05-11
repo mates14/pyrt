@@ -101,12 +101,19 @@ def match_stars(det, cat, imgwcs, idlimit=2.0):
 
     # Build and query KDTree
     tree = KDTree(cat_coords)
-    nearest_ind, _ = tree.query_radius(
+    nearest_ind, nearest_dist = tree.query_radius(
         det_coords,
         r=idlimit,
         return_distance=True,
         count_only=False
     )
+
+    # Sort each star's match list by distance so inds[0] is always the closest.
+    # query_radius returns results in KDTree traversal order, not by distance.
+    for i in range(len(nearest_ind)):
+        if len(nearest_ind[i]) > 1:
+            order = np.argsort(nearest_dist[i])
+            nearest_ind[i] = nearest_ind[i][order]
 
     return nearest_ind
 
@@ -339,6 +346,46 @@ def estimate_magnitude_limit(field_size_deg, desired_stars, galactic_lat):
 
     return mag_limit
 
+def compute_effective_idlimit(det, options):
+    """
+    Determine the matching radius to use for KDTree queries.
+
+    Priority:
+      1. Explicit user -i / options.idlimit
+      2. ASTSIGMA + ASTVAR from a previous pass (object-specific 95th-pct radius)
+      3. Hard-wired fallback of 2.0 px
+
+    When ASTSIGMA/ASTVAR are present, per-object radii are sampled from the
+    detection table using sigma_total = sqrt(ASTSIGMA² + (ERRX2+ERRY2)·ASTVAR),
+    matching the formula used by transients.py:compute_object_specific_idlimit.
+    The 95th-pct is taken as a conservative single radius, clamped to [0.5, 10] px.
+    """
+    if options.idlimit:
+        return options.idlimit
+
+    astsigma = det.meta.get('ASTSIGMA', None)
+    astvar   = det.meta.get('ASTVAR',   None)
+
+    if astsigma is not None and astvar is not None:
+        s0 = astsigma ** 2
+        sc = max(float(astvar), 0.0)
+        radii = []
+        for row in det[:min(200, len(det))]:
+            errx2 = float(row['ERRX2_IMAGE']) if 'ERRX2_IMAGE' in det.colnames else 0.0
+            erry2 = float(row['ERRY2_IMAGE']) if 'ERRY2_IMAGE' in det.colnames else 0.0
+            if not np.isfinite(errx2) or errx2 < 0: errx2 = 0.0
+            if not np.isfinite(erry2) or erry2 < 0: erry2 = 0.0
+            sigma_total = np.sqrt(s0 + sc * (errx2 + erry2))
+            radii.append(3.0 * sigma_total)
+        effective = float(np.percentile(radii, 95))
+        effective = min(max(effective, 0.5), 10.0)
+        logging.info(f"Object-specific idlimit (95th pct): {effective:.2f} px "
+                     f"(ASTSIGMA={astsigma:.3f}, ASTVAR={astvar:.2f})")
+        return effective
+
+    return 2.0
+
+
 def process_image_with_dynamic_limits(det, options):
     """
     Process a single image with dynamic magnitude limits.
@@ -354,8 +401,9 @@ def process_image_with_dynamic_limits(det, options):
         # Set up WCS
         imgwcs = astropy.wcs.WCS(det.meta)
 
-        target_match = find_target(det, imgwcs,
-                                 idlimit=options.idlimit if options.idlimit else 2.0)
+        effective_idlimit = compute_effective_idlimit(det, options)
+
+        target_match = find_target(det, imgwcs, idlimit=effective_idlimit)
 
         enlarge = options.enlarge if options.enlarge is not None else 1.0
 
@@ -388,8 +436,7 @@ def process_image_with_dynamic_limits(det, options):
         if options.maglim is None:
             # this is for the adaptive magnitude limit
             # Match stars
-            matches = match_stars(det, cat, imgwcs,
-                                idlimit=options.idlimit if options.idlimit else 2.0)
+            matches = match_stars(det, cat, imgwcs, idlimit=effective_idlimit)
             if matches is None:
                 return None, None, None, None
 
@@ -435,7 +482,6 @@ def process_image_with_dynamic_limits(det, options):
 
         logging.info(f"Matching {len(det)} objects from file with {len(cat)} objects from the catalog")
         # Final matching with full catalog
-        final_matches = match_stars(det, cat, imgwcs,
-                                  idlimit=options.idlimit if options.idlimit else 2.0)
+        final_matches = match_stars(det, cat, imgwcs, idlimit=effective_idlimit)
 
         return cat, final_matches, imgwcs, target_match

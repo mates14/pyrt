@@ -109,10 +109,19 @@ def refine_fit(zpntest, data):
     # Remove all masks to compute residuals for all points
     data.use_mask('default')
     ad_all = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
-    residuals = zpntest.residuals(zpntest.fitvalues, ad_all.astparams)
-
-    # Create the astrometric mask
-    astro_mask = residuals < 3.0 * zpntest.wssrndf
+    # Per-star sigma-clipping: sigma_total = sqrt(sigma_floor² + image_dxy² * variance)
+    # sigma_floor (zpntest.sigma) is the systematic WCS floor from the previous fit;
+    # image_dxy * sqrt(variance) is the per-object centroiding contribution (same model
+    # as compute_object_specific_idlimit in transients.py).
+    # For a bad initial fit the floor dominates → permissive threshold for all stars.
+    # For a good fit the centroiding term can tighten the threshold for faint stars.
+    # Using only dist/err (normalised) collapses to ~0.5 px for bright stars regardless
+    # of WCS quality, which discards most of the field and leaves a degenerate corner subset.
+    raw_residuals = zpntest.residuals0(zpntest.fitvalues, ad_all.astparams)
+    sigma_floor = zpntest.sigma if np.isfinite(zpntest.sigma) else 0.0
+    variance = zpntest.variance if (np.isfinite(zpntest.variance) and zpntest.variance > 1.0) else 1.0
+    per_star_sigma = np.sqrt(sigma_floor**2 + ad_all.image_dxy**2 * variance)
+    astro_mask = raw_residuals < 3.0 * per_star_sigma
 
     # Combine the photometric and astrometric masks
     data.use_mask('photometry')
@@ -508,6 +517,55 @@ def perform_stepwise_astrometry(zpntest, data,
 
     return selected_terms
 
+def compute_error_model(zpntest, data):
+    """
+    Fit sigma_total² = S0 + SC·(ERRX2+ERRY2) from astrometric residuals.
+    centering2 = image_var = ERRX2_IMAGE + ERRY2_IMAGE (total centroid variance, pix²).
+    Returns (sqrt(S0), SC) suitable for ASTSIGMA and ASTVAR headers.
+    Uses the default mask (all matched stars, not just sigma-clipped).
+    Slope estimated via Theil-Sen (median of pairwise slopes) for outlier robustness.
+    """
+    data.use_mask('default')
+    ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy', 'image_var')
+    residuals_px = zpntest.residuals0(zpntest.fitvalues, ad.astparams)
+    centering2   = ad.image_var   # ERRX2 + ERRY2 in pix²
+
+    order = np.argsort(centering2)
+    r2 = residuals_px[order] ** 2
+    c2 = centering2[order]
+    n  = len(r2)
+
+    if n < 10:
+        S0 = float(np.median(r2))
+        return np.sqrt(max(S0, 0.0)), 1.0
+
+    nbins = min(10, n // 5)
+    bins  = np.array_split(np.arange(n), nbins)
+    med_r2 = np.array([np.median(r2[b]) for b in bins])
+    med_c2 = np.array([np.median(c2[b]) for b in bins])
+
+    # Theil-Sen slope: median of all pairwise slopes — robust to outlier bins
+    slopes = []
+    for i in range(len(med_c2)):
+        for j in range(i + 1, len(med_c2)):
+            dc = med_c2[j] - med_c2[i]
+            if abs(dc) > 1e-12:
+                slopes.append((med_r2[j] - med_r2[i]) / dc)
+    if slopes:
+        SC = max(float(np.median(slopes)), 0.0)
+        S0 = max(float(np.median(med_r2 - SC * med_c2)), 0.0)
+    else:
+        S0 = max(float(np.median(med_r2)), 0.0)
+        SC = 0.0
+
+    # Actual scatter of all matched stars (telescope-quality metric for DB upload decisions).
+    # Uses the default mask so it reflects the full matched set, not just sigma-clipped stars.
+    scatter = float(np.median(np.abs(residuals_px)) / 0.67)
+
+    logging.info(f"Error model fit: S0={S0:.6f} px², SC={SC:.4f}, ASTSIGMA={np.sqrt(S0):.4f} px, ASTSCATT={scatter:.4f} px")
+    return np.sqrt(S0), SC, scatter
+
+
 def refit_astrometry(det, data, options):
     """
     Refit the astrometric solution for a given image
@@ -640,7 +698,11 @@ def refit_astrometry(det, data, options):
 
     # Astrometric arrow plot now generated in dophot.py using plot_astrometric_arrows()
 
-    # Error model analysis removed - now done in transients.py with full catalog
+    # Fit the S0+SC error model and overwrite sigma/variance so that
+    # zpnfit.write() stores correct ASTSIGMA=sqrt(S0) and ASTVAR=SC semantics.
+    # scatter = actual median scatter — the old ASTSIGMA semantics, used for DB upload quality check.
+    zpntest.sigma, zpntest.variance, zpntest.scatter = compute_error_model(zpntest, data)
+    print(f"Error model: ASTSIGMA={zpntest.sigma:.4f} px (floor), ASTVAR={zpntest.variance:.4f}, ASTSCATT={zpntest.scatter:.4f} px (scatter)")
 
     return zpntest
 

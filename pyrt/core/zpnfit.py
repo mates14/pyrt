@@ -171,9 +171,11 @@ class zpnfit(termfit.termfit):
 
         # Add quality metrics if available
         if hasattr(self, 'sigma') and not np.isnan(self.sigma):
-            hdr['ASTSIGMA'] = (self.sigma, 'Astrometric fit sigma (pixels)')
+            hdr['ASTSIGMA'] = (self.sigma, 'Astrometric WCS floor sqrt(S0) (pixels)')
         if hasattr(self, 'wssrndf') and not np.isnan(self.wssrndf):
             hdr['ASTWSSR'] = (self.wssrndf, 'Astrometric WSSR/NDF')
+        if hasattr(self, 'scatter') and not np.isnan(self.scatter):
+            hdr['ASTSCATT'] = (self.scatter, 'Astrometric scatter median(|res|)/0.67 (pixels)')
 
         # Create primary HDU with no data and write
         primary_hdu = fits.PrimaryHDU(header=hdr)
@@ -266,6 +268,12 @@ class zpnfit(termfit.termfit):
                 except:
                     pass
 
+            if hasattr(self, 'scatter'):
+                try:
+                    set_value('ASTSCATT', self.scatter)  # Actual scatter: median(|res|)/0.67
+                except:
+                    pass
+
             # Write fixed and fitted terms
             for term, value in zip(self.fixterms + self.fitterms,
                                  self.fixvalues + self.fitvalues):
@@ -298,11 +306,11 @@ class zpnfit(termfit.termfit):
                 return
             logging.info(f"Writing new WCS header into {output}")
             write_wcs_keywords(output, is_file=True)
-        elif isinstance(output, collections.OrderedDict):
+        elif isinstance(output, dict):
             write_wcs_keywords(output, is_file=False)
             return output
         else:
-            raise TypeError("Output must be either a file path (str) or OrderedDict")
+            raise TypeError("Output must be either a file path (str) or dict")
 
     def model(self, values, data):
         """astrometric model inverted (fit in image plane)

@@ -30,7 +30,7 @@ def create_residual_plots(data, output_base, ffit, afit):
     try:
         imgwcs = astropy.wcs.WCS(afit.wcs())
         astx, asty = imgwcs.all_world2pix(fd.ra, fd.dec, 1)
-        ast_residuals = np.sqrt((astx - fd.coord_x)**2 + (asty - fd.coord_y)**2)
+        ast_residuals = np.sqrt((astx - fd.image_x)**2 + (asty - fd.image_y)**2)
     except (KeyError,AttributeError):
         ast_residuals = np.zeros_like(fd.x)  # If astrometric data is not available
 
@@ -91,11 +91,12 @@ def create_residual_plots(data, output_base, ffit, afit):
     try:
         dx = fd.image_x - astx
         dy = fd.image_y - asty
-        asigma = afit.sigma
+        all_res = np.concatenate([dx[current_mask], dy[current_mask]])
+        asigma = np.median(np.abs(all_res)) / 0.67 if len(all_res) > 0 else 0.3
     except:
         dx = np.zeros_like(fd.image_x)
         dy = np.zeros_like(fd.image_x)
-        asigma = 0.01
+        asigma = 0.3
 
     aylim = (-asigma*7, asigma*7)
 
@@ -546,7 +547,8 @@ def plot_astrometric_arrows(image_data, data, afit, output_base, scale=1.0, imag
 
     # Color mapping: custom colormap with constant brightness and saturation
     # Rotates through hues at ~50% lightness and high saturation for visibility
-    sigma_res = afit.sigma if hasattr(afit, 'sigma') else np.std(residual_mag[current_mask])
+    active_res = residual_mag[current_mask]
+    sigma_res = np.median(active_res) / 0.67 if len(active_res) > 0 else 0.3
 
     # Normalize residuals for coloring: 0 to 3*sigma
     norm = Normalize(vmin=0, vmax=3 * sigma_res)
