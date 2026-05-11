@@ -690,7 +690,12 @@ class AstrometryScript:
                 else:
                     # Original behavior: overwrite the original file
                     if os.path.exists(new_file):
-                        shutil.move(new_file, fits_file)
+                        try:
+                            shutil.move(new_file, fits_file)
+                        except (OSError, PermissionError) as e:
+                            print(f"Error: Could not update {fits_file}: {e}")
+                            print("Solve succeeded but the original file was not updated.")
+                            return None
 
             # Temporary directory cleanup happens automatically via context manager
 

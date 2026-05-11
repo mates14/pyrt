@@ -566,7 +566,7 @@ def refit_astrometry(det, data, options):
         return None
 
     # Set up camera-specific parameters
-    setup_camera_params(zpntest, camera, options.refit_zpn)
+    setup_camera_params(zpntest, camera, options.refit_zpn, meta=det.meta)
 
     data.use_mask('photometry')
 
@@ -674,70 +674,93 @@ def setup_initial_wcs(zpntest, meta):
 
     return keys_invalid
 
-def setup_camera_params(zpntest, camera, refit_zpn):
-    """Set up camera-specific parameters."""
+def _crpix_for_crop(crpix1, crpix2, meta):
+    """Adjust full-frame CRPIX values to sub-frame pixel coordinates using LTV/LTM."""
+    ltv1  = meta.get('LTV1',  0.0)
+    ltv2  = meta.get('LTV2',  0.0)
+    ltm11 = meta.get('LTM1_1', 1.0)
+    ltm22 = meta.get('LTM2_2', 1.0)
+    if ltm11 == 0:
+        ltm11 = 1.0
+    if ltm22 == 0:
+        ltm22 = 1.0
+    return (crpix1 - ltv1) / ltm11, (crpix2 - ltv2) / ltm22
+
+
+def setup_camera_params(zpntest, camera, refit_zpn, meta=None):
+    """Set up camera-specific parameters.
+
+    meta is the FITS header dict; when present, CRPIX values are corrected
+    for sub-frame crops using the LTV1/LTV2/LTM1_1/LTM2_2 keywords.
+    """
+    if meta is None:
+        meta = {}
+
+    def crpix(cx, cy):
+        return _crpix_for_crop(cx, cy, meta)
+
     if camera == "C0":
         if refit_zpn:
             zpntest.fitterm(["PV2_3"], [300])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], [543,530])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(543, 530)))
         else:
             zpntest.fixterm(["PV2_3"], [300])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], [543, 530])
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(543, 530)))
 
     if camera == "C1":
         if refit_zpn:
             zpntest.fitterm(["PV2_3", "PV2_5"], [7.5, 386.1])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], [2090,2043])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(2090, 2043)))
         else:
             zpntest.fixterm(["PV2_3", "PV2_5"], [7.5, 386.1])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], [2090,2043])
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(2090, 2043)))
 
     if camera == "C2":
         if refit_zpn:
             zpntest.fitterm(["PV2_3", "PV2_5"], [8.255, 343.8])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], [2124.0,2039.0])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(2124.0, 2039.0)))
         else:
             zpntest.fixterm(["PV2_3", "PV2_5"], [8.255, 343.8])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], [2124.0,2039.0])
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(2124.0, 2039.0)))
 
     if camera == "SROT1":
         if refit_zpn:
             logging.info(f"SROT1 setup being loaded (active)")
             zpntest.fitterm(["PV2_3", "PV2_5"], [38.561185, 3461.163423])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], [1882.796706,2055.012734])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(1882.796706, 2055.012734)))
         else:
             logging.info(f"SROT1 setup being loaded (passive)")
             zpntest.fixterm(["PV2_3", "PV2_5"], [38.561185, 3461.163423])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], [1882.796706,2055.012734])
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(1882.796706, 2055.012734)))
 
     if camera in ( "makak2",  "makak"):
         if refit_zpn:
             zpntest.fitterm(["PV2_3", "PV2_5"], [0.131823, 0.282538])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], [813.6,622.8])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(813.6, 622.8)))
         else:
             zpntest.fixterm(["PV2_3", "PV2_5"], [0.131823, 0.282538])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], [813.6,622.8])
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(813.6, 622.8)))
 
     if camera == "NF4":
         zpntest.fitterm(["PV2_3"], [65.913305900171])
-        zpntest.fitterm(["CRPIX1", "CRPIX2"], [522.75,569.96])
+        zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(522.75, 569.96)))
 
     if camera == "ASM1":
         if refit_zpn:
             zpntest.fitterm(["PV2_3", "PV2_5", "PV2_7"], [-0.0388566,0.001255,-0.002769])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], [2054.5,2059.0])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(2054.5, 2059.0)))
         else:
             zpntest.fixterm(["PV2_3", "PV2_5", "PV2_7"], [-0.0388566,0.001255,-0.002769])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], [2054.5,2059.0])
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(2054.5, 2059.0)))
     if camera == "ASM-S":
         if refit_zpn:
             zpntest.fitterm(["PV2_3", "PV2_5"], [-0.0456,0.0442])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], [128.5,128.5])
-#            zpntest.fitterm(["CRPIX1", "CRPIX2"], [339.8,335.5])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(128.5, 128.5)))
+#            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(339.8, 335.5)))
         else:
             zpntest.fixterm(["PV2_3", "PV2_5"], [-0.0456,0.0442])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], [128.5,128.5])
-#            zpntest.fixterm(["CRPIX1", "CRPIX2"], [339.8,335.5])
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(128.5, 128.5)))
+#            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(339.8, 335.5)))
 # PV2_3   =  -0.045557711245 / ± 0.001318165008 (2.893396%)
 # PV2_5   =   0.044189874766 / ± 0.002482740922 (5.618348%)
 # CRPIX1  = 339.882095473812 / ± 0.262750191549 (0.077306%)

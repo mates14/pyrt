@@ -1249,8 +1249,11 @@ def process_single_image(input_data):
         ], stdout=subprocess.PIPE if quiet else None, stderr=subprocess.PIPE)
 
         if result.returncode != 0:
-            out = (result.stdout or b'').decode('utf-8', errors='replace') if quiet else ''
-            err = (result.stderr or b'').decode('utf-8', errors='replace') if quiet else ''
+            out = (result.stdout or b'').decode('utf-8', errors='replace')
+            err = (result.stderr or b'').decode('utf-8', errors='replace')
+            if 'No overlap' in out or 'All pixels are blank' in out:
+                print(f"Warning: skipping {Path(input_file).name} — no overlap with output frame")
+                return None
             raise RuntimeError(
                 f"Failed to project image (rc={result.returncode}):\n"
                 f"stdout: {out}\nstderr: {err}"
@@ -1376,7 +1379,12 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
         processed_files = [r for r in results if r is not None]
 
         if not processed_files:
-            raise RuntimeError("No valid processed images produced")
+            n_skipped = len(process_inputs) - len(processed_files)
+            raise RuntimeError(
+                f"No images overlapped with the output frame — "
+                f"all {n_skipped} input image(s) were skipped. "
+                f"Check that the skeleton header covers the same sky area as your inputs."
+            )
 
         # Separate image and weight map files
         image_files = [p['image'] for p in processed_files]
@@ -1913,7 +1921,11 @@ def main():
     if os.path.exists(args.output):
         raise ValueError(f"Output file {args.output} already exists")
 
-    combine_images_montage(args.output, valid_inputs, weights, skeleton_file, args)
+    try:
+        combine_images_montage(args.output, valid_inputs, weights, skeleton_file, args)
+    except RuntimeError as e:
+        print(f"\nError: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # Final summary
     valid_count = sum(1 for w in weights.values() if w > 0)
