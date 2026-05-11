@@ -51,11 +51,9 @@ def find_closest_object(data, ra, dec, id_limit):
     if len(indices) == 0:
         return None
 
-    # If multiple objects are found, get the closest one
     if len(indices) > 1:
-        # Need to find the closest among the matches
-        distances = tree.query(target_coords)[0][0]
-        closest_idx = indices[np.argmin(distances[indices])]
+        dists = np.sqrt(np.sum((data_coords[indices] - target_coords[0])**2, axis=1))
+        closest_idx = indices[np.argmin(dists)]
     else:
         closest_idx = indices[0]
 
@@ -140,11 +138,18 @@ def format_astrometry_line(ecsv_file, meta, target):
         ra = target['ALPHA_J2000']
         dec = target['DELTA_J2000']
 
-        # Position errors from pixel variances (convert to arcsec)
-        errx2 = target.get('ERRX2_IMAGE', 0.01)
-        erry2 = target.get('ERRY2_IMAGE', 0.01)
-        ra_err = np.sqrt(errx2) * pixel_scale  # arcsec
-        dec_err = np.sqrt(erry2) * pixel_scale  # arcsec
+        # Position errors: sigma_total² = S0/2 + SC*ERRX2 per axis
+        # S0 = ASTSIGMA² is the 2D WCS systematic floor (split equally between axes)
+        # SC = ASTVAR is the centroiding scale factor
+        astsigma = float(meta.get('ASTSIGMA', 0.0))
+        sc       = max(float(meta.get('ASTVAR', 1.0)), 0.0)
+        s0_half  = (astsigma ** 2) / 2.0
+        errx2 = float(target['ERRX2_IMAGE']) if 'ERRX2_IMAGE' in target.colnames else 0.01
+        erry2 = float(target['ERRY2_IMAGE']) if 'ERRY2_IMAGE' in target.colnames else 0.01
+        if not np.isfinite(errx2) or errx2 < 0: errx2 = 0.01
+        if not np.isfinite(erry2) or erry2 < 0: erry2 = 0.01
+        ra_err  = np.sqrt(s0_half + sc * errx2) * pixel_scale  # arcsec
+        dec_err = np.sqrt(s0_half + sc * erry2) * pixel_scale  # arcsec
 
         # FWHM in arcsec
         fwhm_pix = target.get('FWHM_IMAGE', 3.0)
