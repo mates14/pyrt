@@ -596,6 +596,8 @@ def refit_astrometry(det, data, options):
         camera = "C0"
         logging.info(f"CCD_NAME not found, setting {camera}")
 
+    telescope = str(det.meta.get('TELESCOP', ''))
+
     if options.szp:
         zpntest = zpnfit.zpnfit(proj="AZP")
         zpntest.fitterm(["PV2_1"], [1])
@@ -640,7 +642,7 @@ def refit_astrometry(det, data, options):
 
     if options.refit_zpn or options.szp:
         # Full refit: apply hardcoded camera-specific CRPIX and distortion priors
-        setup_camera_params(zpntest, camera, options.refit_zpn)
+        setup_camera_params(zpntest, camera, options.refit_zpn, telescope)
     else:
         # Gentle refit: fix CRPIX at header values (already loaded by setup_initial_wcs)
         for term in ['CRPIX1', 'CRPIX2']:
@@ -661,7 +663,8 @@ def refit_astrometry(det, data, options):
     zpntest.fit(ad.astparams)
 
     # Refine the fit - use stepwise for unknown cameras with refit_zpn
-    is_known_camera = camera in ["C0", "C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]
+    is_known_camera = (camera in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"] or
+                       (camera == "C0" and telescope == "D50"))
     is_zpn = (zpntest.fixvalues[zpntest.fixterms.index("PROJ")] == zpntest.projections.index("ZPN"))
 
     if options.refit_zpn and not is_known_camera and is_zpn:
@@ -764,9 +767,9 @@ def setup_initial_wcs(zpntest, meta):
 
     return keys_invalid
 
-def setup_camera_params(zpntest, camera, refit_zpn):
+def setup_camera_params(zpntest, camera, refit_zpn, telescope=''):
     """Set up camera-specific parameters."""
-    if camera == "C0":
+    if camera == "C0" and telescope == "D50":
         if refit_zpn:
             zpntest.fitterm(["PV2_3"], [300])
             zpntest.fitterm(["CRPIX1", "CRPIX2"], [543,530])
@@ -833,9 +836,9 @@ def setup_camera_params(zpntest, camera, refit_zpn):
 # CRPIX1  = 339.882095473812 / ± 0.262750191549 (0.077306%)
 # CRPIX2  = 335.523756136020 / ± 0.325225858217 (0.096931%)
 
-    # Default TAN approximation for unknown cameras when refit_zpn is requested
-    # NOTE: Don't set up PV2_3/PV2_5 here - stepwise regression will handle it
-    if refit_zpn and camera not in ["C0", "C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
+    # For unknown cameras (including C0 on non-D50 telescopes): stepwise regression selects terms.
+    known = ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]
+    if refit_zpn and not (camera in known or (camera == "C0" and telescope == "D50")):
         # Stepwise regression will determine which terms to include
         logging.info(f"ZPN projection will use stepwise regression to determine distortion terms")
 
