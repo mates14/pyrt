@@ -599,32 +599,60 @@ def refit_astrometry(det, data, options):
     if options.szp:
         zpntest = zpnfit.zpnfit(proj="AZP")
         zpntest.fitterm(["PV2_1"], [1])
-#        zpntest.fitterm(["PV2_2"], [1e-6])
 
-    # Initialize ZPN fit object based on camera type
-    elif camera in ["C0", "C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
-        logging.info(f"ZPN projectin activated")
-        zpntest = zpnfit.zpnfit(proj="ZPN")
-        zpntest.fixterm(["PV2_1"], [1])
-    elif camera in ["CAM-ZEA"]:
-        zpntest = zpnfit.zpnfit(proj="ZEA")
     elif options.refit_zpn:
-        # Refit TAN as ZPN when requested
-        logging.info(f"ZPN projection activated via refit_zpn flag (TAN approximation)")
-        zpntest = zpnfit.zpnfit(proj="ZPN")
-        zpntest.fixterm(["PV2_1"], [1])
-    else:
-        zpntest = zpnfit.zpnfit(proj="TAN")
+        # Full refit from camera calibration priors (-z flag).
+        # Ignores header CTYPE/CRPIX and uses hardcoded camera model.
+        if camera in ["C0", "C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
+            logging.info(f"ZPN projection activated (refit_zpn)")
+            zpntest = zpnfit.zpnfit(proj="ZPN")
+            zpntest.fixterm(["PV2_1"], [1])
+        elif camera in ["CAM-ZEA"]:
+            zpntest = zpnfit.zpnfit(proj="ZEA")
+        else:
+            logging.info(f"ZPN projection activated via refit_zpn flag (unknown camera)")
+            zpntest = zpnfit.zpnfit(proj="ZPN")
+            zpntest.fixterm(["PV2_1"], [1])
 
-    # Set up initial WCS parameters
+    else:
+        # Gentle refit (-a without -z): respect the existing WCS structure.
+        # Read projection from CTYPE1, fix CRPIX and distortion terms at header values.
+        # Only CD matrix and CRVAL are free.  Works correctly for both native ZPN images
+        # and reprojected TAN images regardless of CCD_NAME.
+        ctype1 = str(det.meta.get('CTYPE1', ''))
+        if 'ZPN' in ctype1:
+            logging.info(f"Gentle refit: ZPN projection from header CTYPE1={ctype1!r}")
+            zpntest = zpnfit.zpnfit(proj="ZPN")
+            zpntest.fixterm(["PV2_1"], [1])
+        elif 'ZEA' in ctype1:
+            logging.info(f"Gentle refit: ZEA projection from header CTYPE1={ctype1!r}")
+            zpntest = zpnfit.zpnfit(proj="ZEA")
+        else:
+            logging.info(f"Gentle refit: TAN projection from header CTYPE1={ctype1!r}")
+            zpntest = zpnfit.zpnfit(proj="TAN")
+
+    # Set up initial WCS parameters (CD, CRVAL, CRPIX) from header as fit terms
     keys_invalid = setup_initial_wcs(zpntest, det.meta)
 
     if keys_invalid:
         logging.warning("I do not understand the WCS to be fitted, skipping...")
         return None
 
-    # Set up camera-specific parameters
-    setup_camera_params(zpntest, camera, options.refit_zpn)
+    if options.refit_zpn or options.szp:
+        # Full refit: apply hardcoded camera-specific CRPIX and distortion priors
+        setup_camera_params(zpntest, camera, options.refit_zpn)
+    else:
+        # Gentle refit: fix CRPIX at header values (already loaded by setup_initial_wcs)
+        for term in ['CRPIX1', 'CRPIX2']:
+            if term in det.meta:
+                zpntest.fixterm([term], [float(det.meta[term])])
+        # Fix any existing ZPN distortion terms (PV2_3, PV2_5, …) at their header values
+        for key in sorted(det.meta.keys()):
+            if isinstance(key, str) and key.startswith('PV2_') and key != 'PV2_1':
+                try:
+                    zpntest.fixterm([key], [float(det.meta[key])])
+                except (TypeError, ValueError):
+                    pass
 
     data.use_mask('photometry')
 
