@@ -186,15 +186,18 @@ class termfit:
 
     def fit(self, data):
         """fit data to the defined model"""
-        self.delin=False
+        # Do NOT reset delin here — caller (e.g. refine_fit) may have enabled Cauchy
         # Use fit_residuals for robust fitting (prioritizes bright stars)
         res = fit.least_squares(self.fit_residuals, self.fitvalues,\
             args=[data], ftol=1e-15)
         self.fitvalues = []
         for x in res.x:
             self.fitvalues += [ x ]
-        # Use residuals() method for statistics calculation (proper chi-squared)
+        # Compute statistics with plain residuals regardless of delin state
+        saved_delin = self.delin
+        self.delin = False
         stat_residuals = self.residuals(self.fitvalues, data)
+        self.delin = saved_delin
 
         # Calculate degrees of freedom
         self.ndf = self.calculate_ndf(data, stat_residuals)

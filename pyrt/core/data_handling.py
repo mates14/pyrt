@@ -480,8 +480,8 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None,
         temp_dy = det_data[:, 3][mag_mask]
         temp_dy_no_zero = np.sqrt(np.power(temp_dy,2)+0.0004)
 
-        _dx = det_data[:, 4][mag_mask]
-        _dy = det_data[:, 5][mag_mask]
+        _dx = det_data[:, 4][mag_mask]  # ERRX2_IMAGE — centroid variance in x (pix²)
+        _dy = det_data[:, 5][mag_mask]  # ERRY2_IMAGE — centroid variance in y (pix²)
         _image_dxy = np.sqrt(np.power(_dx,2) + np.power(_dy,2) + 0.000025)
 
         data.extend(
@@ -495,6 +495,7 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None,
             image_x=det_data[:, 0][mag_mask],
             image_y=det_data[:, 1][mag_mask],
             image_dxy=_image_dxy,
+            image_var=_dx + _dy,          # ERRX2 + ERRY2: total centroid variance (pix²)
             ra=cat_data['radeg'][mag_mask],
             dec=cat_data['decdeg'][mag_mask],
             cat_x=cat_x[mag_mask],  # transformed catalog X positions

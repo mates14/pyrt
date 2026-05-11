@@ -548,27 +548,25 @@ for arg in options.files:
 
     # OBJECT-SPECIFIC IDENTIFICATION RADII based on centroiding errors and astrometric quality
     def compute_object_specific_idlimit(det_meta, errx2, erry2, n_sigma=3.0):
-        """Compute identification limit for specific object based on its centroiding error"""
+        """Compute identification limit for specific object based on its centroiding error.
 
-        # Use ASTVAR-based approach (legacy method)
-        astvar = det_meta.get('ASTVAR', None)
+        Uses the S0+SC error model: sigma_total² = ASTSIGMA² + (errx2+erry2)·ASTVAR
+        where ASTSIGMA=sqrt(S0) is the systematic WCS floor and ASTVAR=SC is the
+        centroiding scale factor, consistent with what dophot writes after fitting.
+        """
+        astsigma = det_meta.get('ASTSIGMA', None)
+        astvar   = det_meta.get('ASTVAR',   None)
 
-        if astvar is not None and astvar > 0:
-            # Object-specific approach using centroiding errors
-            # Handle invalid error values (NaN, negative, or zero)
+        if astsigma is not None and astvar is not None:
+            s0 = astsigma ** 2
+            sc = max(float(astvar), 0.0)
             if np.isnan(errx2) or np.isnan(erry2) or errx2 < 0 or erry2 < 0:
-                sigma_centroiding = 0.001  # fallback for invalid errors
+                centering2 = 0.0
             else:
-                sigma_centroiding = np.sqrt(errx2 + erry2)
-                # Handle zero centroiding errors (perfect centroiding) with minimum threshold
-                if sigma_centroiding <= 0:
-                    sigma_centroiding = 0.001  # minimum 0.001 pixel centroiding uncertainty
-            
-            sigma_total = sigma_centroiding * np.sqrt(astvar)
-            id_radius = n_sigma * sigma_total
-            return id_radius
+                centering2 = max(errx2 + erry2, 0.0)
+            sigma_total = np.sqrt(s0 + sc * centering2)
+            return n_sigma * sigma_total
         else:
-            # Ultimate fallback to FWHM if no astrometric variance
             return det_meta.get('FWHM', 1.2)
 
     # Check if using user-specified idlimit or object-specific approach

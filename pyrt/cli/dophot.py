@@ -96,7 +96,7 @@ def write_stars_file(data, ffit, imgwcs, filename="stars"):
     # Calculate astrometric residuals (if available)
     try:
         astx, asty = imgwcs.all_world2pix(fd_plot.ra, fd_plot.dec, 1)
-        ast_residuals = np.sqrt((astx - fd_plot.coord_x)**2 + (asty - fd_plot.coord_y)**2)
+        ast_residuals = np.sqrt((astx - fd_plot.image_x)**2 + (asty - fd_plot.image_y)**2)
     except (KeyError, ValueError, RuntimeError, AttributeError, Exception):
         # If astrometric data is not available or WCS transformations fail
         ast_residuals = np.zeros_like(fd_plot.x)
