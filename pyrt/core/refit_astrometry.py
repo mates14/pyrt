@@ -5,6 +5,7 @@ import numpy as np
 import astropy.wcs
 #import astropy.io.fits
 from pyrt.core import zpnfit
+from pyrt.core.stepwise_regression import ftest_accept
 import logging
 import matplotlib
 matplotlib.use('Agg')
@@ -137,6 +138,57 @@ def refine_fit(zpntest, data):
     zpntest.delin = True
     zpntest.fit(ad_ok.astparams)
 
+def test_crpix_block(zpntest_test, data, proj_name, crpix1_default, crpix2_default):
+    """
+    F-test (delta_k=2) for whether freeing CRPIX1+CRPIX2 as a block improves the fit.
+    If not significant, fixes CRPIX at crpix1_default/crpix2_default (the prior value,
+    typically from the image header before any projection testing).
+    Returns zpntest_test (possibly with CRPIX now fixed).
+    """
+    if 'CRPIX1' not in zpntest_test.fitterms or 'CRPIX2' not in zpntest_test.fitterms:
+        return zpntest_test  # already fixed, nothing to test
+
+    wssr_free = zpntest_test.wssrndf * zpntest_test.ndf
+    ndf_free = zpntest_test.ndf
+
+    zpntest_fixed = deepcopy(zpntest_test)
+    zpntest_fixed.fixterm(['CRPIX1', 'CRPIX2'], [crpix1_default, crpix2_default])
+
+    # Blind fit before sigma-clipping: CRPIX shift invalidates current CD/CRVAL,
+    # so the tight sigma from the free-CRPIX trial would clip all stars away.
+    # Re-establish a global fit on all photometry-matched stars first.
+    data.use_mask('photometry')
+    ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+    zpntest_fixed.delin = False
+    zpntest_fixed.fit(ad.astparams)
+
+    refine_fit(zpntest_fixed, data)
+    refine_fit(zpntest_fixed, data)
+
+    wssr_fixed = zpntest_fixed.wssrndf * zpntest_fixed.ndf
+    ndf_fixed = zpntest_fixed.ndf
+
+    if not np.isfinite(wssr_fixed) or ndf_fixed <= 0:
+        # Fixed-CRPIX fit degenerate; keep CRPIX free
+        msg = f"{proj_name}: Fixed-CRPIX fit degenerate (NDF={ndf_fixed}), keeping CRPIX free"
+        logging.warning(msg)
+        print(msg)
+        return zpntest_test
+
+    if ftest_accept(wssr_fixed, wssr_free, ndf_free, delta_k=2):
+        crpix1 = zpntest_test.termval('CRPIX1')
+        crpix2 = zpntest_test.termval('CRPIX2')
+        msg = f"{proj_name}: CRPIX free ({crpix1:.1f}, {crpix2:.1f}) is significant (F-test δk=2)"
+        logging.info(msg)
+        print(msg)
+        return zpntest_test
+    else:
+        msg = (f"{proj_name}: CRPIX not significant (F-test δk=2), "
+               f"fixed at prior ({crpix1_default:.1f}, {crpix2_default:.1f})")
+        logging.info(msg)
+        print(msg)
+        return zpntest_fixed
+
 def select_best_projection(zpntest, data):
     """
     Test TAN, ZEA, AZP, and ZPN projections to find the best fit.
@@ -162,6 +214,11 @@ def select_best_projection(zpntest, data):
     best_wssrndf = float('inf')
     best_zpntest = None
     best_terms = []
+
+    # Save CRPIX prior before any projection fitting; used as the fixed value when
+    # the F-test says CRPIX does not improve the fit (avoids fixing at a noisy fitted position)
+    crpix1_prior = zpntest.termval('CRPIX1')
+    crpix2_prior = zpntest.termval('CRPIX2')
 
     # Test each projection type
     for proj_name in ["TAN", "ZEA", "AZP", "ZPN"]:
@@ -210,6 +267,7 @@ def select_best_projection(zpntest, data):
                 try:
                     refine_fit(zpntest_test, data)
                     refine_fit(zpntest_test, data)
+                    zpntest_test = test_crpix_block(zpntest_test, data, proj_name, crpix1_prior, crpix2_prior)
                     final_wssrndf = zpntest_test.wssrndf
 
                 except Exception as e:
@@ -248,9 +306,14 @@ def select_best_projection(zpntest, data):
                     best_zpntest = zpntest_test
                     best_terms = selected_terms
             elif proj_name == "ZPN":
-                # For ZPN, use stepwise regression to select polynomial terms
+                # For ZPN, use stepwise regression to select polynomial terms.
+                # Two refine_fit passes before stepwise normalize the baseline sigma
+                # to the same level as candidate models (which also do two passes each),
+                # so the forward F-test comparison is apples-to-apples.
+                refine_fit(zpntest_test, data)
                 refine_fit(zpntest_test, data)
                 selected_terms = perform_stepwise_astrometry(zpntest_test, data)
+                zpntest_test = test_crpix_block(zpntest_test, data, proj_name, crpix1_prior, crpix2_prior)
                 final_wssrndf = zpntest_test.wssrndf
 
                 # If no polynomial terms were selected, this is actually ARC projection
@@ -292,6 +355,7 @@ def select_best_projection(zpntest, data):
                 # For TAN and ZEA, just refine the fit (no free parameters)
                 refine_fit(zpntest_test, data)
                 refine_fit(zpntest_test, data)
+                zpntest_test = test_crpix_block(zpntest_test, data, proj_name, crpix1_prior, crpix2_prior)
                 final_wssrndf = zpntest_test.wssrndf
 
                 msg = f"{proj_name}: WSSR/NDF = {final_wssrndf:.6f}"
@@ -308,7 +372,10 @@ def select_best_projection(zpntest, data):
                     logging.warning(f"{proj_name}: WCS validation failed - {e}")
                     print(f"{proj_name}: WCS validation failed, rejecting")
 
-                if wcs_valid and final_wssrndf < best_wssrndf:
+                if not np.isfinite(final_wssrndf) or final_wssrndf <= 0:
+                    logging.warning(f"{proj_name}: Invalid WSSR/NDF = {final_wssrndf:.6f}, rejecting")
+                    print(f"{proj_name}: Invalid WSSR/NDF = {final_wssrndf:.6f}, rejecting")
+                elif wcs_valid and final_wssrndf < best_wssrndf:
                     best_wssrndf = final_wssrndf
                     best_projection = proj_name
                     best_zpntest = zpntest_test
@@ -335,10 +402,10 @@ def select_best_projection(zpntest, data):
 
     return best_zpntest
 
-def perform_stepwise_astrometry(zpntest, data, 
+def perform_stepwise_astrometry(zpntest, data,
                                  # pv_terms=['PV2_3', 'PV2_5', 'PV2_7'],
-                                 pv_terms=['PV2_2', 'PV2_3', 'PV2_4', 'PV2_5', 'PV2_6', 'PV2_7'],  # Use if even terms needed
-                                 initial_values=None, improvement_threshold=0.001, max_iterations=20):
+                                 pv_terms=['PV2_2', 'PV2_3', 'PV2_4', 'PV2_5', 'PV2_6', 'PV2_7'],
+                                 initial_values=None, max_iterations=20):
     """
     Perform bidirectional stepwise regression for ZPN polynomial terms.
     Uses forward selection and backward elimination to find optimal term set.
@@ -380,6 +447,8 @@ def perform_stepwise_astrometry(zpntest, data,
     selected_terms = []
     remaining_terms = list(pv_terms)
     baseline_wssrndf = zpntest.wssrndf
+    baseline_wssr = zpntest.wssrndf * zpntest.ndf
+    baseline_ndf = zpntest.ndf
 
     logging.info(f"Starting bidirectional stepwise astrometry with baseline WSSR/NDF = {baseline_wssrndf:.6f}")
     print(f"Starting bidirectional stepwise astrometry with baseline WSSR/NDF = {baseline_wssrndf:.6f}")
@@ -389,8 +458,10 @@ def perform_stepwise_astrometry(zpntest, data,
 
         # FORWARD STEP: Try adding best remaining term
         best_new_term = None
-        best_improvement = 0
+        best_F = 0.0
         best_new_wssrndf = baseline_wssrndf
+        best_new_wssr = baseline_wssr
+        best_new_ndf = baseline_ndf
 
         for term in remaining_terms:
             # Try adding this term - start from clean state + selected terms
@@ -406,18 +477,21 @@ def perform_stepwise_astrometry(zpntest, data,
             except Exception as e:
                 continue
 
-            new_wssrndf = zpntest_test.wssrndf
-            improvement = 1 - new_wssrndf/baseline_wssrndf
+            new_wssr = zpntest_test.wssrndf * zpntest_test.ndf
+            new_ndf = zpntest_test.ndf
+            if ftest_accept(baseline_wssr, new_wssr, new_ndf):
+                F_stat = (baseline_wssr - new_wssr) / (new_wssr / new_ndf)
+                if F_stat > best_F:
+                    best_F = F_stat
+                    best_new_term = term
+                    best_new_wssrndf = zpntest_test.wssrndf
+                    best_new_wssr = new_wssr
+                    best_new_ndf = new_ndf
 
-            if improvement > best_improvement:
-                best_improvement = improvement
-                best_new_term = term
-                best_new_wssrndf = new_wssrndf
-
-        # Add best term if improvement exceeds threshold
-        if best_new_term and best_improvement > improvement_threshold:
+        # Add best term if F-test passed
+        if best_new_term:
             msg = (f"[Iter {iteration+1}] Adding {best_new_term}: WSSR/NDF {baseline_wssrndf:.6f} → "
-                   f"{best_new_wssrndf:.6f} (improvement: {best_improvement:.1%})")
+                   f"{best_new_wssrndf:.6f} (F={best_F:.1f}, NDF={best_new_ndf})")
             logging.info(msg)
             print(msg)
 
@@ -438,16 +512,21 @@ def perform_stepwise_astrometry(zpntest, data,
             zpntest.fitvalues = zpntest_new.fitvalues.copy()
             zpntest.fiterrors = zpntest_new.fiterrors.copy()
             zpntest.wssrndf = zpntest_new.wssrndf
+            zpntest.ndf = zpntest_new.ndf
             zpntest.sigma = zpntest_new.sigma
 
             baseline_wssrndf = zpntest.wssrndf
+            baseline_wssr = zpntest.wssrndf * zpntest.ndf
+            baseline_ndf = zpntest.ndf
             made_change = True
 
         # BACKWARD STEP: Try removing worst selected term
         if len(selected_terms) > 0:
             worst_term = None
-            smallest_degradation = float('inf')
+            smallest_F = float('inf')
             worst_new_wssrndf = baseline_wssrndf
+            worst_new_wssr = baseline_wssr
+            worst_new_ndf = baseline_ndf
 
             for term in selected_terms:
                 # Try removing this term - start from clean state
@@ -464,19 +543,23 @@ def perform_stepwise_astrometry(zpntest, data,
                 except Exception as e:
                     continue
 
-                new_wssrndf = zpntest_test.wssrndf
-                degradation = 1 - baseline_wssrndf/new_wssrndf
-
-                if degradation < smallest_degradation:
-                    smallest_degradation = degradation
-                    worst_new_wssrndf = new_wssrndf
-                    if degradation < improvement_threshold:
+                new_wssr = zpntest_test.wssrndf * zpntest_test.ndf
+                new_ndf = zpntest_test.ndf
+                F_stat = (new_wssr - baseline_wssr) / (baseline_wssr / baseline_ndf) \
+                    if (new_wssr > baseline_wssr and baseline_ndf > 0) else 0.0
+                if F_stat < smallest_F:
+                    smallest_F = F_stat
+                    worst_new_wssrndf = zpntest_test.wssrndf
+                    worst_new_wssr = new_wssr
+                    worst_new_ndf = new_ndf
+                    # Only remove if wssr actually increased (guard against sigma-clipping artifacts)
+                    if new_wssr > baseline_wssr and not ftest_accept(new_wssr, baseline_wssr, baseline_ndf):
                         worst_term = term
 
-            # Remove term if its removal causes minimal degradation
+            # Remove term if F-test says it is not significant
             if worst_term:
                 msg = (f"[Iter {iteration+1}] Removing {worst_term}: WSSR/NDF {baseline_wssrndf:.6f} → "
-                       f"{worst_new_wssrndf:.6f} (degradation: {smallest_degradation:.1%})")
+                       f"{worst_new_wssrndf:.6f} (F={smallest_F:.2f}, not significant at α=0.05)")
                 logging.info(msg)
                 print(msg)
 
@@ -497,9 +580,12 @@ def perform_stepwise_astrometry(zpntest, data,
                 zpntest.fitvalues = zpntest_new.fitvalues.copy()
                 zpntest.fiterrors = zpntest_new.fiterrors.copy()
                 zpntest.wssrndf = zpntest_new.wssrndf
+                zpntest.ndf = zpntest_new.ndf
                 zpntest.sigma = zpntest_new.sigma
 
                 baseline_wssrndf = zpntest.wssrndf
+                baseline_wssr = zpntest.wssrndf * zpntest.ndf
+                baseline_ndf = zpntest.ndf
                 made_change = True
 
         # Stop if no changes in this iteration
