@@ -54,60 +54,90 @@ class zpnfit(termfit.termfit):
     def __str__(self):
         """Print a WCS header contained in this class"""
         output = ""
-        for term,value in zip(self.fixterms,self.fixvalues):
-            if term == "PROJ":
-                output += "%-8s= %16s / fixed\n"%(term,self.projections[np.int64(value)])
+        for term, value in zip(self.fixterms, self.fixvalues):
+            display = self._display_term(term)
+            if display == "PROJ":
+                output += "%-10s= %16s / fixed\n" % (display, self.projections[np.int64(value)])
             else:
-                output += "%-8s= %16f / fixed\n"%(term,value)
+                output += "%-10s= %16f / fixed\n" % (display, value)
 
-        i=0
+        i = 0
         for term, value in zip(self.fitterms, self.fitvalues):
             try: error = self.fiterrors[i]
             except IndexError: error = np.nan
+            display = self._display_term(term)
             arcsec = ""
-            if term in self.print_in_arcsec:
+            base = term.rsplit(':', 1)[0] if ':' in term and term.rsplit(':', 1)[1].isdigit() else term
+            if base in self.print_in_arcsec:
                 arcsec = f", {value*3600:.3f}\""
-            output += "%-8s= %16.12f / ± %14.12f (%.6f%%%s)\n"%\
-                (term, value, error, np.abs(100*error/np.sqrt(value*value+1e-10)), arcsec)
+            output += "%-10s= %16.12f / ± %14.12f (%.6f%%%s)\n" % \
+                (display, value, error, np.abs(100*error/np.sqrt(value*value+1e-10)), arcsec)
             i += 1
         output += f"SIGMA   = {self.sigma:.3f}\n"
         output += f"WSSR/NDF= {self.wssrndf:.3f}"
 
         return output
 
-    def wcs(self):
-        """return a WCS header with a solution contained in self"""
+    @staticmethod
+    def _display_term(term):
+        """Strip :0 suffix from term names for cleaner single-frame display."""
+        if ':' in term:
+            base, suffix = term.rsplit(':', 1)
+            if suffix.isdigit() and int(suffix) == 0:
+                return base
+        return term
+
+    def wcs(self, img_idx=0):
+        """Return a FITS WCS header dict for the specified image index.
+
+        Per-image terms (CRVAL1:n, CD1_1:n, etc.) are included only when n == img_idx
+        and are written under their bare FITS keyword names (CRVAL1, CD1_1, …).
+        Global terms (CRPIX1, CRPIX2, PV2_*, PROJ) are included for every image.
+        """
         hdr = collections.OrderedDict()
 
         hdr['WCSAXES'] = 2  # must precede any other WCS keywords
         hdr['EQUINOX'] = 2000.0
 
-        for term,value in zip(self.fixterms,self.fixvalues):
-            if term == "PROJ":
-                hdr['CTYPE1'] = "RA---"+self.projections[np.int64(value)]
-                hdr['CTYPE2'] = "DEC--"+self.projections[np.int64(value)]
+        for term, value in zip(self.fixterms + self.fitterms,
+                               self.fixvalues + self.fitvalues):
+            fits_term = self._fits_term(term, img_idx)
+            if fits_term is None:
+                continue  # belongs to a different image
+            if fits_term == "PROJ":
+                hdr['CTYPE1'] = "RA---" + self.projections[np.int64(value)]
+                hdr['CTYPE2'] = "DEC--" + self.projections[np.int64(value)]
                 hdr['CUNIT1'] = "deg"
                 hdr['CUNIT2'] = "deg"
-            else:
-                hdr[term] = value
-
-        for term, value in zip(self.fitterms, self.fitvalues):
-            if not term.startswith(('A_', 'B_')):  # Defer SIP coefficients
-                hdr[term] = value
+            elif not fits_term.startswith(('A_', 'B_')):
+                hdr[fits_term] = value
 
         if self.sip_order > 0:
             hdr['CTYPE1'] = hdr['CTYPE1'] + '-SIP'
             hdr['CTYPE2'] = hdr['CTYPE2'] + '-SIP'
             hdr['A_ORDER'] = self.sip_order
             hdr['B_ORDER'] = self.sip_order
-
             for i in range(self.sip_order + 1):
                 for j in range(self.sip_order + 1 - i):
-                    if i + j > 0:  # Skip 0,0
-                        hdr[f'A_{i}_{j}'] = self.sip_a[i,j]
-                        hdr[f'B_{i}_{j}'] = self.sip_b[i,j]
+                    if i + j > 0:
+                        hdr[f'A_{i}_{j}'] = self.sip_a[i, j]
+                        hdr[f'B_{i}_{j}'] = self.sip_b[i, j]
 
         return hdr
+
+    @staticmethod
+    def _fits_term(term, img_idx):
+        """Map an internal term name to its FITS keyword for the given image index.
+
+        Returns the bare FITS keyword (stripping :n suffix) when the term belongs
+        to img_idx, None when it belongs to a different image, or the term itself
+        for global (non-per-image) terms.
+        """
+        if ':' in term:
+            base, suffix = term.rsplit(':', 1)
+            if suffix.isdigit():
+                return base if int(suffix) == img_idx else None
+        return term
 
     def add_sip_terms(self, order):
         """Add SIP terms with better initialization and scaling"""
@@ -144,13 +174,15 @@ class zpnfit(termfit.termfit):
                     if i + j > 0)
         return x + dx, y + dy
 
-    def write_wcs(self, filename):
+    def write_wcs(self, filename, img_idx=0):
         """Write a minimal WCS-only FITS file (like astrometry.net .wcs output).
 
         Parameters
         ----------
         filename : str
             Output filename (typically with .wcs extension)
+        img_idx : int
+            Which image's per-image terms (CRVAL, CD matrix) to write (default 0)
         """
         # Create a minimal primary HDU with no data
         hdr = fits.Header()
@@ -162,7 +194,7 @@ class zpnfit(termfit.termfit):
         hdr['EXTEND'] = (True, 'There may be FITS extensions')
 
         # Get WCS parameters from our model
-        wcs_dict = self.wcs()
+        wcs_dict = self.wcs(img_idx)
         for key, value in wcs_dict.items():
             hdr[key] = value
 
@@ -183,7 +215,7 @@ class zpnfit(termfit.termfit):
         hdul.writeto(filename, overwrite=True)
         logging.info(f"WCS solution written to {filename}")
 
-    def write(self, output, clean_header=True):
+    def write(self, output, clean_header=True, img_idx=0):
         """Write the fitted WCS solution to a FITS file or dictionary.
 
         Parameters
@@ -192,6 +224,8 @@ class zpnfit(termfit.termfit):
             Either a path to a FITS file or an OrderedDict to store the WCS solution
         clean_header : bool, optional
             Whether to clean existing WCS-related keywords before writing new ones
+        img_idx : int
+            Which image's per-image terms (CRVAL, CD matrix) to write (default 0)
 
         Returns
         -------
@@ -276,8 +310,11 @@ class zpnfit(termfit.termfit):
 
             # Write fixed and fitted terms
             for term, value in zip(self.fixterms + self.fitterms,
-                                 self.fixvalues + self.fitvalues):
-                if term == "PROJ":
+                                   self.fixvalues + self.fitvalues):
+                fits_term = self._fits_term(term, img_idx)
+                if fits_term is None:
+                    continue  # belongs to a different image
+                if fits_term == "PROJ":
                     proj = self.projections[int(value)]
                     suffix = "-SIP" if self.sip_order > 0 else ""
                     set_value('CTYPE1', f"RA---{proj}{suffix}")
@@ -285,8 +322,8 @@ class zpnfit(termfit.termfit):
                     set_value('CUNIT1', "deg")
                     set_value('CUNIT2', "deg")
                 else:
-                    if not term.startswith(('A_', 'B_')):  # Defer SIP coefficients
-                        set_value(term, value)
+                    if not fits_term.startswith(('A_', 'B_')):  # Defer SIP coefficients
+                        set_value(fits_term, value)
 
             # Write SIP coefficients if present
             if self.sip_order > 0:
@@ -315,60 +352,86 @@ class zpnfit(termfit.termfit):
     def model(self, values, data):
         """astrometric model inverted (fit in image plane)
 
-        fittable terms:
-        CRPIX1,CRPIX2: center of projection
-        CRVAL1,CRVAL2: sky coordinates at CRPIX1,CRPIX2
-        CDi_j: rotation matrix in image plane
-        PV2_j: for ZPN polynomial indices of the radial fit
-               for AZP PV2_1 is mu value (see Calabretta)
-        experimental:
-        A,F: Amplitude and phase of projection tilt
+        Global terms (shared across all images):
+            CRPIX1, CRPIX2: centre of projection (optical axis)
+            PV2_j: ZPN radial polynomial coefficients
+            PROJ: projection type
+
+        Per-image terms (CRVAL, CD matrix): stored with :n suffix for image n.
+            CRVAL1:n, CRVAL2:n: sky coordinates at CRPIX for image n
+            CD1_1:n, CD1_2:n, CD2_1:n, CD2_2:n: rotation/scale matrix for image n
+
+        Bare names (CRVAL1, CD1_1, …) are also accepted for backward compatibility
+        and treated as global (same value applied to all images).
+
+        data: 5-tuple (image_x, image_y, ra, dec, image_dxy)          — single-frame
+              6-tuple (image_x, image_y, ra, dec, image_dxy, img_idx) — multi-frame
         """
-        x, y, ra, dec, _ = data # _ is err
-        PV2 = np.zeros(11)  # Initialize PV2 array
+        x, y, ra, dec = data[0], data[1], data[2], data[3]
+        # img_idx: integer array mapping each star to its image (0-based)
+        if len(data) == 6:
+            img_idx = np.asarray(data[5], dtype=int)
+        else:
+            img_idx = np.zeros(len(x), dtype=int)
+        n_images = int(img_idx.max()) + 1 if len(img_idx) > 0 else 1
+
+        PV2 = np.zeros(11)
+        proj = self.PROJ_TAN
+        CRPIX1 = 0.0
+        CRPIX2 = 0.0
+
+        # Per-image arrays (one slot per image)
+        CRVAL1_arr = np.zeros(n_images)
+        CRVAL2_arr = np.zeros(n_images)
+        CD1_1_arr = np.ones(n_images)
+        CD1_2_arr = np.zeros(n_images)
+        CD2_1_arr = np.zeros(n_images)
+        CD2_2_arr = np.ones(n_images)
 
         terms = self.fitterms + self.fixterms
-        values = np.concatenate((values, np.array(self.fixvalues)))
+        all_values = np.concatenate((values, np.array(self.fixvalues)))
 
-        for term,value in zip(terms, values):
-
-            # TAN, ZPN, ZEA and AZP supported
-            if term == 'PROJ': proj = value
-
-            # std terms of WCS model:
-            if term == 'CD1_1': CD1_1 = value
-            if term == 'CD1_2': CD1_2 = value
-            if term == 'CD2_1': CD2_1 = value
-            if term == 'CD2_2': CD2_2 = value
+        for term, value in zip(terms, all_values):
+            if term == 'PROJ':   proj   = value
             if term == 'CRPIX1': CRPIX1 = value
             if term == 'CRPIX2': CRPIX2 = value
-            # TODO: if this is to wrk with more images simultaneously,
-            # these CRVALn terms need to be in an array
-            if term == 'CRVAL1': CRVAL1 = value
-            if term == 'CRVAL2': CRVAL2 = value
-
-            # some extra
-            if term == 'PV2_0': PV2[0] = value
-            if term == 'PV2_1': PV2[1] = value
-            if term == 'PV2_2': PV2[2] = value
-            if term == 'PV2_3': PV2[3] = value
-            if term == 'PV2_4': PV2[4] = value
-            if term == 'PV2_5': PV2[5] = value
-            if term == 'PV2_6': PV2[6] = value
-            if term == 'PV2_7': PV2[7] = value
-            if term == 'PV2_8': PV2[8] = value
-            if term == 'PV2_9': PV2[9] = value
+            if term == 'PV2_0':  PV2[0] = value
+            if term == 'PV2_1':  PV2[1] = value
+            if term == 'PV2_2':  PV2[2] = value
+            if term == 'PV2_3':  PV2[3] = value
+            if term == 'PV2_4':  PV2[4] = value
+            if term == 'PV2_5':  PV2[5] = value
+            if term == 'PV2_6':  PV2[6] = value
+            if term == 'PV2_7':  PV2[7] = value
+            if term == 'PV2_8':  PV2[8] = value
+            if term == 'PV2_9':  PV2[9] = value
             if term == 'PV2_10': PV2[10] = value
 
             if self.sip_order > 0:
                 for i in range(self.sip_order + 1):
                     for j in range(self.sip_order + 1 - i):
-                        if i + j > 0:  # Skip A_0_0 and B_0_0
-                            if term == f'A_{i}_{j}': self.sip_a[i,j] = value
-                            if term == f'B_{i}_{j}': self.sip_b[i,j] = value
+                        if i + j > 0:
+                            if term == f'A_{i}_{j}': self.sip_a[i, j] = value
+                            if term == f'B_{i}_{j}': self.sip_b[i, j] = value
 
-        #    if term == 'A': A = value
-        #    if term == 'F': F = value
+            # Per-image terms: bare name → all images; name:n → specific image n
+            for base, arr in (('CRVAL1', CRVAL1_arr), ('CRVAL2', CRVAL2_arr),
+                               ('CD1_1', CD1_1_arr), ('CD1_2', CD1_2_arr),
+                               ('CD2_1', CD2_1_arr), ('CD2_2', CD2_2_arr)):
+                if term == base:
+                    arr[:] = value
+                elif term.startswith(base + ':') and term[len(base)+1:].isdigit():
+                    n = int(term[len(base)+1:])
+                    if n < n_images:
+                        arr[n] = value
+
+        # Dispatch per-star values via fancy indexing on img_idx
+        CRVAL1 = CRVAL1_arr[img_idx]
+        CRVAL2 = CRVAL2_arr[img_idx]
+        CD1_1  = CD1_1_arr[img_idx]
+        CD1_2  = CD1_2_arr[img_idx]
+        CD2_1  = CD2_1_arr[img_idx]
+        CD2_2  = CD2_2_arr[img_idx]
 
         # Handle spherical coordinate singularities
         ra = np.where(ra > 180, ra - 360, ra)
@@ -525,15 +588,15 @@ class zpnfit(termfit.termfit):
 
     def residuals0(self, values, data):
         """pure residuals to compute sigma and similar things"""
-        x, y, _, _, _ = data
-        xmod,ymod = self.model(values, data)
-        return self.pixdist(x,xmod,y,ymod)
+        x, y = data[0], data[1]
+        xmod, ymod = self.model(values, data)
+        return self.pixdist(x, xmod, y, ymod)
 
     def residuals(self, values, data):
         """residuals for fitting with error weighting and delinearization"""
-        x, y, _, _, err = data
-        xmod,ymod = self.model(values, data)
-        dist = self.pixdist(x,xmod,y,ymod)/err
+        x, y, err = data[0], data[1], data[4]
+        xmod, ymod = self.model(values, data)
+        dist = self.pixdist(x, xmod, y, ymod) / err
         if self.delin:
             return self.cauchy_delin(dist)
         return dist

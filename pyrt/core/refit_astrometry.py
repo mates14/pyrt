@@ -103,13 +103,37 @@ def plot_astrometric_residuals(zpntest, data, filename="astrometric_residuals.pn
     except Exception as e:
         logging.warning(f"Failed to create astrometric residual plot: {e}")
 
+def _is_multi_image(zpntest):
+    """True if the model has per-image terms for more than one image (any :n with n > 0)."""
+    return any(
+        ':' in t and t.rsplit(':', 1)[1].isdigit() and int(t.rsplit(':', 1)[1]) > 0
+        for t in zpntest.fitterms + zpntest.fixterms
+    )
+
+def _get_fitdata_ast(data, zpntest, extra_columns=()):
+    """Return (ad, params) for astrometric fitting.
+
+    For multi-image models (any :n term with n>0), includes the 'img' column so
+    model() can dispatch per-image CRVAL/CD via fancy indexing.  Single-image
+    (bare names or :0 only) uses the 5-tuple backward-compat path.
+    """
+    base = ('image_x', 'image_y', 'ra', 'dec', 'image_dxy') + tuple(extra_columns)
+    if _is_multi_image(zpntest):
+        ad = data.get_fitdata(*(base + ('img',)))
+        params = ad.astparams_multi
+    else:
+        ad = data.get_fitdata(*base)
+        params = ad.astparams
+    return ad, params
+
 def refine_fit(zpntest, data):
     """
     Refine the astrometric fit while maintaining both photometric and astrometric masks.
+    Works for both single-image (:0 terms, 5-tuple) and multi-image (:n terms, 6-tuple).
     """
     # Remove all masks to compute residuals for all points
     data.use_mask('default')
-    ad_all = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+    ad_all, params_all = _get_fitdata_ast(data, zpntest)
     # Per-star sigma-clipping: sigma_total = sqrt(sigma_floor² + image_dxy² * variance)
     # sigma_floor (zpntest.sigma) is the systematic WCS floor from the previous fit;
     # image_dxy * sqrt(variance) is the per-object centroiding contribution (same model
@@ -118,7 +142,7 @@ def refine_fit(zpntest, data):
     # For a good fit the centroiding term can tighten the threshold for faint stars.
     # Using only dist/err (normalised) collapses to ~0.5 px for bright stars regardless
     # of WCS quality, which discards most of the field and leaves a degenerate corner subset.
-    raw_residuals = zpntest.residuals0(zpntest.fitvalues, ad_all.astparams)
+    raw_residuals = zpntest.residuals0(zpntest.fitvalues, params_all)
     sigma_floor = zpntest.sigma if np.isfinite(zpntest.sigma) else 0.0
     variance = zpntest.variance if (np.isfinite(zpntest.variance) and zpntest.variance > 1.0) else 1.0
     per_star_sigma = np.sqrt(sigma_floor**2 + ad_all.image_dxy**2 * variance)
@@ -134,9 +158,9 @@ def refine_fit(zpntest, data):
     data.use_mask('combined')
 
     # Refine the fit with the combined mask
-    ad_ok = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+    ad_ok, params_ok = _get_fitdata_ast(data, zpntest)
     zpntest.delin = True
-    zpntest.fit(ad_ok.astparams)
+    zpntest.fit(params_ok)
 
 def test_crpix_block(zpntest_test, data, proj_name, crpix1_default, crpix2_default):
     """
@@ -158,9 +182,9 @@ def test_crpix_block(zpntest_test, data, proj_name, crpix1_default, crpix2_defau
     # so the tight sigma from the free-CRPIX trial would clip all stars away.
     # Re-establish a global fit on all photometry-matched stars first.
     data.use_mask('photometry')
-    ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
+    _, params = _get_fitdata_ast(data, zpntest_fixed)
     zpntest_fixed.delin = False
-    zpntest_fixed.fit(ad.astparams)
+    zpntest_fixed.fit(params)
 
     refine_fit(zpntest_fixed, data)
     refine_fit(zpntest_fixed, data)
@@ -612,8 +636,8 @@ def compute_error_model(zpntest, data):
     Slope estimated via Theil-Sen (median of pairwise slopes) for outlier robustness.
     """
     data.use_mask('default')
-    ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy', 'image_var')
-    residuals_px = zpntest.residuals0(zpntest.fitvalues, ad.astparams)
+    ad, params = _get_fitdata_ast(data, zpntest, extra_columns=('image_var',))
+    residuals_px = zpntest.residuals0(zpntest.fitvalues, params)
     centering2   = ad.image_var   # ERRX2 + ERRY2 in pix²
 
     order = np.argsort(centering2)
@@ -650,6 +674,117 @@ def compute_error_model(zpntest, data):
 
     logging.info(f"Error model fit: S0={S0:.6f} px², SC={SC:.4f}, ASTSIGMA={np.sqrt(S0):.4f} px, ASTSCATT={scatter:.4f} px")
     return np.sqrt(S0), SC, scatter
+
+
+def refit_astrometry_multi(alldet, data, options):
+    """Fit astrometry simultaneously for multiple images.
+
+    Per-image terms (CRVAL1:n, CRVAL2:n, CDi_j:n) describe pointing and rotation
+    for image n.  Global terms (CRPIX1, CRPIX2, PV2_*) are shared across images
+    and represent the fixed optical model of the camera.
+
+    Fitting many frames together strongly constrains the optical axis (CRPIX) and
+    radial distortion (PV2_*) because frame-to-frame pointing dither breaks the
+    degeneracy between CRVAL and PV2_1 that plagues single-image fits.
+
+    Parameters
+    ----------
+    alldet : list of astropy.Table
+        One detection table per image (each with a FITS header in .meta).
+    data : PhotometryData
+        Combined star catalogue from all images; img column holds 0-based image index.
+    options : argparse.Namespace
+        Same options as refit_astrometry (refit_zpn, szp, save_wcs, …).
+
+    Returns
+    -------
+    zpnfit.zpnfit
+        Fitted model with per-image CRVAL/CD terms and global CRPIX/PV2_* terms.
+    """
+    det0 = alldet[0]
+    camera = det0.meta.get('CCD_NAME', 'C0')
+    telescope = str(det0.meta.get('TELESCOP', ''))
+    n_images = len(alldet)
+
+    msg = f"Multi-image astrometry: {n_images} images, camera={camera}"
+    logging.info(msg); print(msg)
+
+    # --- Build the shared model (projection + global optical terms) ---
+    if options.szp:
+        zpntest = zpnfit.zpnfit(proj="AZP")
+        zpntest.fitterm(["PV2_1"], [1])
+    elif options.refit_zpn:
+        if camera in ["C0", "C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
+            zpntest = zpnfit.zpnfit(proj="ZPN")
+            zpntest.fixterm(["PV2_1"], [1])
+        elif camera in ["CAM-ZEA"]:
+            zpntest = zpnfit.zpnfit(proj="ZEA")
+        else:
+            zpntest = zpnfit.zpnfit(proj="ZPN")
+            zpntest.fixterm(["PV2_1"], [1])
+        setup_camera_params(zpntest, camera, options.refit_zpn, telescope, meta=det0.meta)
+    else:
+        # Gentle refit: projection and global terms from first image's header
+        ctype1 = str(det0.meta.get('CTYPE1', ''))
+        if 'ZPN' in ctype1:
+            zpntest = zpnfit.zpnfit(proj="ZPN")
+            zpntest.fixterm(["PV2_1"], [1])
+        elif 'ZEA' in ctype1:
+            zpntest = zpnfit.zpnfit(proj="ZEA")
+        else:
+            zpntest = zpnfit.zpnfit(proj="TAN")
+        # Global: fix CRPIX at first image's header value
+        for term in ['CRPIX1', 'CRPIX2']:
+            if term in det0.meta:
+                zpntest.fixterm([term], [float(det0.meta[term])])
+        # Global: fix any existing distortion coefficients at first image's header values
+        for key in sorted(det0.meta.keys()):
+            if isinstance(key, str) and key.startswith('PV2_') and key != 'PV2_1':
+                try:
+                    zpntest.fixterm([key], [float(det0.meta[key])])
+                except (TypeError, ValueError):
+                    pass
+
+    # --- Per-image terms: CRVAL and CD matrix for each frame ---
+    for n, det in enumerate(alldet):
+        keys_invalid = False
+        for base_term, key in [("CRVAL1", "CRVAL1"), ("CRVAL2", "CRVAL2"),
+                                ("CD1_1", "CD1_1"), ("CD1_2", "CD1_2"),
+                                ("CD2_1", "CD2_1"), ("CD2_2", "CD2_2")]:
+            term = f"{base_term}:{n}"
+            try:
+                zpntest.fitterm([term], [det.meta[key]])
+            except KeyError:
+                keys_invalid = True
+        if keys_invalid:
+            logging.warning(f"Image {n} ({det.meta.get('FITSFILE', '?')}): some WCS keys missing")
+        # For refit_zpn, also fit CRPIX per-session if not already set globally
+        # (camera-specific CRPIX already handled by setup_camera_params above)
+
+    if options.refit_zpn and 'CRPIX1' not in zpntest.fitterms and 'CRPIX1' not in zpntest.fixterms:
+        # Camera not known: fit global CRPIX from first image header
+        for term in ['CRPIX1', 'CRPIX2']:
+            if term in det0.meta:
+                zpntest.fitterm([term], [float(det0.meta[term])])
+
+    # --- Initial global fit on all photometry-matched stars ---
+    data.use_mask('photometry')
+    ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy', 'img')
+    zpntest.delin = False
+    zpntest.fit(ad.astparams_multi)
+
+    # --- Refine with sigma-clipping (auto-detects multi-image via _is_multi_image) ---
+    refine_fit(zpntest, data)
+    refine_fit(zpntest, data)
+
+    print(zpntest)
+
+    # --- Error model ---
+    zpntest.sigma, zpntest.variance, zpntest.scatter = compute_error_model(zpntest, data)
+    print(f"Error model: ASTSIGMA={zpntest.sigma:.4f} px (floor), "
+          f"ASTVAR={zpntest.variance:.4f}, ASTSCATT={zpntest.scatter:.4f} px")
+
+    return zpntest
 
 
 def refit_astrometry(det, data, options):
@@ -745,8 +880,8 @@ def refit_astrometry(det, data, options):
     data.use_mask('photometry')
 
     # Perform the initial fit
-    ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
-    zpntest.fit(ad.astparams)
+    _, params = _get_fitdata_ast(data, zpntest)
+    zpntest.fit(params)
 
     # Refine the fit - use stepwise for unknown cameras with refit_zpn
     is_known_camera = (camera in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"] or
@@ -824,9 +959,23 @@ def refit_astrometry(det, data, options):
     return zpntest
 
 def setup_initial_wcs(zpntest, meta):
-    """Set up initial WCS parameters."""
+    """Set up initial WCS parameters.
+
+    Per-image terms (CRVAL, CD matrix) use the :0 suffix so the model can handle
+    multi-frame fitting where each image has its own pointing and rotation but all
+    images share the same optical axis (CRPIX) and distortion (PV2_*).
+    """
     keys_invalid = False
-    for term in ["CD1_1", "CD1_2", "CD2_1", "CD2_2", "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2"]:
+    # Per-image terms with :0 suffix (CRVAL and CD matrix vary per frame)
+    for term, key in [("CRVAL1:0", "CRVAL1"), ("CRVAL2:0", "CRVAL2"),
+                      ("CD1_1:0", "CD1_1"), ("CD1_2:0", "CD1_2"),
+                      ("CD2_1:0", "CD2_1"), ("CD2_2:0", "CD2_2")]:
+        try:
+            zpntest.fitterm([term], [meta[key]])
+        except KeyError:
+            keys_invalid = True
+    # Global terms (shared across all images)
+    for term in ["CRPIX1", "CRPIX2"]:
         try:
             zpntest.fitterm([term], [meta[term]])
         except KeyError:
@@ -834,19 +983,19 @@ def setup_initial_wcs(zpntest, meta):
 
     if keys_invalid:
         try: # CROTA1 & 2 are optional, may be left to default=0 in stacked images
-            crota1 = meta['CROTA1']*np.pi/180
+            crota1 = meta['CROTA1'] * np.pi / 180
         except:
             crota1 = 0
         try:
-            crota2 = meta['CROTA2']*np.pi/180
+            crota2 = meta['CROTA2'] * np.pi / 180
         except:
             crota2 = 0
         try:
             # Try to interpret old-fashioned WCS with CROTA
-            zpntest.fitterm(['CD1_1'], [meta['CDELT1'] * np.cos(crota1)])
-            zpntest.fitterm(['CD1_2'], [meta['CDELT1'] * np.sin(crota1)])
-            zpntest.fitterm(['CD2_1'], [meta['CDELT2'] * -np.sin(crota2)])
-            zpntest.fitterm(['CD2_2'], [meta['CDELT2'] * np.cos(crota2)])
+            zpntest.fitterm(['CD1_1:0'], [meta['CDELT1'] * np.cos(crota1)])
+            zpntest.fitterm(['CD1_2:0'], [meta['CDELT1'] * np.sin(crota1)])
+            zpntest.fitterm(['CD2_1:0'], [meta['CDELT2'] * -np.sin(crota2)])
+            zpntest.fitterm(['CD2_2:0'], [meta['CDELT2'] * np.cos(crota2)])
             keys_invalid = False
         except KeyError:
             keys_invalid = True
@@ -914,10 +1063,12 @@ def setup_camera_params(zpntest, camera, refit_zpn, telescope='', meta=None):
 
     if camera in ( "makak2",  "makak"):
         if refit_zpn:
-            zpntest.fitterm(["PV2_3", "PV2_5"], [0.131823, 0.282538])
+            zpntest.fitterm(["PV2_3", "PV2_5"], [0.132, 0.569])
+#            zpntest.fitterm(["PV2_3", "PV2_5"], [0.131823, 0.282538])
             zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(813.6, 622.8)))
         else:
-            zpntest.fixterm(["PV2_3", "PV2_5"], [0.131823, 0.282538])
+            zpntest.fixterm(["PV2_3", "PV2_5"], [0.132, 0.569])
+#            zpntest.fixterm(["PV2_3", "PV2_5"], [0.131823, 0.282538])
             zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(813.6, 622.8)))
 
     if camera == "NF4":

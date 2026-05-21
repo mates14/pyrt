@@ -64,6 +64,15 @@ class FitData:
         # zpntest expects: image_x, image_y, ra, dec, image_dxy
         return (self.image_x, self.image_y, self.ra, self.dec, self.image_dxy)
 
+    @property
+    def astparams_multi(self):
+        """Return 6-tuple for multi-image fitting, adding img as the image index.
+
+        Requires 'img' to have been included in the get_fitdata() call.
+        zpntest.model() dispatches per-image terms (CRVAL:n, CD:n) via img_idx.
+        """
+        return (self.image_x, self.image_y, self.ra, self.dec, self.image_dxy, self.img)
+
 class PhotometryData:
     """
     Manages photometric data with complex masking and filtering operations.

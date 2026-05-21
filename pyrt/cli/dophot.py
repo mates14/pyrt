@@ -28,7 +28,7 @@ warnings.simplefilter('ignore', category=FITSFixedWarning)
 from pyrt.core import fotfit
 from pyrt.catalog.catalog import Catalog
 from pyrt.cli.cat2det import remove_junk
-from pyrt.core.refit_astrometry import refit_astrometry
+from pyrt.core.refit_astrometry import refit_astrometry, refit_astrometry_multi
 from pyrt.utils.file_utils import try_det, try_img, write_region_file
 from pyrt.utils.dophot_config import parse_arguments
 from pyrt.core.data_handling import PhotometryData, make_pairs_to_fit, compute_zeropoints_all_filters
@@ -897,50 +897,70 @@ def main():
         ffit.savemodel(options.save_model)
 
     # """ REFIT ASTROMETRY """
-    zpntest=None # correct behaviour if astrometry is off
+    zpntest = None  # correct behaviour if astrometry is off
     if options.astrometry:
-        if len(alldet) > 1:
-            logging.warning(f"Astrometric fitting is not supported with multiple input files ({len(alldet)} files provided)")
-            logging.warning("Astrometry disabled to prevent bogus results. Process files individually for astrometric fitting.")
-            print(f"WARNING: Astrometry disabled - {len(alldet)} input files detected")
-            print("WARNING: Astrometric fitting only works with single images. Process files individually.")
-        else:
-            start = time.time()
+        start = time.time()
+        if len(alldet) == 1:
             zpntest = refit_astrometry(det, data, options)
-            logging.info(f"Astrometric fit took {time.time()-start:.3f}s")
+        else:
+            zpntest = refit_astrometry_multi(alldet, data, options)
+        logging.info(f"Astrometric fit took {time.time()-start:.3f}s")
+
         if zpntest is not None:
             start = time.time()
-            fitsbase = os.path.splitext(arg)[0]
-            newfits = fitsbase + "t.fits"
+            for img_n, det_n in enumerate(alldet):
+                fitsfile = det_n.meta.get('FITSFILE', '')
+                fitsbase = os.path.splitext(fitsfile)[0]
+                newfits = fitsbase + "t.fits"
 
-            # 1. Copy the original FITS to create the astrometrized version
-            try:
-                if os.path.isfile(newfits):
-                    logging.info(f"Will overwrite {newfits}")
-                    os.unlink(newfits)
-                shutil.copy2(f"{fitsbase}.fits", newfits)
-                os.chmod(newfits, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
-            except OSError as e:
-                logging.warning(f"Cannot create astrometrized FITS (source {fitsbase}.fits missing or not copyable): {e}")
-                newfits = None
-
-            # 2. Write WCS solution and keywords into the copied FITS
-            if newfits is not None:
+                # 1. Copy the original FITS to create the astrometrized version
                 try:
-                    for key in ['FIELD', 'PIXEL', 'FWHM']:
-                        astropy.io.fits.setval(newfits, key, 0, value=det.meta[key])
-                    zpntest.write(newfits)
+                    if os.path.isfile(newfits):
+                        logging.info(f"Will overwrite {newfits}")
+                        os.unlink(newfits)
+                    shutil.copy2(fitsfile, newfits)
+                    os.chmod(newfits, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+                except OSError as e:
+                    logging.warning(f"Cannot create astrometrized FITS (source {fitsfile} missing or not copyable): {e}")
+                    newfits = None
+
+                # 2. Write WCS solution and keywords into the copied FITS
+                if newfits is not None:
+                    try:
+                        for key in ['FIELD', 'PIXEL', 'FWHM']:
+                            astropy.io.fits.setval(newfits, key, 0, value=det_n.meta[key])
+                        zpntest.write(newfits, img_idx=img_n)
+                    except Exception as e:
+                        logging.warning(f"Failed to write WCS headers into {newfits}: {e}")
+
+                # 3. Store WCS solution into det_n.meta for downstream use
+                try:
+                    zpntest.write(det_n.meta, img_idx=img_n)
                 except Exception as e:
-                    logging.warning(f"Failed to write WCS headers into {newfits}: {e}")
+                    logging.warning(f"Failed to update det_n.meta with WCS solution: {e}")
 
-            # 3. Store WCS solution into det.meta for downstream use
+            # imgwcs for downstream use: use last image
             try:
-                zpntest.write(det.meta)
-                imgwcs = astropy.wcs.WCS(zpntest.wcs(), relax=True)
+                imgwcs = astropy.wcs.WCS(zpntest.wcs(img_idx=len(alldet)-1), relax=True)
             except Exception as e:
-                logging.warning(f"Failed to update det.meta with WCS solution: {e}")
+                logging.warning(f"Failed to build imgwcs from final WCS solution: {e}")
 
-            logging.info(f"Saving a new fits with WCS took {time.time()-start:.3f}s")
+            logging.info(f"Saving astrometrized FITS took {time.time()-start:.3f}s")
+
+        if options.save_wcs:
+            if zpntest is not None:
+                for img_n, det_n in enumerate(alldet):
+                    if options.save_wcs is True:
+                        base_filename = os.path.splitext(det_n.meta['FITSFILE'])[0]
+                        wcs_filename = f"{base_filename}.wcs"
+                    else:
+                        # With explicit filename and multiple images, append image index
+                        if len(alldet) > 1:
+                            base, ext = os.path.splitext(options.save_wcs)
+                            wcs_filename = f"{base}_{img_n}{ext}"
+                        else:
+                            wcs_filename = options.save_wcs
+                    zpntest.write_wcs(wcs_filename, img_idx=img_n)
     # ASTROMETRY END
 
     if options.stars:
