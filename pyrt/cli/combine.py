@@ -763,6 +763,8 @@ def update_output_header(output_file, inputs, weights, args):
             with fits.open(f) as hdul:
                 hdr = hdul[0].header
                 gain = float(hdr.get('GAIN', args.gain))
+                if gain <= 0:
+                    continue
                 if 'RNOISE' in hdr:
                     rnoise = float(hdr['RNOISE'])
                 elif 'READNOIS' in hdr:
@@ -779,8 +781,10 @@ def update_output_header(output_file, inputs, weights, args):
             effective_gain = sum(gain_values) / weight_sum
             effective_rnoise = np.sqrt(sum(rnoise_values) / weight_sum) * effective_gain
 
-            header['GAIN'] = (effective_gain, 'Effective gain of combined image')
-            header['RNOISE'] = (effective_rnoise, 'Effective read noise of combined image')
+            if np.isfinite(effective_gain):
+                header['GAIN'] = (effective_gain, 'Effective gain of combined image')
+            if np.isfinite(effective_rnoise):
+                header['RNOISE'] = (effective_rnoise, 'Effective read noise of combined image')
 
         # Copy most common value for each keyword
         from collections import Counter
