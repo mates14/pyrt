@@ -840,6 +840,15 @@ def main():
 
         det['ALPHA_J2000'], det['DELTA_J2000'] = imgwcs.all_pix2world( [det['X_IMAGE']], [det['Y_IMAGE']], 1)
 
+        # Drop off-frame junk detections whose pixel coordinates map to NaN sky
+        # coordinates through the WCS. Keeping them poisons the output .ecsv and
+        # trips up any downstream consumer (e.g. KDTree in pyrt-ecsv-target).
+        finite = np.isfinite(det['ALPHA_J2000']) & np.isfinite(det['DELTA_J2000'])
+        n_bad = int(np.count_nonzero(~finite))
+        if n_bad:
+            logging.warning(f"Dropping {n_bad} detection(s) with non-finite sky coordinates (off-frame)")
+            det = det[finite]
+
         logging.info("Reference filter is %s, Photometric schema: %s, Photometric system: %s"\
             %(det.meta['PHFILTER'],det.meta['PHSCHEMA'],det.meta['PHSYSTEM']))
 

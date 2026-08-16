@@ -27,6 +27,20 @@ def find_closest_object(data, ra, dec, id_limit):
     if 'ALPHA_J2000' not in data.colnames or 'DELTA_J2000' not in data.colnames:
         return None
 
+    # Drop detections with non-finite sky coordinates. Off-frame junk
+    # detections can map to NaN through the WCS, and KDTree rejects any input
+    # containing NaN ("Input contains NaN"), which would otherwise fail the
+    # whole file for a single bad row.
+    ra_col = np.asarray(data['ALPHA_J2000'], dtype=float)
+    dec_col = np.asarray(data['DELTA_J2000'], dtype=float)
+    valid = np.isfinite(ra_col) & np.isfinite(dec_col)
+    if not valid.all():
+        data = data[valid]
+        ra_col = ra_col[valid]
+        dec_col = dec_col[valid]
+    if len(data) == 0:
+        return None
+
     # Convert arcseconds to degrees for the search radius
     search_radius_deg = id_limit / 3600.0
 
@@ -36,8 +50,8 @@ def find_closest_object(data, ra, dec, id_limit):
 
     # Create coordinates for data points and target
     data_coords = np.array([
-        data['ALPHA_J2000'] * ra_scale,
-        data['DELTA_J2000']
+        ra_col * ra_scale,
+        dec_col
     ]).T
 
     target_coords = np.array([[ra * ra_scale, dec]])
