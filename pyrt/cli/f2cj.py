@@ -1,9 +1,14 @@
 #!/usr/bin/python3
 
+import os
 import numpy as np
 import sys
 import argparse
 from astropy.io import fits
+from astropy.wcs import WCS
+from astropy.wcs.utils import proj_plane_pixel_scales
+from astropy.coordinates import SkyCoord
+import astropy.units as u
 from scipy.optimize import curve_fit
 from PIL import Image, ImageDraw, ImageFont
 
@@ -34,6 +39,19 @@ def apply_color_palette(data, palette='none', inverted=False):
         
         # Stack RGB channels
         return np.stack([red, green, blue], axis=-1)
+
+def load_font(size):
+    """Load the best available TTF font, falling back to PIL's built-in."""
+    for path in [
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        "/System/Library/Fonts/Arial.ttf",
+    ]:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
 
 def expand_label(label_text, fits_header):
     """Expand FITS header values in label text."""
@@ -75,19 +93,8 @@ def add_label_to_image(img, label_text, fits_header):
     expanded_label = expand_label(label_text, fits_header)
     
     draw = ImageDraw.Draw(img)
-    
-    # Try to load a decent font, fall back to default
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", 24)
-    except:
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/liberation/LiberationSans-Regular.ttf", 24)
-        except:
-            try:
-                font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 24)
-            except:
-                font = ImageFont.load_default()
-    
+    font = load_font(24)
+
     # Get image dimensions and text size
     img_width, img_height = img.size
     bbox = draw.textbbox((0, 0), expanded_label, font=font)
@@ -112,16 +119,8 @@ def create_fallback_image(width=800, height=600, error_message="Error processing
     try:
         img = Image.new('RGB', (width, height), 'white')
         draw = ImageDraw.Draw(img)
-        
-        # Try to load a font for error message
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", 24)
-        except:
-            try:
-                font = ImageFont.truetype("/usr/share/fonts/liberation/LiberationSans-Regular.ttf", 24)
-            except:
-                font = ImageFont.load_default()
-        
+        font = load_font(24)
+
         # Center the error message
         bbox = draw.textbbox((0, 0), error_message, font=font)
         text_width = bbox[2] - bbox[0]
@@ -154,6 +153,220 @@ def safe_add_label_to_image(img, label_text, fits_header):
         print(f"Warning: Label addition failed: {e}")
         return img
 
+def decode_catalog_name(name):
+    """Decode literal '\\uXXXX' escapes (e.g. greek letters) in catalog name strings."""
+    name = name.strip()
+    if '\\u' in name:
+        try:
+            return name.encode('ascii').decode('unicode_escape')
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            return name
+    return name
+
+def field_center_and_radius(wcs, img_width, img_height):
+    """Sky center and a matching radius (deg) with margin, for pre-filtering catalogs."""
+    center = wcs.pixel_to_world(img_width / 2.0, img_height / 2.0)
+    corner = wcs.pixel_to_world(0, 0)
+    # Margin beyond the corner distance so objects just outside the frame
+    # (whose center falls inside once radius/label extent is drawn) still match.
+    radius = center.separation(corner).deg * 1.2
+    return center, radius
+
+def match_catalog_to_frame(wcs, center, field_radius, img_width, img_height, ra, dec):
+    """Return (index, x, y) for catalog rows within field_radius whose projected
+    pixel position also falls inside the image bounds."""
+    sep = center.separation(SkyCoord(ra * u.deg, dec * u.deg))
+    idx = np.nonzero(sep.deg < field_radius)[0]
+    if not len(idx):
+        return []
+    xs, ys = wcs.all_world2pix(ra[idx], dec[idx], 0)
+    out = []
+    for k, i in enumerate(idx):
+        x, y = float(xs[k]), float(ys[k])
+        if 0 <= x < img_width and 0 <= y < img_height:
+            out.append((i, x, y))
+    return out
+
+def get_sky_annotations(header, img_width, img_height, catalog_dir, star_maglimit=None,
+                         gcvs_maglimit=None):
+    """Match NGC/IC objects, named bright stars and GCVS variable stars against
+    the image's WCS.
+
+    catalog_dir is expected to contain astrometry.net's ngc2000.fits,
+    ngc2000names.fits and brightstars.fits, plus an optional gcvs.fits
+    (see fetch_gcvs.py). Uses astropy's WCS (wcslib) directly rather than
+    astrometry.net's own anwcs/plotstuff, since the latter doesn't handle
+    our ZPN-projected WCS solutions.
+
+    Returns a list of dicts: {kind, x, y, radius_px, labels}.
+    """
+    wcs = WCS(header)
+    if not wcs.has_celestial:
+        raise ValueError('FITS header has no celestial WCS')
+
+    center, field_radius = field_center_and_radius(wcs, img_width, img_height)
+    pixscale_arcsec = np.mean(proj_plane_pixel_scales(wcs)) * 3600.0
+
+    annotations = []
+
+    catalog_dir = os.path.expanduser(catalog_dir)
+    ngc_path = os.path.join(catalog_dir, 'ngc2000.fits')
+    names_path = os.path.join(catalog_dir, 'ngc2000names.fits')
+    bright_path = os.path.join(catalog_dir, 'brightstars.fits')
+    gcvs_path = os.path.join(catalog_dir, 'gcvs.fits')
+
+    if not any(os.path.exists(p) for p in (ngc_path, bright_path, gcvs_path)):
+        raise FileNotFoundError(
+            f"No catalog files found under '{catalog_dir}' "
+            f"(expected ngc2000.fits, brightstars.fits and/or gcvs.fits)")
+
+    if os.path.exists(ngc_path):
+        ngc = fits.getdata(ngc_path, 1)
+
+        namemap = {}
+        if os.path.exists(names_path):
+            names = fits.getdata(names_path, 1)
+            for obj, nm in zip(names['Object'], names['Name']):
+                nm = nm.strip()
+                if not nm:
+                    continue
+                isic = nm.startswith('I')
+                try:
+                    num = int(nm.replace('I', '').strip())
+                except ValueError:
+                    continue
+                namemap.setdefault((isic, num), []).append(obj.strip())
+
+        for i, x, y in match_catalog_to_frame(wcs, center, field_radius, img_width, img_height,
+                                              ngc['ra'], ngc['dec']):
+            designation = ngc['name'][i].strip()
+            isic = designation.startswith('IC')
+            num = int(ngc['ngcnum'][i])
+            labels = [designation] + namemap.get((isic, num), [])
+            radius_px = float(ngc['radius'][i]) * 3600.0 / pixscale_arcsec
+            annotations.append(dict(kind='ngc', x=x, y=y,
+                                    radius_px=radius_px, labels=labels))
+
+    if os.path.exists(bright_path):
+        bright = fits.getdata(bright_path, 1)
+        for i, x, y in match_catalog_to_frame(wcs, center, field_radius, img_width, img_height,
+                                              bright['ra'], bright['dec']):
+            if star_maglimit is not None and bright['vmag'][i] > star_maglimit:
+                continue
+            labels = [decode_catalog_name(n) for n in (bright['name1'][i], bright['name2'][i])
+                     if n.strip()]
+            if not labels:
+                # Bright-star catalog is name-only; skip unnamed entries.
+                continue
+            annotations.append(dict(kind='bright', x=x, y=y,
+                                    radius_px=0.0, labels=labels))
+
+    if os.path.exists(gcvs_path):
+        gcvs = fits.getdata(gcvs_path, 1)
+        for i, x, y in match_catalog_to_frame(wcs, center, field_radius, img_width, img_height,
+                                              gcvs['ra'], gcvs['dec']):
+            magmax = float(gcvs['magmax'][i])
+            if gcvs_maglimit is not None and (magmax < 0 or magmax > gcvs_maglimit):
+                continue
+            vartype = gcvs['vartype'][i].strip()
+            label = gcvs['name'][i].strip()
+            if vartype:
+                label += f' ({vartype})'
+            annotations.append(dict(kind='gcvs', x=x, y=y,
+                                    radius_px=0.0, labels=[label]))
+
+    return annotations
+
+def draw_sky_annotations(img, annotations, colors, fontsize=14):
+    """Draw catalog circles/markers with labels onto img.
+
+    colors maps annotation 'kind' -> PIL color; kinds without an entry
+    fall back to colors['default'].
+    """
+    if not annotations:
+        return img
+    if img.mode == 'L':
+        img = img.convert('RGB')
+    draw = ImageDraw.Draw(img)
+    font = load_font(int(fontsize))
+    for ann in annotations:
+        x, y, r = ann['x'], ann['y'], ann['radius_px']
+        label = ' / '.join(ann['labels'])
+        color = colors.get(ann['kind'], colors['default'])
+        if r >= 3:
+            draw.ellipse([x - r, y - r, x + r, y + r], outline=color, width=2)
+            ty = y + r + 2
+        else:
+            m = 5
+            draw.line([x - m, y, x + m, y], fill=color, width=1)
+            draw.line([x, y - m, x, y + m], fill=color, width=1)
+            ty = y + m + 2
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx or dy:
+                    draw.text((x + dx, ty + dy), label, font=font, fill='black')
+        draw.text((x, ty), label, font=font, fill=color)
+    return img
+
+def get_simbad_annotations(header, img_width, img_height, maglimit=12.0):
+    """Live SIMBAD cone-search for named objects in the field, filtered to
+    maglimit to avoid drowning the image in faint catalog-only entries.
+
+    Returns a list of dicts in the same shape as get_sky_annotations().
+    """
+    from astroquery.simbad import Simbad
+
+    wcs = WCS(header)
+    if not wcs.has_celestial:
+        raise ValueError('FITS header has no celestial WCS')
+    center, field_radius = field_center_and_radius(wcs, img_width, img_height)
+
+    simbad = Simbad()
+    simbad.add_votable_fields('otype', 'V')
+    result = simbad.query_region(center, radius=field_radius * u.deg)
+    if result is None or len(result) == 0:
+        return []
+
+    annotations = []
+    for row in result:
+        v = row['V']
+        if hasattr(v, 'mask') and v.mask:
+            continue
+        v = float(v)
+        if maglimit is not None and v > maglimit:
+            continue
+        sc = SkyCoord(row['ra'] * u.deg, row['dec'] * u.deg)
+        x, y = wcs.all_world2pix(sc.ra.deg, sc.dec.deg, 0)
+        x, y = float(x), float(y)
+        if not (0 <= x < img_width and 0 <= y < img_height):
+            continue
+        label = str(row['main_id'])
+        annotations.append(dict(kind='simbad', x=x, y=y, radius_px=0.0, labels=[label]))
+    return annotations
+
+def safe_annotate_sky(img, header, catalog_dir=None, star_maglimit=None, gcvs_maglimit=None,
+                       colors=None, fontsize=14, do_simbad=False, simbad_maglimit=12.0):
+    """Safe wrapper: annotate img with sky catalog objects, never raising."""
+    anns = []
+    if catalog_dir:
+        try:
+            local = get_sky_annotations(header, img.width, img.height, catalog_dir,
+                                        star_maglimit=star_maglimit, gcvs_maglimit=gcvs_maglimit)
+            print(f"Annotated {len(local)} object(s) from {catalog_dir}")
+            anns += local
+        except Exception as e:
+            print(f"Warning: local catalog annotation failed: {e}")
+    if do_simbad:
+        try:
+            sim = get_simbad_annotations(header, img.width, img.height, maglimit=simbad_maglimit)
+            print(f"Annotated {len(sim)} object(s) from SIMBAD")
+            anns += sim
+        except Exception as e:
+            print(f"Warning: SIMBAD annotation failed: {e}")
+    if not anns:
+        return img
+    return draw_sky_annotations(img, anns, colors=colors, fontsize=fontsize)
+
 def main():
     parser = argparse.ArgumentParser(description='Convert FITS file to JPEG with logarithmic scaling')
     parser.add_argument('fits_file', help='Input FITS file')
@@ -162,6 +375,16 @@ def main():
     parser.add_argument('-i', '--inverted', action='store_true', help='Invert colors (grayscale) or use cool palette (with -c heat)')
     parser.add_argument('-l', '--label', help='Label text to add at bottom of image (supports FITS header expansion like %%H:%%M)')
     parser.add_argument('-F', '--fits-out', action='store_true', help='Save as FITS with full header and 8-bit grayscale data (for Aladin)')
+    parser.add_argument('-a', '--annotate', action='store_true', help='Annotate image with NGC/IC objects, named bright stars and GCVS variables from the WCS (requires --catalog-dir and/or --simbad)')
+    parser.add_argument('--catalog-dir', dest='catalog_dir', help='Path to local catalogs directory (ngc2000.fits, ngc2000names.fits, brightstars.fits, gcvs.fits -- see fetch_gcvs.py)')
+    parser.add_argument('--ann-maglimit', dest='ann_maglimit', type=float, help='Only label bright stars at or brighter than this V magnitude')
+    parser.add_argument('--gcvs-maglimit', dest='gcvs_maglimit', type=float, help='Only label GCVS variables at or brighter than this magnitude at maximum')
+    parser.add_argument('--ann-color', dest='ann_color', default='yellow', help='Annotation color for NGC/IC and bright stars (default: %(default)s)')
+    parser.add_argument('--ann-var-color', dest='ann_var_color', default='cyan', help='Annotation color for GCVS variable stars (default: %(default)s)')
+    parser.add_argument('--ann-fontsize', dest='ann_fontsize', default=14, type=float, help='Annotation label font size (default: %(default)s)')
+    parser.add_argument('--simbad', action='store_true', help='Also query SIMBAD live for named objects in the field (requires network; opt-in since it is slow/rate-limited for batch use)')
+    parser.add_argument('--simbad-maglimit', dest='simbad_maglimit', type=float, default=12.0, help='Only label SIMBAD hits at or brighter than this V magnitude (default: %(default)s)')
+    parser.add_argument('--ann-simbad-color', dest='ann_simbad_color', default='orange', help='Annotation color for SIMBAD hits (default: %(default)s)')
 
     args = parser.parse_args()
     fits_file = args.fits_file
@@ -276,6 +499,20 @@ def main():
         else:
             # Color image
             img = Image.fromarray(colored_data, mode='RGB')
+
+        # Annotate with NGC/IC objects, named bright stars, GCVS variables and/or SIMBAD
+        if args.annotate:
+            if not args.catalog_dir and not args.simbad:
+                print("Warning: --annotate requires --catalog-dir and/or --simbad; skipping annotation")
+            else:
+                colors = dict(default=args.ann_color, ngc=args.ann_color, bright=args.ann_color,
+                              gcvs=args.ann_var_color, simbad=args.ann_simbad_color)
+                img = safe_annotate_sky(img, header, catalog_dir=args.catalog_dir,
+                                        star_maglimit=args.ann_maglimit,
+                                        gcvs_maglimit=args.gcvs_maglimit,
+                                        colors=colors, fontsize=args.ann_fontsize,
+                                        do_simbad=args.simbad,
+                                        simbad_maglimit=args.simbad_maglimit)
 
         # Add label if specified
         if args.label:

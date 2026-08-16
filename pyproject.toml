@@ -76,6 +76,7 @@ pyrt-mproject = "pyrt.cli.mProjectPX:main"
 pyrt-ecsv-target = "pyrt.cli.ecsv_target:main"
 pyrt-fits-overlap = "pyrt.cli.fits_overlap:main"
 pyrt-f2cj = "pyrt.cli.f2cj:main"
+pyrt-fetch-gcvs = "pyrt.cli.fetch_gcvs:main"
 
 # General purpose tools
 pyrt-combine = "pyrt.cli.combine:main"
