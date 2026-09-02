@@ -133,23 +133,32 @@ def _hotpants_thresholds(i_sigma, i_median, t_sigma, t_median, kernel_sigma_mult
     }
 
 
-def _diffim_is_stable(diffim_file, sci_sigma, factor=200.0):
+def _diffim_is_stable(diffim_file, sci_sigma, factor=200.0, min_finite_frac=0.9):
     """Sanity-check a hotpants difference image.
 
     A converged fit's residuals should stay within roughly the input noise
     level; a degenerate fit (near-singular kernel matrix, too few or badly
-    chosen stamps) produces huge swings (1e4-1e6 ADU) even though hotpants
-    still exits 0 and prints SUCCESS -- it doesn't detect its own failure.
-    Compare a 1st/99th-percentile-clipped stdev against a generous multiple
-    of the science image's own background sigma.
+    chosen stamps) usually produces huge swings (1e4-1e6 ADU) even though
+    hotpants still exits 0 and prints SUCCESS -- it doesn't detect its own
+    failure. But a degenerate fit can *also* come out almost entirely masked
+    (hotpants' NaN/1e-30 fill value covering nearly the whole frame), which
+    has a tiny stdev and would otherwise look "stable" by the swing check
+    alone -- caught two earlier PS1-template pairs where the pixel data was
+    identical but a different (astrometry-refit) WCS on the science frame
+    changed the reprojected template enough to flip this. So check both:
+    most of the frame must be finite, and the residual scatter must be
+    neither implausibly large nor implausibly small (near-exact-zero also
+    means "nothing but junk survived the mask").
     """
     data = astropy.io.fits.getdata(diffim_file)
+    if np.isfinite(data).mean() < min_finite_frac:
+        return False
     finite = data[np.isfinite(data)]
     if finite.size == 0:
         return False
     lo, hi = np.percentile(finite, [1, 99])
     clipped_std = np.std(np.clip(finite, lo, hi))
-    return clipped_std < factor * sci_sigma
+    return 0.01 * sci_sigma < clipped_std < factor * sci_sigma
 
 
 def prepare_and_subtract(science_file, outfile, kernel_sigma_mult=None):
