@@ -45,7 +45,114 @@ def _find_hotpants():
     return hp
 
 
-def prepare_and_subtract(science_file, outfile):
+# Background-noise multipliers used to derive hotpants thresholds from data,
+# rather than hardcoding fixed ADU counts that assume a particular sky level.
+#
+# FLOOR_SIGMA_MULT sets the lower bound (il/tl): generous on purpose, it only
+# needs to reject genuinely broken pixels (dead columns, readout garbage) --
+# doesn't need tuning, doesn't affect fit stability.
+#
+# CEIL_SIGMA_MULT sets the general upper bound (iu/tu): the value a pixel can
+# take and still be considered "real data" for the difference image. Also not
+# fit-critical in practice (verified: leaving it anywhere from ~600x to
+# ~2500x sigma made no difference once the kernel-fit ceiling was right).
+#
+# KERNEL_SIGMA_CANDIDATES sets the *kernel-fit* upper bound (-iuk/-tuk), which
+# is what actually matters. PS1 templates have saturated stellar cores
+# running into the hundreds of thousands to millions of ADU, far above
+# general validity; letting those into hotpants' stamp/kernel fit makes the
+# fit blow up globally (every stamp rejected with a nonsensical chi2, output
+# comes out NaN/1e-30 almost everywhere) even though hotpants still exits 0.
+#
+# The same absolute ceiling is applied to *both* -iuk and -tuk (not each
+# image's own sigma independently, scaled off the template's sigma) --
+# empirically that combination is what converges. But which exact stars end
+# up inside vs. outside a given ceiling is a discrete, per-field accident of
+# which star lands in which fit stamp, not a smooth function of the
+# threshold: bisecting on a real failing frame found 3000 ADU gives a clean
+# diffim (clipped stdev ~13 ADU) while 3500 gives one with clipped stdev
+# ~500,000, with no monotonic trend in between. There is no single value
+# that's safe in general -- this is the "art" part -- so instead of trusting
+# one number, prepare_and_subtract() runs down this candidate list (as
+# multiples of the template's own background sigma) and validates the actual
+# output at each step (see _diffim_is_stable), keeping the first one that
+# produces a sane difference image.
+KERNEL_SIGMA_CANDIDATES = [50.0, 25.0, 75.0, 15.0, 100.0, 35.0, 10.0, 150.0]
+FLOOR_SIGMA_MULT = 1000.0
+CEIL_SIGMA_MULT  = 1000.0
+
+# Approaches tried and abandoned while chasing this (2026-09-02), so they
+# aren't re-explored from scratch next time a target still fails:
+#
+#  - Percentile-of-image instead of median+N*sigma for the kernel ceiling
+#    (e.g. "exclude the top 1%"). No better: the same discrete instability
+#    showed up across the 99.0-99.9 percentile range.
+#  - Scaling -iuk off the *image's* own sigma and -tuk off the *template's*
+#    own sigma independently, rather than one shared ceiling from the
+#    template. Worse: the row-difference sigma of a resampled/coadded PS1
+#    template isn't comparable to a raw science frame's, so independent
+#    scaling either starved the science side of good calibration stars or
+#    still let template spikes through.
+#  - Widening the general validity ceiling (iu/tu) by a lot (thousands of
+#    sigma) to be "safe". Didn't fix instability, and made hotpants dramatically
+#    slower -- multi-minute runs, some effectively hanging -- so it's actively
+#    counterproductive, not just unhelpful.
+#  - Pedestal-shifting the data before calling hotpants (-ip/-tp) to move a
+#    background-subtracted image's near-zero pixels away from zero, on the
+#    theory that hotpants' Poisson noise model chokes on values near 0. Ruled
+#    out: hotpants' noise calc uses fabs(), so negative pixels alone aren't
+#    the problem, and pedestal-shifting made no difference in testing. Also
+#    confirmed background-subtracted vs. sky-included science frames fail
+#    identically -- the science image's background level isn't the cause.
+#  - A single fixed multiplier (no retry). Doesn't exist: fit quality is not
+#    a smooth function of the kernel ceiling for a given field (see below),
+#    so no constant is safe across targets -- hence the candidate ladder.
+
+
+def _background_stats(image_file, template_file):
+    """(i_sigma, i_median, t_sigma, t_median) via the row-difference estimator."""
+    from pyrt.cli.combine import calculate_background_stats
+
+    i_sigma, i_median = calculate_background_stats(astropy.io.fits.getdata(image_file))
+    t_sigma, t_median = calculate_background_stats(astropy.io.fits.getdata(template_file))
+    print(f"  Background stats: image     median={i_median:.2f}  sigma={i_sigma:.2f}")
+    print(f"                     template  median={t_median:.2f}  sigma={t_sigma:.2f}")
+    return i_sigma, i_median, t_sigma, t_median
+
+
+def _hotpants_thresholds(i_sigma, i_median, t_sigma, t_median, kernel_sigma_mult):
+    """Build -il/-iu/-iuk/-tl/-tu/-tuk for one kernel_sigma_mult candidate."""
+    kernel_ceil = t_median + kernel_sigma_mult * t_sigma
+    return {
+        "il":  i_median - FLOOR_SIGMA_MULT * i_sigma,
+        "iu":  i_median + CEIL_SIGMA_MULT * i_sigma,
+        "iuk": kernel_ceil,
+        "tl":  t_median - FLOOR_SIGMA_MULT * t_sigma,
+        "tu":  t_median + CEIL_SIGMA_MULT * t_sigma,
+        "tuk": kernel_ceil,
+    }
+
+
+def _diffim_is_stable(diffim_file, sci_sigma, factor=200.0):
+    """Sanity-check a hotpants difference image.
+
+    A converged fit's residuals should stay within roughly the input noise
+    level; a degenerate fit (near-singular kernel matrix, too few or badly
+    chosen stamps) produces huge swings (1e4-1e6 ADU) even though hotpants
+    still exits 0 and prints SUCCESS -- it doesn't detect its own failure.
+    Compare a 1st/99th-percentile-clipped stdev against a generous multiple
+    of the science image's own background sigma.
+    """
+    data = astropy.io.fits.getdata(diffim_file)
+    finite = data[np.isfinite(data)]
+    if finite.size == 0:
+        return False
+    lo, hi = np.percentile(finite, [1, 99])
+    clipped_std = np.std(np.clip(finite, lo, hi))
+    return clipped_std < factor * sci_sigma
+
+
+def prepare_and_subtract(science_file, outfile, kernel_sigma_mult=None):
     """Reproject PS1 master template and run hotpants -> outfile.
 
     Reads TARGET (or OBJECT) and FILTER from the science image header to
@@ -104,19 +211,44 @@ def prepare_and_subtract(science_file, outfile):
             print(f"ERROR: pyrt-combine failed:\n{result.stderr}", file=sys.stderr)
             return False
 
-        print(f"Running hotpants  {os.path.basename(science_file)} → {os.path.basename(outfile)}")
-        result = subprocess.run([
-            hotpants,
-            "-il", "-10000", "-iu", "10000",
-            "-c", "t", "-n", "i",
-            "-tl", "-10000", "-tu", "20000",
-            "-inim",   science_file,
-            "-tmplim", template_reproj,
-            "-outim",  outfile,
-        ], capture_output=True, text=True)
+        i_sigma, i_median, t_sigma, t_median = _background_stats(science_file, template_reproj)
 
-        if result.returncode != 0:
-            print(f"ERROR: hotpants failed:\n{result.stderr}", file=sys.stderr)
+        # Try the user's/default candidate first, then fall back down the
+        # standard ladder (skipping it there if it's a duplicate).
+        candidates = [kernel_sigma_mult] if kernel_sigma_mult is not None else []
+        candidates += [c for c in KERNEL_SIGMA_CANDIDATES if c not in candidates]
+
+        for attempt, mult in enumerate(candidates, 1):
+            thresh = _hotpants_thresholds(i_sigma, i_median, t_sigma, t_median, mult)
+            print(f"Running hotpants (attempt {attempt}/{len(candidates)}, kernel-sigma-mult={mult:g})"
+                  f"  {os.path.basename(science_file)} → {os.path.basename(outfile)}")
+            print(f"  thresholds: il={thresh['il']:.0f} iu={thresh['iu']:.0f} iuk={thresh['iuk']:.0f}"
+                  f"  tl={thresh['tl']:.0f} tu={thresh['tu']:.0f} tuk={thresh['tuk']:.0f}")
+            result = subprocess.run([
+                hotpants,
+                "-il", f"{thresh['il']:.3f}", "-iu", f"{thresh['iu']:.3f}", "-iuk", f"{thresh['iuk']:.3f}",
+                "-c", "t", "-n", "i",
+                "-tl", f"{thresh['tl']:.3f}", "-tu", f"{thresh['tu']:.3f}", "-tuk", f"{thresh['tuk']:.3f}",
+                "-inim",   science_file,
+                "-tmplim", template_reproj,
+                "-outim",  outfile,
+            ], capture_output=True, text=True)
+
+            if result.returncode != 0:
+                print(f"  hotpants exited with an error — trying next candidate:\n{result.stderr}",
+                      file=sys.stderr)
+                continue
+
+            if _diffim_is_stable(outfile, i_sigma):
+                print(f"  Difference image looks stable (kernel-sigma-mult={mult:g}).")
+                break
+
+            print("  Difference image looks unstable (degenerate kernel fit) — trying next candidate.")
+        else:
+            print(f"ERROR: hotpants did not converge to a stable fit after {len(candidates)} attempts "
+                  f"(tried kernel-sigma-mult={candidates}).\n"
+                  f"       Inspect {outfile} and/or try running hotpants by hand with different "
+                  f"-iuk/-tuk.", file=sys.stderr)
             return False
 
     print(f"Subtracted image: {outfile}")
@@ -132,12 +264,17 @@ def read_options(args=sys.argv[1:]):
                         help="Force aperture for both phcat runs, overriding auto-selection")
     parser.add_argument("--max-target-dist", type=float, default=10.0,
                         help="Max pixel distance to accept as target detection (default: 10)")
+    parser.add_argument("--kernel-sigma-mult", type=float, default=None,
+                        help="How many background-sigma above sky a pixel may reach and still be "
+                             "used for hotpants' kernel fit (-iuk/-tuk); tried first, before the "
+                             f"automatic fallback ladder {KERNEL_SIGMA_CANDIDATES}")
     parser.add_argument("files", nargs="+", type=str,
                         help="Original (unsubtracted) FITS files to process")
     return parser.parse_args(args)
 
 
-def run_one(file, noiraf=False, aperture_override=None, max_target_dist=10.0):
+def run_one(file, noiraf=False, aperture_override=None, max_target_dist=10.0,
+            kernel_sigma_mult=None):
     base = os.path.splitext(file)[0]
     hfile = base + "h.fits"
 
@@ -147,7 +284,7 @@ def run_one(file, noiraf=False, aperture_override=None, max_target_dist=10.0):
 
     if not os.path.exists(hfile):
         print(f"No hotpants image found — running template preparation and subtraction")
-        if not prepare_and_subtract(file, hfile):
+        if not prepare_and_subtract(file, hfile, kernel_sigma_mult=kernel_sigma_mult):
             return False
 
     # ------------------------------------------------------------------ #
@@ -273,7 +410,8 @@ def main():
     ok = True
     for f in opts.files:
         if not run_one(f, noiraf=opts.noiraf, aperture_override=opts.aperture,
-                   max_target_dist=opts.max_target_dist):
+                   max_target_dist=opts.max_target_dist,
+                   kernel_sigma_mult=opts.kernel_sigma_mult):
             ok = False
     sys.exit(0 if ok else 1)
 
