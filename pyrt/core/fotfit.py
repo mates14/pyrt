@@ -117,6 +117,10 @@ class fotfit(termfit.termfit):
         if self.fit_xy:
             self.fitvalues = np.append(self.fitvalues, np.zeros(2*len(self.zero)))
         ret = termfit.termfit.fit(self, data)
+        # Covariance assumes the input errors are right; when the scatter is
+        # larger than they promise (WSSR/NDF > 1), inflate the parameter errors
+        if self.wssrndf > 1:
+            self.fiterrors = np.asarray(self.fiterrors) * np.sqrt(self.wssrndf)
         return ret
 
     def zero_val(self):
@@ -400,10 +404,11 @@ class fotfit(termfit.termfit):
         return np.abs(y - self.model(values, data))
 
     def fit_residuals(self, values, data):
-        """residuals for fitting with robust weighting - prioritizes bright stars"""
+        """residuals minimized by the fit (1/err weighted, optionally Cauchy-delinearized)"""
         mc, airmass, coord_x, coord_y, color1, color2, color3, color4, img, y, err, cat_x, cat_y, airmass_abs = data
-        # Higher power of err prioritizes bright stars during fitting
-        dist = np.abs((y - self.model(values, data))/np.power(err,2.5))
+        # Plain 1/err weighting; the former err^2.5 biased Z towards stars that
+        # scattered bright (MAGERR_AUTO is measured from the same noisy flux)
+        dist = np.abs((y - self.model(values, data))/err)
         if self.delin:
             return self.cauchy_delin(dist)
         else:
