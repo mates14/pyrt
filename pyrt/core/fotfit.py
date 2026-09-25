@@ -106,6 +106,18 @@ class fotfit(termfit.termfit):
 
         return output
 
+    def term_bounds(self, terms):
+        """F<n> flux weights have no physical meaning outside [0,1]; leave
+        every other term type unbounded, matching prior behaviour."""
+        bounds = []
+        for term in terms:
+            base_term = term.split(':')[0]
+            if len(base_term) >= 2 and base_term[0] == 'F' and base_term[1:].isdigit():
+                bounds.append((0.0, 1.0))
+            else:
+                bounds.append((-np.inf, np.inf))
+        return bounds
+
     def set_filter_info(self, base_filter, color_schema):
         """Store filter information used in the fit"""
         self.base_filter = base_filter
@@ -284,11 +296,62 @@ class fotfit(termfit.termfit):
 
         radius2 = coord_x**2 + coord_y**2
 
+        val2 = np.concatenate((values[0:len(self.fitterms)], np.array(self.fixvalues)))
+
+        # --- Linear-in-flux passband reconstruction (F1..Fn terms) ---
+        # Distinct from the P<letter> terms (polynomial-in-color, magnitude-space,
+        # e.g. PC/PD/PE): F<n> gives the schema filter at 1-indexed position n a
+        # direct flux weight in [0,1]; the reference filter (color_schema[1]) is
+        # not given its own term, it implicitly gets 1 minus whatever the other
+        # F terms sum to. The combination happens arithmetically in flux, so a
+        # filter that isn't part of the model (weight 0, or simply no F<n> term
+        # fit for it) contributes nothing -- unlike a magnitude-space color term,
+        # this cannot diverge when one input is a non-detection.
+        # Replaces `mc` before anything else runs, so all other additive terms
+        # below (Z, spatial terms, XC/SC, ...) layer on top exactly as before.
+        flux_weights = {}
+        for term, value in zip(self.fitterms + self.fixterms, val2):
+            base_term = term.split(':')[0]
+            if len(base_term) >= 2 and base_term[0] == 'F' and base_term[1:].isdigit():
+                flux_weights[int(base_term[1:])] = value
+
+        if flux_weights:
+            if self.color_schema is None:
+                raise ValueError("F<n> terms require color_schema to be set (see set_filter_info)")
+            schema = self.color_schema
+            n = len(schema)
+            base_idx = 1  # matches the convention already assumed by XC/SC/P<letter>
+            colors = [color1, color2, color3, color4][:n - 1]
+
+            if (base_idx + 1) in flux_weights:
+                raise ValueError(
+                    f"F{base_idx + 1} names the reference filter ({schema[base_idx]}); "
+                    f"it has no free weight of its own, it gets 1 - sum(other F terms). "
+                    f"Remove F{base_idx + 1} from the term list."
+                )
+
+            # Catalog magnitudes relative to the reference filter, m_k - m_ref
+            # (mc is the instrumental magnitude, it must not enter here)
+            dmags = [None] * n
+            dmags[base_idx] = 0.0
+            for k in range(base_idx, 0, -1):
+                dmags[k - 1] = dmags[k] + colors[k - 1]      # color_k = f[k-1] - f[k]
+            for k in range(base_idx + 1, n):
+                dmags[k] = dmags[k - 1] - colors[k - 1]
+
+            base_weight = 1.0 - sum(flux_weights.values())
+            flux = base_weight * 10 ** (-0.4 * dmags[base_idx])
+            for one_indexed, w in flux_weights.items():
+                flux = flux + w * 10 ** (-0.4 * dmags[one_indexed - 1])
+            band_minus_ref = -2.5 * np.log10(np.clip(flux, 1e-300, None))
+
+            # The instrument measures m_band, the model predicts the catalog
+            # m_ref = m_inst + Z + (m_ref - m_band)
+            mc = mc - band_minus_ref
+
         # Apply reference magnitude offset for numerical stability
         # Calculate base magnitude relative to reference point
         model = mct = mc + 10
-
-        val2 = np.concatenate((values[0:len(self.fitterms)], np.array(self.fixvalues)))
 
         # Variables to collect rational function parameters
         rational_s = rational_o = rational_c = 0
@@ -342,6 +405,8 @@ class fotfit(termfit.termfit):
                         pterm *= components[a]**n
                         n = 1
                 model[img_mask] += pterm[img_mask]
+            elif term_to_process[0] == 'F' and term_to_process[1:].isdigit():
+                pass  # handled by the flux-combination pre-pass above
             elif term_to_process == 'GA': ga = value
             elif term_to_process == 'GW': gw = 10**value
             elif term_to_process == 'EA': ea = value

@@ -288,11 +288,12 @@ def perform_photometric_fitting(data, options, metadata):
         base_term = term.split(':')[0] if ':' in term else term
         base_terms.add(base_term)
 
-    if 'SC' in base_terms or 'XC' in base_terms:
+    has_flux_terms = any(len(t) >= 2 and t[0] == 'F' and t[1:].isdigit() for t in base_terms)
+    if 'SC' in base_terms or 'XC' in base_terms or has_flux_terms:
         schema_name = metadata[0]['PHSCHEMA']
         if schema_name and schema_name in options.filter_schemas:
             schema = options.filter_schemas[schema_name]
-            required_ref_filter = schema[1]  # SC/XC require reference filter at position 1
+            required_ref_filter = schema[1]  # SC/XC/F<n> require reference filter at position 1
             current_ref_filter = metadata[0]['PHFILTER']
 
             if current_ref_filter != required_ref_filter:
@@ -323,6 +324,17 @@ def perform_photometric_fitting(data, options, metadata):
                         zp_term = f"Z:{i}"
                         initial_values[zp_term] = zp
                     print(f"Updated per-image zeropoints: Z:1..Z:{len(zeropoints)}")
+
+            # F<n> terms need to map schema positions back to actual filters at
+            # model-evaluation time; SC/XC don't strictly need this (they only
+            # consume the already-computed color1..color4 columns), but there's
+            # no harm in giving them the same information.
+            ffit.set_filter_info(required_ref_filter, schema)
+        elif has_flux_terms:
+            raise ValueError(
+                f"F<n> terms require a known photometric schema, but "
+                f"PHSCHEMA={schema_name!r} is not in the configured filter_schemas."
+            )
 
     # Merge initial values from model file and command line
     combined_initial_values = {**initial_values, **parsed_terms['initial_values']}

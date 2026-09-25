@@ -184,12 +184,34 @@ class termfit:
         """
         return len(stat_residuals) - len(self.fitvalues)
 
+    def term_bounds(self, terms):
+        """Per-term (lower, upper) bounds for fitting. Default: unbounded.
+
+        Override in a subclass to constrain specific term types (e.g. fotfit
+        restricts F<n> flux-weight terms to [0,1], since they have no
+        physical meaning outside that range).
+        """
+        return [(-np.inf, np.inf) for _ in terms]
+
     def fit(self, data):
         """fit data to the defined model"""
         # Do NOT reset delin here — caller (e.g. refine_fit) may have enabled Cauchy
-        # Use fit_residuals for robust fitting (prioritizes bright stars)
+        # Minimize fit_residuals (may differ from residuals(), e.g. Cauchy delin)
+        bounds = self.term_bounds(self.fitterms)
+        lower = [b[0] for b in bounds]
+        upper = [b[1] for b in bounds]
+        # An initial guess can come from a previous (possibly unconstrained,
+        # e.g. pre-existing RESPONSE header) fit and may violate the current
+        # bounds; least_squares raises immediately if so rather than just
+        # projecting it in, so clamp explicitly.
+        clamped = np.clip(self.fitvalues, lower, upper)
+        for term, orig, new in zip(self.fitterms, self.fitvalues, clamped):
+            if orig != new:
+                logging.warning(f"Initial value for '{term}' ({orig}) outside bounds, "
+                                 f"clamped to {new}")
+        self.fitvalues = list(clamped)
         res = fit.least_squares(self.fit_residuals, self.fitvalues,\
-            args=[data], ftol=1e-15)
+            args=[data], ftol=1e-15, bounds=(lower, upper))
         self.fitvalues = []
         for x in res.x:
             self.fitvalues += [ x ]
