@@ -463,6 +463,13 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
     initial_wssrndf, initial_mask, initial_fitted_values, initial_ndf = try_term_robust(ffit, None, always_selected or [], fd.fotparams, initial_values_for_direct if 'initial_values_for_direct' in locals() else None)
     print(f"[DEBUG] Initial fit took {time.time()-fit_start:.1f}s, WSSR/NDF={initial_wssrndf:.3f}")
 
+    if initial_mask is None:
+        raise RuntimeError(
+            f"Initial fit with always-selected terms {always_selected} failed "
+            f"(see 'Fitting failed for terms ...' message above for the cause) "
+            f"-- cannot continue stepwise regression without a photometry mask."
+        )
+
     # Store the photometry mask in the data object for plotting
     data.add_mask('photometry', initial_mask)
     best_wssrndf = initial_wssrndf
