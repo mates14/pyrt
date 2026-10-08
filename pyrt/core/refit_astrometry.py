@@ -915,6 +915,12 @@ def refit_astrometry_multi(alldet, data, options):
             if term in det0.meta:
                 zpntest.fitterm([term], [float(det0.meta[term])])
 
+    if options.refit_zpn or options.szp:
+        if not getattr(options, 'zpn_from_camera', False):
+            seed_zpn_from_header(zpntest, det0.meta)
+        for n, det in enumerate(alldet):
+            reseat_crval(zpntest, det.meta, n)
+
     # --- Initial global fit on all photometry-matched stars ---
     data.use_mask('photometry')
     ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy', 'img')
@@ -1015,6 +1021,9 @@ def refit_astrometry(det, data, options):
     if options.refit_zpn or options.szp:
         # Full refit: apply hardcoded camera-specific CRPIX and distortion priors
         setup_camera_params(zpntest, camera, options.refit_zpn, telescope, meta=det.meta)
+        if not getattr(options, 'zpn_from_camera', False):
+            seed_zpn_from_header(zpntest, det.meta)
+        reseat_crval(zpntest, det.meta)
     else:
         # Gentle refit: fix CRPIX at header values (already loaded by setup_initial_wcs)
         for term in ['CRPIX1', 'CRPIX2']:
@@ -1155,6 +1164,45 @@ def setup_initial_wcs(zpntest, meta):
             keys_invalid = True
 
     return keys_invalid
+
+def _term_value(zpntest, term):
+    for t, v in zip(zpntest.fitterms + zpntest.fixterms, zpntest.fitvalues + zpntest.fixvalues):
+        if t == term:
+            return v
+    return None
+
+def _set_term_value(zpntest, term, value):
+    """Change a term's value, keeping it fitted or fixed as it is."""
+    if term in zpntest.fitterms:
+        zpntest.fitvalues[zpntest.fitterms.index(term)] = value
+    elif term in zpntest.fixterms:
+        zpntest.fixvalues[zpntest.fixterms.index(term)] = value
+
+def seed_zpn_from_header(zpntest, meta):
+    """With -z, start CRPIX/PV2_* from a ZPN solution already in the header (e.g. a
+    previous, possibly partial pass) instead of the camera priors.  Only the values of
+    terms the camera model defines are taken; their fit/fix status stays."""
+    if 'ZPN' not in str(meta.get('CTYPE1', '')):
+        return
+    for term in zpntest.fitterms + zpntest.fixterms:
+        if (term.startswith('PV2_') or term in ('CRPIX1', 'CRPIX2')) and term in meta:
+            _set_term_value(zpntest, term, float(meta[term]))
+    logging.info(f"ZPN start from header: CRPIX=({_term_value(zpntest, 'CRPIX1')}, "
+                 f"{_term_value(zpntest, 'CRPIX2')}) PV2_3={_term_value(zpntest, 'PV2_3')}")
+
+def reseat_crval(zpntest, meta, img_idx=0):
+    """The header CRVAL belongs to the header CRPIX.  When the model starts from a
+    different CRPIX (camera prior), move CRVAL to the sky position of that pixel."""
+    crpix1, crpix2 = _term_value(zpntest, 'CRPIX1'), _term_value(zpntest, 'CRPIX2')
+    if crpix1 is None or crpix2 is None:
+        return
+    if (crpix1, crpix2) == (meta.get('CRPIX1'), meta.get('CRPIX2')):
+        return
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        ra, dec = astropy.wcs.WCS(meta, relax=True).all_pix2world(crpix1, crpix2, 1)
+    _set_term_value(zpntest, f"CRVAL1:{img_idx}", float(ra))
+    _set_term_value(zpntest, f"CRVAL2:{img_idx}", float(dec))
 
 def _crpix_for_crop(crpix1, crpix2, meta):
     """Adjust full-frame CRPIX values to sub-frame pixel coordinates using LTV/LTM."""

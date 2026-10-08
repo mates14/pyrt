@@ -157,6 +157,8 @@ def parse_arguments(args=None):
     parser.add_argument("-z", "--refit-zpn", action='store_true', help="Refit the ZPN radial terms")
     parser.add_argument("--save-wcs", nargs='?', const=True, default=False, metavar='FILE',
                         help="Write WCS solution to .wcs file (astrometry.net format). Without FILE argument, uses input filename with .wcs extension")
+    parser.add_argument("--zpn-from-camera", action='store_true',
+                        help="With -z, start from the hardcoded camera ZPN priors even if the header already holds a ZPN solution")
     parser.add_argument("--keep-bad-wcs", action='store_true',
                         help="Write the astrometric solution even when judged ASTQUAL=BAD (for debugging)")
     parser.add_argument("-Z", "--single-zeropoint", action='store_true', help="Use single common zeropoint instead of per-image zeropoints (enables all-sky fitting)")
