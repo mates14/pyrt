@@ -66,6 +66,7 @@ def read_options(args=sys.argv[1:]):
     parser.add_argument("--target-photometry", action='store_true', default=True,
                         help="Enable direct photometry of RTS2 target coordinates (default: True)")
     parser.add_argument("--force-regen", action='store_true', help="Force regeneration by running phcat even if .cat exists")
+    parser.add_argument("-g", "--gain", help="Override detector gain (epadu, e-/ADU) passed through to phcat instead of trusting the FITS GAIN keyword", type=float)
     parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
     opts = parser.parse_args(args)
     return opts
@@ -249,7 +250,7 @@ def get_limits(det, verbose=False):
             print(f"Warning: Error model fitting failed: {e}")
         # Don't set LIMFLX3/LIMFLX10/DLIMFLX3 - downstream code can check if they exist
 
-def open_files(arg, verbose=False, force_regen=False):
+def open_files(arg, verbose=False, force_regen=False, gain=None):
     """sort out the argument and open appropriate files"""
     # either the argument may be a fits file or it may be an output of sextractor
     detf, det = try_sex(arg, verbose)
@@ -269,18 +270,22 @@ def open_files(arg, verbose=False, force_regen=False):
         detf, det = try_ecsv(os.path.splitext(arg)[0] + ".cat", verbose)
 
     # Force regeneration if requested - run phcat even if catalog exists
-    if force_regen and det is not None:
+    # An explicit gain override also forces regeneration: a cached .cat may have
+    # been produced with a different (e.g. bad header) gain, and silently reusing
+    # it would make -g/--gain a no-op.
+    if (force_regen or gain is not None) and det is not None:
         if verbose: print(f"Force regeneration requested, will run phcat to regenerate catalog")
         det = None  # Force phcat to run
 
     if det is None: # os.system does not raise an exception if it fails
         # Try installed command first, fall back to module for source runs
         import shutil
+        gain_flag = f" -g {gain}" if gain is not None else ""
         if shutil.which("pyrt-phcat"):
-            cmd = f"pyrt-phcat {arg}"
+            cmd = f"pyrt-phcat {arg}{gain_flag}"
         else:
             # Fall back to running as module (for source/development)
-            cmd = f"{sys.executable} -m pyrt.cli.phcat {arg}"
+            cmd = f"{sys.executable} -m pyrt.cli.phcat {arg}{gain_flag}"
 
         try:
             if verbose: print(f"Running {cmd}")
@@ -530,7 +535,7 @@ def main():
     for arg in options.files:
 
         try:
-            det,filef,fitsfile = open_files(arg, verbose=options.verbose, force_regen=options.force_regen)
+            det,filef,fitsfile = open_files(arg, verbose=options.verbose, force_regen=options.force_regen, gain=options.gain)
         except FileNotFoundError:
             continue
 
