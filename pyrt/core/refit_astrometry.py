@@ -1269,15 +1269,18 @@ def setup_camera_params(zpntest, camera, refit_zpn, telescope='', meta=None):
             zpntest.fixterm(["PV2_3", "PV2_5"], [38.561185, 3461.163423])
             zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(1882.796706, 2055.012734)))
 
+    # Based on common fit of 100 random frames from 6.april 2026:
+    # PV2_3=0.1272 ± 0.0008, PV2_5 = 0.1689 +/- 0.0165
+    # Error model: ASTSIGMA=0.0730 px (floor), ASTVAR=2.0851, ASTSCATT=0.2759 px
     if camera in ( "makak2",  "makak"):
         if refit_zpn:
-            zpntest.fitterm(["PV2_3", "PV2_5"], [0.132, 0.569])
-#            zpntest.fitterm(["PV2_3", "PV2_5"], [0.131823, 0.282538])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(813.6, 622.8)))
+            zpntest.fitterm(["PV2_3", "PV2_5"], [0.1272, 0.1689])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(609.2, 598.0)))
         else:
-            zpntest.fixterm(["PV2_3", "PV2_5"], [0.132, 0.569])
-#            zpntest.fixterm(["PV2_3", "PV2_5"], [0.131823, 0.282538])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(813.6, 622.8)))
+            zpntest.fixterm(["PV2_3", "PV2_5"], [0.1272, 0.1689]) 
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(609.2, 598.0)))
+            
+            # zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(813.6, 622.8)))
 
     if camera == "NF4":
         zpntest.fitterm(["PV2_3"], [65.913305900171])
