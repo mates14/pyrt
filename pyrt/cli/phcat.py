@@ -159,6 +159,8 @@ def run_iraf(cmdfile: str) -> bool:
             capture_output=True,
             check=True
         )
+        print(f"IRAF stdout: {result.stdout}")
+        print(f"IRAF stderr: {result.stderr}")
         return True
     except subprocess.CalledProcessError as e:
         print(f"IRAF command failed: {e}")
