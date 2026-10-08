@@ -1231,8 +1231,14 @@ def setup_camera_params(zpntest, camera, refit_zpn, telescope='', meta=None):
 
     if camera == "C0" and telescope == "D50":
         if refit_zpn:
-            zpntest.fitterm(["PV2_3"], [300])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(543, 530)))
+            # until vii/26
+            # zpntest.fitterm(["PV2_3"], [300])
+            # zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(543, 530)))
+            # solution from 15.8.2026
+            # CRPIX1    = 547.966987321363 / ± 0.004418205312 (0.000806%)
+            # CRPIX2    = 564.348863674982 / ± 0.015983159117 (0.002832%)
+            zpntest.fitterm(["PV2_3"], [260])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(548, 565)))
         else:
             zpntest.fixterm(["PV2_3"], [300])
             zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(543, 530)))
