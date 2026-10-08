@@ -879,11 +879,15 @@ def main():
         # Drop off-frame junk detections whose pixel coordinates map to NaN sky
         # coordinates through the WCS. Keeping them poisons the output .ecsv and
         # trips up any downstream consumer (e.g. KDTree in pyrt-ecsv-target).
-        finite = np.isfinite(det['ALPHA_J2000']) & np.isfinite(det['DELTA_J2000'])
+        finite = np.asarray(np.isfinite(det['ALPHA_J2000']) & np.isfinite(det['DELTA_J2000']))
         n_bad = int(np.count_nonzero(~finite))
         if n_bad:
             logging.warning(f"Dropping {n_bad} detection(s) with non-finite sky coordinates (off-frame)")
             det = det[finite]
+            # matches is one per-detection entry (from query_radius), aligned to
+            # the pre-drop det; keep it aligned or make_pairs_to_fit blows up with
+            # a boolean-index length mismatch.
+            matches = matches[finite]
 
         logging.info("Reference filter is %s, Photometric schema: %s, Photometric system: %s"\
             %(det.meta['PHFILTER'],det.meta['PHSCHEMA'],det.meta['PHSYSTEM']))
