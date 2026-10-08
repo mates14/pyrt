@@ -208,6 +208,9 @@ class zpnfit(termfit.termfit):
             hdr['ASTWSSR'] = (self.wssrndf, 'Astrometric WSSR/NDF')
         if hasattr(self, 'scatter') and not np.isnan(self.scatter):
             hdr['ASTSCATT'] = (self.scatter, 'Astrometric scatter median(|res|)/0.67 (pixels)')
+        if hasattr(self, 'astqual'):
+            hdr['ASTQUAL'] = (self.astqual[img_idx], 'Astrometric solution verdict OK/PARTIAL/BAD')
+            hdr['ASTCOVER'] = (self.astcover[img_idx], 'Chip fraction covered by fitted stars')
 
         # Create primary HDU with no data and write
         primary_hdu = fits.PrimaryHDU(header=hdr)
@@ -307,6 +310,10 @@ class zpnfit(termfit.termfit):
                     set_value('ASTSCATT', self.scatter)  # Actual scatter: median(|res|)/0.67
                 except:
                     pass
+
+            if hasattr(self, 'astqual'):
+                set_value('ASTQUAL', self.astqual[img_idx])    # OK / PARTIAL / BAD
+                set_value('ASTCOVER', self.astcover[img_idx])  # chip fraction covered by fitted stars
 
             # Write fixed and fitted terms
             for term, value in zip(self.fixterms + self.fitterms,
