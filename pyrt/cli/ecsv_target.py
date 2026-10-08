@@ -5,11 +5,37 @@ import sys
 import argparse
 import numpy as np
 from astropy.table import Table
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import SkyCoord, Angle
 import astropy.units as u
 from sklearn.neighbors import KDTree
 import astropy.wcs
 import time
+
+
+def _is_sexagesimal(value):
+    """Detect sexagesimal input: contains a colon, or a space between numbers."""
+    value = value.strip()
+    return ':' in value or ' ' in value
+
+
+def parse_ra(value):
+    """Parse a target RA given as decimal degrees, 'HH:MM:SS', or 'HH MM SS'."""
+    try:
+        if _is_sexagesimal(value):
+            return Angle(value, unit=u.hourangle).degree
+        return float(value)
+    except (ValueError, TypeError) as e:
+        raise argparse.ArgumentTypeError(f"Invalid RA value '{value}': {e}")
+
+
+def parse_dec(value):
+    """Parse a target Dec given as decimal degrees, 'DD:MM:SS', or 'DD MM SS'."""
+    try:
+        if _is_sexagesimal(value):
+            return Angle(value, unit=u.deg).degree
+        return float(value)
+    except (ValueError, TypeError) as e:
+        raise argparse.ArgumentTypeError(f"Invalid Dec value '{value}': {e}")
 
 def find_closest_object(data, ra, dec, id_limit):
     """
@@ -251,8 +277,10 @@ def process_ecsv_file(ecsv_file, ra, dec, id_limit, append_to_file=None, verbose
 def main():
     # Set up command-line argument parsing
     parser = argparse.ArgumentParser(description="Extract photometric or astrometric data for a target from ECSV files.")
-    parser.add_argument("ra", type=float, help="Target right ascension in degrees")
-    parser.add_argument("dec", type=float, help="Target declination in degrees")
+    parser.add_argument("ra", type=parse_ra,
+                        help="Target right ascension: decimal degrees, 'HH:MM:SS', or 'HH MM SS' (quote if it contains spaces)")
+    parser.add_argument("dec", type=parse_dec,
+                        help="Target declination: decimal degrees, 'DD:MM:SS', or 'DD MM SS' (quote if it contains spaces)")
     parser.add_argument("files", nargs="+", help="ECSV files to process")
     parser.add_argument("--id-limit", type=float, default=3.0,
                         help="Identification limit in arcseconds (default: 3.0)")
