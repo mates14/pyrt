@@ -211,7 +211,7 @@ class termfit:
                                  f"clamped to {new}")
         self.fitvalues = list(clamped)
         res = fit.least_squares(self.fit_residuals, self.fitvalues,\
-            args=[data], ftol=1e-15, bounds=(lower, upper))
+            args=[data], ftol=1e-15, x_scale='jac', bounds=(lower, upper))
         self.fitvalues = []
         for x in res.x:
             self.fitvalues += [ x ]
