@@ -18,6 +18,7 @@ def read_options(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
     parser.add_argument("-a", "--aperture", help="Override an automated aperture choice", type=float)
     parser.add_argument("-f", "--fwhm", help="Override automatic FWHM estimation for convolution matrix (useful for pathological images)", type=float)
+    parser.add_argument("-g", "--gain", help="Override detector gain (epadu, e-/ADU) instead of trusting the FITS GAIN keyword", type=float)
     parser.add_argument("-I", "--noiraf", help="Do not use IRAF", action='store_true')
     parser.add_argument("-b", "--background", help="Save the background check image", action='store_true')
     parser.add_argument("-B", "--background-subtract", help="Save background, subtract it from image, and remove background file", action='store_true')
@@ -31,9 +32,28 @@ def gauss(r, sigma):
     '''gauss exponential'''
     return 1./sigma/np.sqrt(2*np.pi) * np.exp( -np.power(r,2)/2/sigma/sigma )
 
+def get_accnum(file):
+    '''Number of readouts summed on-chip (Andor Accumulate/Kinetic mode), 1 otherwise.
+    Summing keeps the gain, but bias, saturation and read noise scale with it.'''
+    hdr = astropy.io.fits.getheader(file)
+    try:
+        if str(hdr.get('ACQMODE', '')).strip().lower() in ('accumulate', 'kinetics'):
+            return max(int(hdr['ACCNUM']), 1)
+    except (KeyError, ValueError):
+        pass
+    return 1
+
+def get_saturation(file):
+    '''Saturation level in ADU: SATURATE keyword if present, else 60000 per summed readout'''
+    try: return float(astropy.io.fits.getval(file, "SATURATE"))
+    except (KeyError, ValueError): return 60000.0 * get_accnum(file)
+
 def do_matrix(file, fwhm):
     '''Generate sextractor convolution matrix of a given FWHM'''
     # Clamp FWHM to max 5 to prevent oversized convolution matrices (>15x15)
+    if not fwhm > 0:
+        print(f"Warning: invalid FWHM {fwhm}, using 2.0 for the convolution matrix")
+        fwhm = 2.0
     fwhm_clamped = min(fwhm, 5.0)
     if fwhm != fwhm_clamped:
         print(f"Warning: FWHM clamped from {fwhm:.2f} to {fwhm_clamped:.2f} to avoid oversized convolution matrix")
@@ -70,6 +90,7 @@ def call_sextractor(file, fwhm, bg=False):
     some_file.write(f"PARAMETERS_NAME  {base}.param\n")
     some_file.write(f"FILTER_NAME      {base}.conv\n")
     some_file.write(f"CATALOG_NAME     {base}.cat\n")
+    some_file.write(f"SATUR_LEVEL      {get_saturation(file):.0f}\n")
     # place this under some cmd-line option...
     if bg:
         some_file.write(f"checkimage_name  {base}-bg.fits\n")
@@ -144,7 +165,7 @@ def run_iraf(cmdfile: str) -> bool:
         print(f"Error output: {e.stderr}")
         return False
 
-def call_iraf(file, det, fwhm, aperture=None):
+def call_iraf(file, det, fwhm, aperture=None, gain_override=None):
     """call iraf/digiphot/daophot/phot on a file"""
     base = os.path.splitext(file)[0]
 
@@ -167,16 +188,23 @@ def call_iraf(file, det, fwhm, aperture=None):
     # D50 Andor gain and rnoise, this stuff needs to be seriously improved
     try: ncombine = astropy.io.fits.getval(file, "NCOMBINE")
     except: ncombine = 1.0
-    try: epadu = astropy.io.fits.getval(file, "GAIN")
-    except: epadu = 0.81 * ncombine
-    
-    rnoise = 4.63 / np.sqrt(ncombine)
-    print(f"ape={ape} anu={anu} danu={danu}")
+    if gain_override is not None:
+        epadu = gain_override
+        print(f"Using command-line gain override: epadu={epadu}")
+    else:
+        try: epadu = astropy.io.fits.getval(file, "GAIN")
+        except: epadu = 0.81 * ncombine
+
+    # on-chip accumulation: gain unchanged, read noise adds in quadrature
+    accnum = get_accnum(file)
+    rnoise = 4.63 * np.sqrt(accnum) / np.sqrt(ncombine)
+    datamax = get_saturation(file)
+    print(f"ape={ape} anu={anu} danu={danu} accnum={accnum} rnoise={rnoise:.2f} datamax={datamax:.0f}")
 
     script = f"""noao
 digiphot
 daophot
-phot {file} {base}.coo.1 {base}.mag.1 readnoi={rnoise} epadu={epadu} calgori=none salgori=mode annulus={anu} dannulu={danu} apertur={ape} zmag=0 sigma=0 veri- datamax=60000
+phot {file} {base}.coo.1 {base}.mag.1 readnoi={rnoise} epadu={epadu} calgori=none salgori=mode annulus={anu} dannulu={danu} apertur={ape} zmag=0 sigma=0 veri- datamax={datamax:.0f}
 
 
 
@@ -210,6 +238,8 @@ def get_fwhm_from_detections(det, min_good_detections=30):
     float - Median FWHM value (using nanmedian), or NaN if no valid data
     """
 
+    # saturated objects (FLAGS&4) get FWHM_IMAGE=0 from sextractor
+    det = det[ np.all( [ det['FWHM_IMAGE'] > 0, (det['FLAGS'] & 4) == 0 ], axis=0) ]
     sel = np.all( [ det['X_IMAGE'] < det.meta['IMAGEW']-32, det['Y_IMAGE'] < det.meta['IMAGEH']-32, det['X_IMAGE'] > 32, det['Y_IMAGE'] > 32 ], axis=0)
     det2 = det [ sel ]
 
@@ -244,6 +274,7 @@ def process_photometry(file: str,
                       background_subtract: bool = False,
                       target_photometry: bool = True,
                       fwhm_override: Optional[float] = None,
+                      gain_override: Optional[float] = None,
                       verbose: bool = False) -> astropy.table.Table:
     """Main photometry processing function that can be called programmatically"""
 
@@ -319,7 +350,7 @@ def process_photometry(file: str,
         det.meta['APERTURE'] = ape
         tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
     else:
-        mag, ape = call_iraf(file, det, fwhm, aperture=aperture)
+        mag, ape = call_iraf(file, det, fwhm, aperture=aperture, gain_override=gain_override)
         det.meta['APERTURE'] = ape
 
         # Verify alignment before joining
@@ -374,6 +405,7 @@ def main():
                                background_subtract=options.background_subtract,
                                target_photometry=options.target_photometry,
                                fwhm_override=options.fwhm,
+                               gain_override=options.gain,
                                verbose=True)
 
         tbl.write(base+".cat", format="ascii.ecsv", overwrite=True)

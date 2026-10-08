@@ -396,14 +396,15 @@ def main():
         # Auto-detect fits output from extension
         if output_filename.endswith('.fits') or output_filename.endswith('.fit'):
             save_as_fits = True
-    elif save_as_fits:
-        output_filename = fits_file.replace('.fits', '_8bit.fits').replace('.fit', '_8bit.fit')
-        if output_filename == fits_file:
-            output_filename = fits_file + '_8bit.fits'
     else:
-        output_filename = fits_file.replace('.fits', '.jpg').replace('.fit', '.jpg')
-        if output_filename == fits_file:  # No .fits extension found
-            output_filename = fits_file + '.jpg'
+        # Auto-generated output goes to cwd, not next to the input file
+        base, ext = os.path.splitext(os.path.basename(fits_file))
+        if ext.lower() not in ('.fits', '.fit'):  # No .fits extension found
+            base, ext = base + ext, '.fits'
+        if save_as_fits:
+            output_filename = base + '_8bit' + ext
+        else:
+            output_filename = base + '.jpg'
     
     try:
         # Load FITS file

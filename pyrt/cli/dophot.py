@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import re
 import sys
 import time
 import logging
@@ -69,6 +70,29 @@ def print_image_line(det, flt, Zo, Zoe, target=None, idnum=0):
 
     return
 
+
+# WCS keywords plus pyrt's AST* quality keys, copied together so they always describe one solution
+_WCS_KEY = re.compile(r'^(WCSAXES|CTYPE\d|CUNIT\d|CRVAL\d|CRPIX\d|CDELT\d|CROTA\d|CD\d_\d|PC\d_\d|PV\d_\d+'
+                      r'|[AB]P?_ORDER|[AB]P?_\d+_\d+|LONPOLE|LATPOLE|EQUINOX|RADESYS|AST[A-Z]+)$')
+REFUSED_TAG = "pyrt astrometric refit refused:"
+
+def write_refused_wcs(fitsfile, meta, reason):
+    """A refused refit leaves the input solution in place: copy the input (meta) WCS
+    and its AST* keys verbatim, so the header describes the WCS that is really there.
+    One HISTORY card says why; an older pyrt refusal card is replaced, not stacked
+    (astrometry.net-style HISTORY growth once overflowed headers)."""
+    with astropy.io.fits.open(fitsfile, mode='update') as hdul:
+        hdr = hdul[0].header
+        for key in [k for k in hdr.keys() if _WCS_KEY.match(k)]:
+            hdr.remove(key, ignore_missing=True, remove_all=True)
+        for key, value in meta.items():
+            if isinstance(key, str) and _WCS_KEY.match(key) and isinstance(value, (int, float, str, np.integer)):
+                hdr[key] = value
+        history = [str(h) for h in hdr.get('HISTORY', []) if not str(h).startswith(REFUSED_TAG)]
+        hdr.remove('HISTORY', ignore_missing=True, remove_all=True)
+        for h in history:
+            hdr.add_history(h)
+        hdr.add_history(f"{REFUSED_TAG} {reason}"[:72])
 
 def write_stars_file(data, ffit, imgwcs, filename="stars"):
     """
@@ -288,11 +312,12 @@ def perform_photometric_fitting(data, options, metadata):
         base_term = term.split(':')[0] if ':' in term else term
         base_terms.add(base_term)
 
-    if 'SC' in base_terms or 'XC' in base_terms:
+    has_flux_terms = any(len(t) >= 2 and t[0] == 'F' and t[1:].isdigit() for t in base_terms)
+    if 'SC' in base_terms or 'XC' in base_terms or has_flux_terms:
         schema_name = metadata[0]['PHSCHEMA']
         if schema_name and schema_name in options.filter_schemas:
             schema = options.filter_schemas[schema_name]
-            required_ref_filter = schema[1]  # SC/XC require reference filter at position 1
+            required_ref_filter = schema[1]  # SC/XC/F<n> require reference filter at position 1
             current_ref_filter = metadata[0]['PHFILTER']
 
             if current_ref_filter != required_ref_filter:
@@ -323,6 +348,17 @@ def perform_photometric_fitting(data, options, metadata):
                         zp_term = f"Z:{i}"
                         initial_values[zp_term] = zp
                     print(f"Updated per-image zeropoints: Z:1..Z:{len(zeropoints)}")
+
+            # F<n> terms need to map schema positions back to actual filters at
+            # model-evaluation time; SC/XC don't strictly need this (they only
+            # consume the already-computed color1..color4 columns), but there's
+            # no harm in giving them the same information.
+            ffit.set_filter_info(required_ref_filter, schema)
+        elif has_flux_terms:
+            raise ValueError(
+                f"F<n> terms require a known photometric schema, but "
+                f"PHSCHEMA={schema_name!r} is not in the configured filter_schemas."
+            )
 
     # Merge initial values from model file and command line
     combined_initial_values = {**initial_values, **parsed_terms['initial_values']}
@@ -922,6 +958,14 @@ def main():
                 fitsbase = os.path.splitext(fitsfile)[0]
                 newfits = fitsbase + "t.fits"
 
+                # A BAD solution is refused: t.fits and the ECSV keep the input WCS with its
+                # own AST* keys (no ASTQUAL at all if the input was never verified by pyrt)
+                refused = zpntest.astqual[img_n] == 'BAD' and not options.keep_bad_wcs
+                if refused:
+                    reason = zpntest.astreason[img_n]
+                    logging.warning(f"{fitsfile}: astrometric refit refused, input WCS kept: {reason}")
+                    det_n.meta['HISTORY'] = f"{REFUSED_TAG} {reason}"
+
                 # 1. Copy the original FITS to create the astrometrized version
                 try:
                     if os.path.isfile(newfits):
@@ -938,27 +982,35 @@ def main():
                     try:
                         for key in ['FIELD', 'PIXEL', 'FWHM']:
                             astropy.io.fits.setval(newfits, key, 0, value=det_n.meta[key])
-                        zpntest.write(newfits, img_idx=img_n)
+                        if refused:
+                            write_refused_wcs(newfits, det_n.meta, reason)
+                        else:
+                            zpntest.write(newfits, img_idx=img_n)
                     except Exception as e:
                         logging.warning(f"Failed to write WCS headers into {newfits}: {e}")
 
                 # 3. Store WCS solution into det_n.meta for downstream use
+                if refused:
+                    continue
                 try:
                     zpntest.write(det_n.meta, img_idx=img_n)
                 except Exception as e:
                     logging.warning(f"Failed to update det_n.meta with WCS solution: {e}")
 
             # imgwcs for downstream use: use last image
-            try:
-                imgwcs = astropy.wcs.WCS(zpntest.wcs(img_idx=len(alldet)-1), relax=True)
-            except Exception as e:
-                logging.warning(f"Failed to build imgwcs from final WCS solution: {e}")
+            if zpntest.astqual[-1] != 'BAD' or options.keep_bad_wcs:
+                try:
+                    imgwcs = astropy.wcs.WCS(zpntest.wcs(img_idx=len(alldet)-1), relax=True)
+                except Exception as e:
+                    logging.warning(f"Failed to build imgwcs from final WCS solution: {e}")
 
             logging.info(f"Saving astrometrized FITS took {time.time()-start:.3f}s")
 
         if options.save_wcs:
             if zpntest is not None:
                 for img_n, det_n in enumerate(alldet):
+                    if zpntest.astqual[img_n] == 'BAD' and not options.keep_bad_wcs:
+                        continue
                     if options.save_wcs is True:
                         base_filename = os.path.splitext(det_n.meta['FITSFILE'])[0]
                         wcs_filename = f"{base_filename}.wcs"

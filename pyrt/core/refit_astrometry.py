@@ -1,6 +1,7 @@
 # astrometry_refit.py
 
 import os
+import warnings
 import numpy as np
 import astropy.wcs
 #import astropy.io.fits
@@ -676,6 +677,153 @@ def compute_error_model(zpntest, data):
     return np.sqrt(S0), SC, scatter
 
 
+# Solution validity limits for assess_astrometry().  First calibration on D50/C0
+# (53457, 2026-10-06): good fits ANISO~0.3%, DCEN~1px, DMAX~6px; fits broken by
+# a runaway -z refit ANISO 9-25%, DCEN 38-68px, DMAX 92-278px.
+QUAL_MAX_DSCAL = 0.02       # |final/input pixel scale - 1|
+QUAL_MAX_ANISO = 0.02       # CD singular value ratio - 1 (skew/anisotropy)
+QUAL_MAX_DROT  = 1.0        # rotation change against input WCS (deg)
+QUAL_MAX_DCEN  = 10.0       # chip centre shift against input WCS (px)
+QUAL_MAX_DMAX  = 20.0       # max final-vs-input displacement over the chip (px)
+QUAL_JAC_RANGE = (0.9, 1.1) # local scale over the chip relative to the centre
+QUAL_MAX_SIGF  = 0.5        # ASTSIGMA / FWHM
+QUAL_MIN_COVER = 0.75       # fraction of 4x4 chip cells holding a fitted star
+QUAL_MAX_CHI2C = 3.0        # chi2/dof of per-cell mean residual vectors
+
+def _cd_shape(w):
+    """Mean scale ("/px), anisotropy, rotation (deg) and parity of a WCS linear part."""
+    cd = w.wcs.cd if w.wcs.has_cd() else w.wcs.get_pc() * w.wcs.cdelt[:, None]
+    s = np.linalg.svd(cd, compute_uv=False) * 3600
+    rot = np.degrees(np.arctan2(cd[1, 0], cd[1, 1]))
+    return np.sqrt(s[0] * s[1]), s[0] / s[1] - 1, rot, np.sign(np.linalg.det(cd))
+
+def _tangent_arcsec(w, x, y, ra0, dec0):
+    """Pixel -> gnomonic plane around (ra0, dec0), arcsec."""
+    ra, dec = w.all_pix2world(x, y, 1)
+    ra, dec, ra0, dec0 = map(np.radians, (ra, dec, ra0, dec0))
+    cosc = np.sin(dec0)*np.sin(dec) + np.cos(dec0)*np.cos(dec)*np.cos(ra-ra0)
+    xi = np.cos(dec) * np.sin(ra-ra0) / cosc
+    eta = (np.cos(dec0)*np.sin(dec) - np.sin(dec0)*np.cos(dec)*np.cos(ra-ra0)) / cosc
+    return np.degrees(xi) * 3600, np.degrees(eta) * 3600
+
+def assess_astrometry(zpntest, meta, data, img_idx=0):
+    """
+    Decide whether the fitted solution for one image is usable.
+    meta must still hold the input (astrometry.net / previous pass) WCS.
+    Must run after compute_error_model (uses zpntest.sigma/variance).
+
+    Returns (ASTQUAL, ASTCOVER, reasons):
+      BAD     - the model itself is nonsense (linear part distorted or moved against
+                the input WCS, wild distortion over the chip, or no positional precision)
+      PARTIAL - sane model, but not supported by stars over the whole chip, or with
+                systematic residuals in some part of it
+      OK      - otherwise
+    """
+    bad, partial = [], []
+
+    W = meta.get('IMGAXIS1', meta.get('IMAGEW', meta.get('NAXIS1')))
+    H = meta.get('IMGAXIS2', meta.get('IMAGEH', meta.get('NAXIS2')))
+    fwhm = meta.get('FWHM', np.nan)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        wout = astropy.wcs.WCS(zpntest.wcs(img_idx), relax=True)
+        try:
+            win = astropy.wcs.WCS(meta, relax=True)
+        except Exception as e:
+            logging.warning(f"assess_astrometry: input WCS unusable ({e}), skipping comparison")
+            win = None
+
+        xc, yc = (W + 1) / 2, (H + 1) / 2
+        ra0, dec0 = wout.all_pix2world(xc, yc, 1)
+
+        # --- linear part against the input WCS ---
+        so, ao, ro, po = _cd_shape(wout)
+        m = dict(ANISO=ao)
+        if win is not None:
+            si, ai, ri, pi = _cd_shape(win)
+            m['DSCAL'] = so / si - 1
+            m['DROT'] = (ro - ri + 180) % 360 - 180
+            if po != pi:
+                bad.append("parity flip")
+
+        # --- local scale (Jacobian) over a 9x9 grid covering the chip ---
+        gx, gy = np.meshgrid(np.linspace(1, W, 9), np.linspace(1, H, 9))
+        gx, gy = gx.ravel(), gy.ravel()
+        x0, y0 = _tangent_arcsec(wout, gx, gy, ra0, dec0)
+        xx, yx = _tangent_arcsec(wout, gx + 1, gy, ra0, dec0)
+        xy, yy = _tangent_arcsec(wout, gx, gy + 1, ra0, dec0)
+        jdet = (xx - x0) * (yy - y0) - (xy - x0) * (yx - y0)
+        ic = np.argmin((gx - xc)**2 + (gy - yc)**2)
+        jrel = np.sqrt(np.abs(jdet) / np.abs(jdet[ic]))
+        m['JMIN'], m['JMAX'] = jrel.min(), jrel.max()
+        if np.any(np.sign(jdet) != np.sign(jdet[ic])):
+            bad.append("model folds over the chip")
+
+        # --- displacement against the input WCS over the chip ---
+        if win is not None:
+            try:
+                ra, dec = wout.all_pix2world(gx, gy, 1)
+                px, py = win.all_world2pix(ra, dec, 1, quiet=True)
+                d = np.hypot(px - gx, py - gy)
+                m['DMAX'] = np.nanmax(d)
+                m['DCEN'] = d[ic]
+            except Exception as e:
+                logging.warning(f"assess_astrometry: input WCS inversion failed ({e})")
+
+    m['SIGF'] = zpntest.sigma / fwhm
+
+    for key, limit in (('DSCAL', QUAL_MAX_DSCAL), ('ANISO', QUAL_MAX_ANISO), ('DROT', QUAL_MAX_DROT),
+                       ('DCEN', QUAL_MAX_DCEN), ('DMAX', QUAL_MAX_DMAX), ('SIGF', QUAL_MAX_SIGF)):
+        if key in m and not np.abs(m[key]) <= limit:   # NaN counts as failure
+            bad.append(f"{key}={m[key]:.4g} (limit {limit})")
+    if not (QUAL_JAC_RANGE[0] <= m['JMIN'] and m['JMAX'] <= QUAL_JAC_RANGE[1]):
+        bad.append(f"local scale {m['JMIN']:.3f}..{m['JMAX']:.3f}")
+
+    # --- coverage and spatial systematics from residual vectors ---
+    data.use_mask('default')
+    ad, params = _get_fitdata_ast(data, zpntest, extra_columns=('image_var',))
+    xmod, ymod = zpntest.model(zpntest.fitvalues, params)
+    sel = (np.asarray(ad.img) == img_idx) if _is_multi_image(zpntest) else np.ones(len(xmod), bool)
+    x, y = ad.image_x[sel], ad.image_y[sel]
+    dx, dy = (ad.image_x - xmod)[sel], (ad.image_y - ymod)[sel]
+    # compute_error_model fits median(r²) = S0 + SC·c²; for a 2D Gaussian
+    # median(r²) = 2 ln2 σ², so the per-axis variance is that / (2 ln2)
+    r2model = zpntest.sigma**2 + zpntest.variance * ad.image_var[sel]
+    var1 = r2model / (2 * np.log(2))
+    used = dx**2 + dy**2 < 9 * r2model
+
+    ix = np.clip(((x - 0.5) / W * 4).astype(int), 0, 3)
+    iy = np.clip(((y - 0.5) / H * 4).astype(int), 0, 3)
+    chi2, dof, ncov = 0.0, 0, 0
+    for cell in range(16):
+        c = used & (ix + 4 * iy == cell)
+        n = np.sum(c)
+        ncov += n > 0
+        if n < 3:   # too few for a meaningful cell mean
+            continue
+        vmean = np.sum(var1[c]) / n**2
+        chi2 += (np.mean(dx[c])**2 + np.mean(dy[c])**2) / vmean
+        dof += 2
+    cover = ncov / 16
+    m['COVER'] = cover
+    m['CHI2C'] = chi2 / dof if dof else np.nan
+
+    if cover < QUAL_MIN_COVER:
+        partial.append(f"COVER={cover:.2f} (limit {QUAL_MIN_COVER})")
+    if not m['CHI2C'] <= QUAL_MAX_CHI2C:
+        partial.append(f"CHI2C={m['CHI2C']:.3g} (limit {QUAL_MAX_CHI2C})")
+
+    qual = "BAD" if bad else "PARTIAL" if partial else "OK"
+    stats = " ".join(f"{k}={v:.4g}" for k, v in m.items())
+    msg = f"Astrometry quality [{img_idx}]: {qual} ({stats})"
+    if bad or partial:
+        msg += " -- " + "; ".join(bad + partial)
+    logging.info(msg)
+    print(msg)
+    return qual, cover, "; ".join(bad + partial)
+
+
 def refit_astrometry_multi(alldet, data, options):
     """Fit astrometry simultaneously for multiple images.
 
@@ -767,6 +915,12 @@ def refit_astrometry_multi(alldet, data, options):
             if term in det0.meta:
                 zpntest.fitterm([term], [float(det0.meta[term])])
 
+    if options.refit_zpn or options.szp:
+        if not getattr(options, 'zpn_from_camera', False):
+            seed_zpn_from_header(zpntest, det0.meta)
+        for n, det in enumerate(alldet):
+            reseat_crval(zpntest, det.meta, n)
+
     # --- Initial global fit on all photometry-matched stars ---
     data.use_mask('photometry')
     ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy', 'img')
@@ -783,6 +937,9 @@ def refit_astrometry_multi(alldet, data, options):
     zpntest.sigma, zpntest.variance, zpntest.scatter = compute_error_model(zpntest, data)
     print(f"Error model: ASTSIGMA={zpntest.sigma:.4f} px (floor), "
           f"ASTVAR={zpntest.variance:.4f}, ASTSCATT={zpntest.scatter:.4f} px")
+
+    zpntest.astqual, zpntest.astcover, zpntest.astreason = zip(
+        *(assess_astrometry(zpntest, d.meta, data, n) for n, d in enumerate(alldet)))
 
     return zpntest
 
@@ -864,6 +1021,9 @@ def refit_astrometry(det, data, options):
     if options.refit_zpn or options.szp:
         # Full refit: apply hardcoded camera-specific CRPIX and distortion priors
         setup_camera_params(zpntest, camera, options.refit_zpn, telescope, meta=det.meta)
+        if not getattr(options, 'zpn_from_camera', False):
+            seed_zpn_from_header(zpntest, det.meta)
+        reseat_crval(zpntest, det.meta)
     else:
         # Gentle refit: fix CRPIX at header values (already loaded by setup_initial_wcs)
         for term in ['CRPIX1', 'CRPIX2']:
@@ -956,6 +1116,9 @@ def refit_astrometry(det, data, options):
     zpntest.sigma, zpntest.variance, zpntest.scatter = compute_error_model(zpntest, data)
     print(f"Error model: ASTSIGMA={zpntest.sigma:.4f} px (floor), ASTVAR={zpntest.variance:.4f}, ASTSCATT={zpntest.scatter:.4f} px (scatter)")
 
+    qual, cover, reason = assess_astrometry(zpntest, det.meta, data)
+    zpntest.astqual, zpntest.astcover, zpntest.astreason = [qual], [cover], [reason]
+
     return zpntest
 
 def setup_initial_wcs(zpntest, meta):
@@ -1001,6 +1164,45 @@ def setup_initial_wcs(zpntest, meta):
             keys_invalid = True
 
     return keys_invalid
+
+def _term_value(zpntest, term):
+    for t, v in zip(zpntest.fitterms + zpntest.fixterms, zpntest.fitvalues + zpntest.fixvalues):
+        if t == term:
+            return v
+    return None
+
+def _set_term_value(zpntest, term, value):
+    """Change a term's value, keeping it fitted or fixed as it is."""
+    if term in zpntest.fitterms:
+        zpntest.fitvalues[zpntest.fitterms.index(term)] = value
+    elif term in zpntest.fixterms:
+        zpntest.fixvalues[zpntest.fixterms.index(term)] = value
+
+def seed_zpn_from_header(zpntest, meta):
+    """With -z, start CRPIX/PV2_* from a ZPN solution already in the header (e.g. a
+    previous, possibly partial pass) instead of the camera priors.  Only the values of
+    terms the camera model defines are taken; their fit/fix status stays."""
+    if 'ZPN' not in str(meta.get('CTYPE1', '')):
+        return
+    for term in zpntest.fitterms + zpntest.fixterms:
+        if (term.startswith('PV2_') or term in ('CRPIX1', 'CRPIX2')) and term in meta:
+            _set_term_value(zpntest, term, float(meta[term]))
+    logging.info(f"ZPN start from header: CRPIX=({_term_value(zpntest, 'CRPIX1')}, "
+                 f"{_term_value(zpntest, 'CRPIX2')}) PV2_3={_term_value(zpntest, 'PV2_3')}")
+
+def reseat_crval(zpntest, meta, img_idx=0):
+    """The header CRVAL belongs to the header CRPIX.  When the model starts from a
+    different CRPIX (camera prior), move CRVAL to the sky position of that pixel."""
+    crpix1, crpix2 = _term_value(zpntest, 'CRPIX1'), _term_value(zpntest, 'CRPIX2')
+    if crpix1 is None or crpix2 is None:
+        return
+    if (crpix1, crpix2) == (meta.get('CRPIX1'), meta.get('CRPIX2')):
+        return
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        ra, dec = astropy.wcs.WCS(meta, relax=True).all_pix2world(crpix1, crpix2, 1)
+    _set_term_value(zpntest, f"CRVAL1:{img_idx}", float(ra))
+    _set_term_value(zpntest, f"CRVAL2:{img_idx}", float(dec))
 
 def _crpix_for_crop(crpix1, crpix2, meta):
     """Adjust full-frame CRPIX values to sub-frame pixel coordinates using LTV/LTM."""
