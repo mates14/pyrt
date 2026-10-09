@@ -872,6 +872,7 @@ def refit_astrometry_multi(alldet, data, options):
     camera = det0.meta.get('CCD_NAME', 'C0')
     telescope = str(det0.meta.get('TELESCOP', ''))
     n_images = len(alldet)
+    from_camera = _from_camera(options, camera, telescope)
 
     msg = f"Multi-image astrometry: {n_images} images, camera={camera}"
     logging.info(msg); print(msg)
@@ -880,7 +881,7 @@ def refit_astrometry_multi(alldet, data, options):
     if options.szp:
         zpntest = zpnfit.zpnfit(proj="AZP")
         zpntest.fitterm(["PV2_1"], [1])
-    elif options.refit_zpn:
+    elif options.refit_zpn or from_camera:
         if camera in ["C0", "C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
             zpntest = zpnfit.zpnfit(proj="ZPN")
             zpntest.fixterm(["PV2_1"], [1])
@@ -934,8 +935,8 @@ def refit_astrometry_multi(alldet, data, options):
             if term in det0.meta:
                 zpntest.fitterm([term], [float(det0.meta[term])])
 
-    if options.refit_zpn or options.szp:
-        if not getattr(options, 'zpn_from_camera', False):
+    if options.refit_zpn or options.szp or from_camera:
+        if not from_camera:
             seed_zpn_from_header(zpntest, det0.meta)
         for n, det in enumerate(alldet):
             reseat_crval(zpntest, det.meta, n)
@@ -994,16 +995,17 @@ def refit_astrometry(det, data, options):
         logging.info(f"CCD_NAME not found, setting {camera}")
 
     telescope = str(det.meta.get('TELESCOP', ''))
+    from_camera = _from_camera(options, camera, telescope)
 
     if options.szp:
         zpntest = zpnfit.zpnfit(proj="AZP")
         zpntest.fitterm(["PV2_1"], [1])
 
-    elif options.refit_zpn:
-        # Full refit from camera calibration priors (-z flag).
+    elif options.refit_zpn or from_camera:
+        # Camera model (-z: priors as a start, --zpn-from-camera without -z: held fixed).
         # Ignores header CTYPE/CRPIX and uses hardcoded camera model.
         if camera in ["C0", "C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
-            logging.info(f"ZPN projection activated (refit_zpn)")
+            logging.info(f"ZPN projection activated ({'refit_zpn' if options.refit_zpn else 'camera model fixed'})")
             zpntest = zpnfit.zpnfit(proj="ZPN")
             zpntest.fixterm(["PV2_1"], [1])
         elif camera in ["CAM-ZEA"]:
@@ -1037,10 +1039,10 @@ def refit_astrometry(det, data, options):
         logging.warning("I do not understand the WCS to be fitted, skipping...")
         return None
 
-    if options.refit_zpn or options.szp:
-        # Full refit: apply hardcoded camera-specific CRPIX and distortion priors
+    if options.refit_zpn or options.szp or from_camera:
+        # Hardcoded camera-specific CRPIX and distortion: fitted with -z, fixed without
         setup_camera_params(zpntest, camera, options.refit_zpn, telescope, meta=det.meta)
-        if not getattr(options, 'zpn_from_camera', False):
+        if not from_camera:
             seed_zpn_from_header(zpntest, det.meta)
         reseat_crval(zpntest, det.meta)
     else:
@@ -1184,6 +1186,17 @@ def setup_initial_wcs(zpntest, meta):
 
     return keys_invalid
 
+def _from_camera(options, camera, telescope):
+    """--zpn-from-camera: use the hardcoded camera model instead of the header WCS
+    (with -z as the starting point, without -z held fixed with only CD and CRVAL fitted)."""
+    if not getattr(options, 'zpn_from_camera', False):
+        return False
+    known = (camera in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"] or
+             (camera == "C0" and telescope == "D50"))
+    if not known:
+        logging.warning(f"--zpn-from-camera: no camera model for {camera}/{telescope}, using the header WCS")
+    return known
+
 def _term_value(zpntest, term):
     for t, v in zip(zpntest.fitterms + zpntest.fixterms, zpntest.fitvalues + zpntest.fixvalues):
         if t == term:
@@ -1262,13 +1275,16 @@ def setup_camera_params(zpntest, camera, refit_zpn, telescope='', meta=None):
             zpntest.fixterm(["PV2_3"], [300])
             zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(543, 530)))
 
+    # SBT, from -113, -801, -267 of 2.10.2026 (-a --zpn-from-camera, then -zS2 twice):
+    # CRPIX (2076-2078, 2047-2050), PV2_3 8.19-8.29, PV2_5 430-468
+    # (until x/26: PV2_3=7.5, PV2_5=386.1, CRPIX 2090, 2043)
     if camera == "C1":
         if refit_zpn:
-            zpntest.fitterm(["PV2_3", "PV2_5"], [7.5, 386.1])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(2090, 2043)))
+            zpntest.fitterm(["PV2_3", "PV2_5"], [8.2, 450])
+            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(2076, 2048)))
         else:
-            zpntest.fixterm(["PV2_3", "PV2_5"], [7.5, 386.1])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(2090, 2043)))
+            zpntest.fixterm(["PV2_3", "PV2_5"], [8.2, 450])
+            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(2076, 2048)))
 
     if camera == "C2":
         if refit_zpn:
