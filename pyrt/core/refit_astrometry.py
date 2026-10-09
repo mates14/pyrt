@@ -689,6 +689,7 @@ QUAL_JAC_RANGE = (0.9, 1.1) # local scale over the chip relative to the centre
 QUAL_MAX_SIGF  = 0.5        # ASTSIGMA / FWHM
 QUAL_MIN_COVER = 0.75       # fraction of 4x4 chip cells holding a fitted star
 QUAL_MAX_CHI2C = 3.0        # chi2/dof of per-cell mean residual vectors
+QUAL_SYS_FWHM  = 0.04       # tolerated systematic shift of a cell mean (FWHM fraction)
 
 def _cd_shape(w):
     """Mean scale ("/px), anisotropy, rotation (deg) and parity of a WCS linear part."""
@@ -800,6 +801,10 @@ def assess_astrometry(zpntest, meta, data, img_idx=0):
     r2model = zpntest.sigma**2 + zpntest.variance * ad.image_var[sel]
     var1 = r2model / (2 * np.log(2))
     used = dx**2 + dy**2 < 9 * r2model
+    # With ~100+ stars per cell the mean is known to ~0.01px, so any leftover model
+    # pattern would count; shifts below QUAL_SYS_FWHM*FWHM per axis are tolerated
+    # (20261002204607-609: cell means <=0.056px, FWHM 5.6px, CHI2C 5.9 without it)
+    sys2 = (QUAL_SYS_FWHM * fwhm)**2 if np.isfinite(fwhm) else 0.0
 
     ix = np.clip(((x - 0.5) / W * 4).astype(int), 0, 3)
     iy = np.clip(((y - 0.5) / H * 4).astype(int), 0, 3)
@@ -810,7 +815,7 @@ def assess_astrometry(zpntest, meta, data, img_idx=0):
         ncov += n > 0
         if n < 3:   # too few for a meaningful cell mean
             continue
-        vmean = np.sum(var1[c]) / n**2
+        vmean = np.sum(var1[c]) / n**2 + sys2
         chi2 += (np.mean(dx[c])**2 + np.mean(dy[c])**2) / vmean
         dof += 2
     cover = ncov / 16
