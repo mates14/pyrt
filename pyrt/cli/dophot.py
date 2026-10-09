@@ -824,6 +824,7 @@ def main():
             continue
 
         catalog_name = 'makak' if options.makak else options.catalog
+        det.meta['PHCAT'] = catalog_name  # so that downstream tools (transients) use the same catalog
         determine_filter(det, options, catalog_name)
 
         # Override schema if specified on command line
