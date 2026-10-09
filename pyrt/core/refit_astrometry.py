@@ -691,12 +691,18 @@ QUAL_MIN_COVER = 0.75       # fraction of 4x4 chip cells holding a fitted star
 QUAL_MAX_CHI2C = 3.0        # chi2/dof of per-cell mean residual vectors
 QUAL_SYS_FWHM  = 0.04       # tolerated systematic shift of a cell mean (FWHM fraction)
 
-def _cd_shape(w):
-    """Mean scale ("/px), anisotropy, rotation (deg) and parity of a WCS linear part."""
-    cd = w.wcs.cd if w.wcs.has_cd() else w.wcs.get_pc() * w.wcs.cdelt[:, None]
-    s = np.linalg.svd(cd, compute_uv=False) * 3600
-    rot = np.degrees(np.arctan2(cd[1, 0], cd[1, 1]))
-    return np.sqrt(s[0] * s[1]), s[0] / s[1] - 1, rot, np.sign(np.linalg.det(cd))
+def _local_shape(w, x, y, ra0, dec0, step=10.0):
+    """Mean scale ("/px), anisotropy, rotation (deg) and parity of the WCS at pixel (x, y),
+    from its Jacobian in the gnomonic plane around (ra0, dec0).  Unlike the CD matrix this
+    is comparable between solutions with different reference points (CD rotation is
+    relative to north at CRVAL, which turns by dRA*sin(dec) across a field near the pole)."""
+    x0, y0 = _tangent_arcsec(w, x, y, ra0, dec0)
+    xx, yx = _tangent_arcsec(w, x + step, y, ra0, dec0)
+    xy, yy = _tangent_arcsec(w, x, y + step, ra0, dec0)
+    jac = np.array([[xx - x0, xy - x0], [yx - y0, yy - y0]]) / step
+    s = np.linalg.svd(jac, compute_uv=False)
+    rot = np.degrees(np.arctan2(jac[1, 0], jac[1, 1]))
+    return np.sqrt(s[0] * s[1]), s[0] / s[1] - 1, rot, np.sign(np.linalg.det(jac))
 
 def _tangent_arcsec(w, x, y, ra0, dec0):
     """Pixel -> gnomonic plane around (ra0, dec0), arcsec."""
@@ -739,11 +745,11 @@ def assess_astrometry(zpntest, meta, data, img_idx=0):
         xc, yc = (W + 1) / 2, (H + 1) / 2
         ra0, dec0 = wout.all_pix2world(xc, yc, 1)
 
-        # --- linear part against the input WCS ---
-        so, ao, ro, po = _cd_shape(wout)
+        # --- linear part at the chip centre against the input WCS ---
+        so, ao, ro, po = _local_shape(wout, xc, yc, ra0, dec0)
         m = dict(ANISO=ao)
         if win is not None:
-            si, ai, ri, pi = _cd_shape(win)
+            si, ai, ri, pi = _local_shape(win, xc, yc, ra0, dec0)
             m['DSCAL'] = so / si - 1
             m['DROT'] = (ro - ri + 180) % 360 - 180
             if po != pi:
