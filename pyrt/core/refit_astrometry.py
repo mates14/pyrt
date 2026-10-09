@@ -715,8 +715,9 @@ def assess_astrometry(zpntest, meta, data, img_idx=0):
     Returns (ASTQUAL, ASTCOVER, reasons):
       BAD     - the model itself is nonsense (linear part distorted or moved against
                 the input WCS, wild distortion over the chip, or no positional precision)
-      PARTIAL - sane model, but not supported by stars over the whole chip, or with
-                systematic residuals in some part of it
+      PARTIAL - sane model, but not supported by stars over the whole chip, with
+                systematic residuals in some part of it, or departing from the input
+                WCS towards the chip edges
       OK      - otherwise
     """
     bad, partial = [], []
@@ -774,9 +775,16 @@ def assess_astrometry(zpntest, meta, data, img_idx=0):
     m['SIGF'] = zpntest.sigma / fwhm
 
     for key, limit in (('DSCAL', QUAL_MAX_DSCAL), ('ANISO', QUAL_MAX_ANISO), ('DROT', QUAL_MAX_DROT),
-                       ('DCEN', QUAL_MAX_DCEN), ('DMAX', QUAL_MAX_DMAX), ('SIGF', QUAL_MAX_SIGF)):
+                       ('DCEN', QUAL_MAX_DCEN), ('SIGF', QUAL_MAX_SIGF)):
         if key in m and not np.abs(m[key]) <= limit:   # NaN counts as failure
             bad.append(f"{key}={m[key]:.4g} (limit {limit})")
+    # A large edge displacement against the input WCS alone is no proof of a broken
+    # model: a linear-only input cannot follow the real distortion of a wide field
+    # (20261002211057-720: 1.7% radial, DMAX 28px at the corners, sane otherwise).
+    # Runaway fits are caught by DCEN/ANISO/local scale; DMAX only marks PARTIAL,
+    # which lets the next pass rematch with this solution and extend it.
+    if 'DMAX' in m and not m['DMAX'] <= QUAL_MAX_DMAX:
+        partial.append(f"DMAX={m['DMAX']:.4g} (limit {QUAL_MAX_DMAX})")
     if not (QUAL_JAC_RANGE[0] <= m['JMIN'] and m['JMAX'] <= QUAL_JAC_RANGE[1]):
         bad.append(f"local scale {m['JMIN']:.3f}..{m['JMAX']:.3f}")
 
