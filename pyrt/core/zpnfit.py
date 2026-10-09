@@ -115,14 +115,46 @@ class zpnfit(termfit.termfit):
         if self.sip_order > 0:
             hdr['CTYPE1'] = hdr['CTYPE1'] + '-SIP'
             hdr['CTYPE2'] = hdr['CTYPE2'] + '-SIP'
-            hdr['A_ORDER'] = self.sip_order
-            hdr['B_ORDER'] = self.sip_order
-            for i in range(self.sip_order + 1):
-                for j in range(self.sip_order + 1 - i):
-                    if i + j > 0:
-                        hdr[f'A_{i}_{j}'] = self.sip_a[i, j]
-                        hdr[f'B_{i}_{j}'] = self.sip_b[i, j]
+            hdr.update(self.sip_header())
 
+        return hdr
+
+    def _sip_terms(self):
+        return [(i, j) for i in range(self.sip_order + 1)
+                for j in range(self.sip_order + 1 - i) if i + j > 0]
+
+    def sip_header(self):
+        """SIP keywords of the model.
+
+        The model applies its polynomial in the sky -> pixel direction, to the
+        ideal pixel offsets from CRPIX (CD^-1 of the intermediate coordinates):
+        pixel = ideal + sip(ideal).  In FITS terms that is AP_/BP_.  The A_/B_
+        that FITS readers use for pixel -> sky are its inverse, fitted here as a
+        polynomial of the same order over the area the stars covered.
+        """
+        hdr = collections.OrderedDict()
+        terms = self._sip_terms()
+        span = getattr(self, 'sip_span', 0) or 2048.0
+        g = np.linspace(-span, span, 41)
+        u, v = [a.ravel() for a in np.meshgrid(g, g)]
+        # ideal (U, V) of each pixel offset (u, v): solve u = U + ap(U, V)
+        U, V = u.copy(), v.copy()
+        for _ in range(50):
+            U, V = (u - sum(self.sip_a[i, j] * U**i * V**j for i, j in terms),
+                    v - sum(self.sip_b[i, j] * U**i * V**j for i, j in terms))
+        M = np.column_stack([(u / span)**i * (v / span)**j for i, j in terms])
+        ca = np.linalg.lstsq(M, U - u, rcond=None)[0]
+        cb = np.linalg.lstsq(M, V - v, rcond=None)[0]
+        hdr['A_ORDER'] = self.sip_order
+        hdr['B_ORDER'] = self.sip_order
+        for (i, j), a, b in zip(terms, ca, cb):
+            hdr[f'A_{i}_{j}'] = a / span**(i + j)
+            hdr[f'B_{i}_{j}'] = b / span**(i + j)
+        hdr['AP_ORDER'] = self.sip_order
+        hdr['BP_ORDER'] = self.sip_order
+        for i, j in terms:
+            hdr[f'AP_{i}_{j}'] = self.sip_a[i, j]
+            hdr[f'BP_{i}_{j}'] = self.sip_b[i, j]
         return hdr
 
     @staticmethod
@@ -336,14 +368,8 @@ class zpnfit(termfit.termfit):
 
             # Write SIP coefficients if present
             if self.sip_order > 0:
-                set_value('A_ORDER', self.sip_order)
-                set_value('B_ORDER', self.sip_order)
-
-                for i in range(self.sip_order + 1):
-                    for j in range(self.sip_order + 1 - i):
-                        if i + j > 0:  # Skip A_0_0 and B_0_0
-                            set_value(f'A_{i}_{j}', self.sip_a[i,j])
-                            set_value(f'B_{i}_{j}', self.sip_b[i,j])
+                for key, value in self.sip_header().items():
+                    set_value(key, value)
 
         # Handle different output types
         if isinstance(output, str):
@@ -563,28 +589,17 @@ class zpnfit(termfit.termfit):
         x = 1.0/D * (   CD2_2 * x1 - CD1_2 * y1)
         y = 1.0/D * ( - CD2_1 * x1 + CD1_1 * y1)
 
-        # Apply SIP distortion with proper normalization
-        if True:
-            if self.sip_order > 0:
-                # Normalize coordinates to [-1,1] range for numerical stability
-                x_center = (np.max(x) + np.min(x)) / 2
-                y_center = (np.max(y) + np.min(y)) / 2
-                x_scale = (np.max(x) - np.min(x)) / 2
-                y_scale = (np.max(y) - np.min(y)) / 2
-
-                x_norm = (x - x_center) / x_scale
-                y_norm = (y - y_center) / y_scale
-
-                dx = np.sum(self.sip_a[i,j] * x_norm**i * y_norm**j * (x_scale**i * y_scale**j)
-                            for i in range(self.sip_order + 1)
-                            for j in range(self.sip_order + 1 - i)
-                            if i + j > 0)
-                dy = np.sum(self.sip_b[i,j] * x_norm**i * y_norm**j * (x_scale**i * y_scale**j)
-                            for i in range(self.sip_order + 1)
-                            for j in range(self.sip_order + 1 - i)
-                            if i + j > 0)
-                x = x + dx
-                y = y + dy
+        # SIP distortion, sky -> pixel (FITS AP_/BP_) on the ideal offsets from
+        # CRPIX.  It used to be taken about the centre of the star sample, which
+        # is not what any header can express; sip_header() inverts it to A_/B_.
+        if self.sip_order > 0:
+            if len(x):
+                self.sip_span = max(getattr(self, 'sip_span', 0),
+                                    float(np.max(np.abs(x))), float(np.max(np.abs(y))))
+            dx = sum(self.sip_a[i, j] * x**i * y**j for i, j in self._sip_terms())
+            dy = sum(self.sip_b[i, j] * x**i * y**j for i, j in self._sip_terms())
+            x = x + dx
+            y = y + dy
 
         return CRPIX1 + x, CRPIX2 + y
 
