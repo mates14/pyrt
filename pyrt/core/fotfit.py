@@ -133,6 +133,8 @@ class fotfit(termfit.termfit):
         # larger than they promise (WSSR/NDF > 1), inflate the parameter errors
         if self.wssrndf > 1:
             self.fiterrors = np.asarray(self.fiterrors) * np.sqrt(self.wssrndf)
+            if getattr(self, 'fitcov', None) is not None:
+                self.fitcov = self.fitcov * self.wssrndf
         return ret
 
     def zero_val(self):
@@ -143,7 +145,7 @@ class fotfit(termfit.termfit):
         - Image center coordinates (0, 0)
         - Actual airmass for that image
         - Zero colors
-        - 0 magnitude star
+        - a 10000 ADU star (result + 10 = magnitude of 1 ADU without nonlinearity)
 
         Returns
         -------
@@ -206,7 +208,7 @@ class fotfit(termfit.termfit):
             # Make arrays with single values to match model expectations
             try:
                 single_val_data = (
-                    np.array([0.0]),                    # mc: 0-magnitude star
+                    np.array([-10.0]),                  # mc: a 10000 ADU star (see below)
                     np.array([airmass_val]),            # airmass
                     np.array([0.0]),                    # coord_x: image center (normalized)
                     np.array([0.0]),                    # coord_y: image center (normalized)
@@ -220,7 +222,10 @@ class fotfit(termfit.termfit):
                     np.array([airmass_abs_val])         # airmass_abs
                 )
 
-                zp_val = self.model(np.array(self.fitvalues), single_val_data)
+                # MAGZERO is the magnitude of 1 ADU, but taken as the 10000 ADU magnitude + 10:
+                # at 1 ADU (mc=0) the nonlinearity terms (RS/RC, centred at mct=mc+10=0) are
+                # extrapolated 10 mag outside the data and MAGZERO followed them by up to 0.6 mag
+                zp_val = self.model(np.array(self.fitvalues), single_val_data) + 10.0
 
                 # Handle scalar or array return
                 logging.debug(f"Model returned: {zp_val} (type: {type(zp_val)})")
@@ -234,8 +239,20 @@ class fotfit(termfit.termfit):
                 logging.warning(f"Model evaluation failed for img {img}: {e}")
                 zeropoint_values.append(25.0)
 
-            # Get error: use Z:n error if available, otherwise global error
-            if img in zn_errors:
+            # Error of the model at the reference point from the full covariance:
+            # the marginal error of Z alone explodes whenever Z trades off against
+            # other terms (RO/RS/RC can shift the whole curve, i.e. act as a constant)
+            cov = getattr(self, 'fitcov', None)
+            if cov is not None and cov.shape == (len(self.fitvalues),) * 2 and 'single_val_data' in locals():
+                v0 = np.array(self.fitvalues, dtype=float)
+                grad = np.empty(len(v0))
+                for k in range(len(v0)):
+                    h = 1e-6 * max(1.0, abs(v0[k]))
+                    vp, vm = v0.copy(), v0.copy()
+                    vp[k] += h; vm[k] -= h
+                    grad[k] = (self.model(vp, single_val_data)[0] - self.model(vm, single_val_data)[0]) / (2 * h)
+                zeropoint_errors.append(float(np.sqrt(max(grad @ cov @ grad, 0.0))))
+            elif img in zn_errors:
                 zeropoint_errors.append(zn_errors[img])
             else:
                 zeropoint_errors.append(global_zp_error)

@@ -231,6 +231,7 @@ class termfit:
         self.wssrndf = self.wssr / self.ndf
 
         # Improved covariance matrix calculation with diagnostics
+        self.fitcov = None   # full covariance where available (zero_val propagates it)
         try:
             # Method 1: Direct inverse (original method)
             jac_matrix = res.jac.T.dot(res.jac)
@@ -241,6 +242,7 @@ class termfit:
             try:
                 cov = np.linalg.inv(jac_matrix)
 #                logging.debug("Using direct inverse method")
+                self.fitcov = cov
                 self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
                 return
             except np.linalg.LinAlgError:
@@ -259,6 +261,7 @@ class termfit:
                 effective_rank = sum(s > rank_threshold * s[0])
                 cov = np.linalg.pinv(jac_matrix, rcond=rank_threshold)
 #                logging.debug("Using SVD pseudo-inverse method")
+                self.fitcov = cov
                 self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
 
                 # Check for zero or very small errors
@@ -278,6 +281,7 @@ class termfit:
                 reg_matrix = jac_matrix + epsilon * np.eye(jac_matrix.shape[0])
                 cov = np.linalg.inv(reg_matrix)
 #                logging.debug("Using regularized inverse method")
+                self.fitcov = cov
                 self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
                 return
             except:
