@@ -409,6 +409,69 @@ def perform_photometric_fitting(data, options, metadata):
 
     return ffit
 
+PHQ_SYS = 0.02          # tolerated systematic offset of a cell median (mag)
+PHQ_MAX_CHI2C = 3.0     # chi2/dof of per-cell median residuals
+PHQ_MAX_CELL = 0.05     # a cell must also be off by this much (mag) to count
+
+def assess_photometry(data, ffit, meta, img_idx=0):
+    """
+    Flag frames whose photometric residuals are not uniform over the chip (cloud
+    patches, obstructions, vignetting the model cannot follow).  Only a flag: nothing
+    in pyrt acts on it, the consumer decides (a photometric database may skip such
+    frames, real-time processing should not).
+
+    Uses all matched stars (not only those kept by the fit, which would clip
+    the dimmed ones), medians of model residuals in 4x4 chip cells.
+    Returns (PHQUAL, PHCMAX, reasons): PHQUAL is OK or PARTIAL, PHCMAX the
+    largest |cell median| in mag (positive = stars fainter than the model).
+    """
+    mask = data._current_mask
+    data.use_mask('default')
+    fd = data.get_fitdata('y', 'adif', 'coord_x', 'coord_y', 'color1', 'color2', 'color3',
+                          'color4', 'img', 'x', 'dy', 'image_x', 'image_y', 'airmass')
+    data.use_mask(mask)
+
+    sel = np.asarray(fd.img) == img_idx
+    res = (ffit.model(np.array(ffit.fitvalues), fd.fotparams) - fd.x)[sel]   # >0: fainter than the catalogue
+    x, y = fd.image_x[sel], fd.image_y[sel]
+    W = meta.get('IMGAXIS1', meta.get('IMAGEW'))
+    H = meta.get('IMGAXIS2', meta.get('IMAGEH'))
+
+    good = np.isfinite(res) & (np.abs(res - np.median(res)) < 1.0)   # drop mismatches
+    res, x, y = res[good], x[good], y[good]
+    if len(res) < 48:
+        return "OK", 0.0, ""
+    # only the non-uniformity counts: a common offset (the fit's clipping or weighting
+    # setting the zero point away from the median of all matches) is not a patch
+    res = res - np.median(res)
+    sig = 1.4826 * np.median(np.abs(res))
+
+    ix = np.clip(((x - 0.5) / W * 4).astype(int), 0, 3)
+    iy = np.clip(((y - 0.5) / H * 4).astype(int), 0, 3)
+    cells = np.full(16, np.nan)
+    chi2, dof = 0.0, 0
+    for cell in range(16):
+        c = ix + 4 * iy == cell
+        n = np.sum(c)
+        if n < 5:
+            continue
+        cells[cell] = np.median(res[c])
+        chi2 += cells[cell]**2 / ((1.2533 * sig)**2 / n + PHQ_SYS**2)
+        dof += 1
+    chi2c = chi2 / dof if dof else np.nan
+    cmax = cells[np.nanargmax(np.abs(cells))] if dof else 0.0
+
+    grid = "/".join(" ".join("  .  " if np.isnan(v) else f"{v:+.2f}" for v in cells[4*r:4*r+4])
+                    for r in range(3, -1, -1))
+    reasons = []
+    if chi2c > PHQ_MAX_CHI2C and abs(cmax) > PHQ_MAX_CELL:
+        reasons.append(f"cells off by up to {cmax:+.2f} mag (CHI2C={chi2c:.3g}, limit {PHQ_MAX_CHI2C})")
+    qual = "PARTIAL" if reasons else "OK"
+    msg = f"Photometry quality [{img_idx}]: {qual} (CHI2C={chi2c:.4g} CMAX={cmax:+.3f} SIG={sig:.3f}) cells top->bottom: {grid}"
+    logging.info(msg)
+    print(msg)
+    return qual, float(cmax), "; ".join(reasons)
+
 def load_model_from_file(ffit, model_file):
     """
     Load a photometric model from a file.
@@ -647,6 +710,11 @@ def write_results(data, ffit, options, alldet, target, zpntest):
                 astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "LIMMAG", 0, value=zero[zero_idx]+det.meta['LIMFLX3'])
                 astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "MAGZERO", 0, value=zero[zero_idx])
                 astropy.io.fits.setval(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", "RESPONSE", 0, value=ffit.oneline_for_image(img + 1))
+                if 'PHQUAL' in det.meta:
+                    with astropy.io.fits.open(os.path.splitext(det.meta['FITSFILE'])[0]+"t.fits", mode='update') as hl:
+                        hl[0].header['PHQUAL'] = (det.meta['PHQUAL'], 'Photometric uniformity flag OK/PARTIAL')
+                        hl[0].header['PHCMAX'] = (det.meta['PHCMAX'], 'Worst 4x4 cell median residual (mag)')
+                        hl[0].header['PHQREAS'] = (det.meta['PHQREAS'], 'Reasons for PHQUAL other than OK')
             except Exception as e:
                 logging.warning(f"Writing LIMMAG/MAGZERO/RESPONSE to an astrometrized image failed: {e}")
         logging.info(f"Writing to astrometrized image took {time.time()-start:.3f}s")
@@ -925,6 +993,16 @@ def main():
     ffit = perform_photometric_fitting(data, options, metadata)
     logging.info(ffit)
     logging.info(f"Photometric fit took {time.time()-start:.3f}s")
+
+    for img_n, det_n in enumerate(alldet):
+        try:
+            q, cmax, reason = assess_photometry(data, ffit, det_n.meta, img_n)
+        except Exception as e:
+            logging.warning(f"Photometry quality assessment failed: {e}")
+            continue
+        det_n.meta['PHQUAL'] = q
+        det_n.meta['PHCMAX'] = cmax
+        det_n.meta['PHQREAS'] = reason
 
     # Update det objects if filter was changed during discovery
     filter_check_mode = getattr(options, 'filter_check', 'none')
