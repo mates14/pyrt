@@ -707,3 +707,66 @@ class fotfit(termfit.termfit):
         """
         self.from_oneline(model_string)
         return self.model(self.fixvalues, data)
+
+def is_color_term(term):
+    """
+    Terms a spatially flattened detection table keeps in its RESPONSE: the zeropoint,
+    absolute airmass (PA, PA2, ...), anything with a color in it (PC, PCD, PAC, XC, SC,
+    F<n>; mixed terms like PCX are kept, they cannot be unfitted without catalog colors).
+    Everything else (X/Y/R, differential airmass B, nonlinearity N/RS/RO/RC, pixel
+    structure SX/SY/SXY, radial GA/GW/EA/EW) is folded into MAG_AUTO.
+    """
+    base = term.split(':')[0]
+    if base in ('Z', 'XC', 'SC'):
+        return True
+    if len(base) >= 2 and base[0] == 'F' and base[1:].isdigit():
+        return True
+    if base[0] == 'P':
+        letters = [a for a in base[1:] if not a.isdigit()]
+        return any(a in 'CDEF' for a in letters) or all(a == 'A' for a in letters)
+    return False
+
+def flatten_response(det):
+    """
+    Fold the spatial and nonlinearity part of the dophot model in det.meta['RESPONSE']
+    into MAG_AUTO, leaving only the color response (and Z) in RESPONSE. Applying the
+    new RESPONSE to the new MAG_AUTO reproduces MAG_CALIB. Modifies det in place.
+    """
+    terms, values, other = [], [], []
+    for chunk in det.meta['RESPONSE'].split(","):
+        if '=' not in chunk:
+            continue
+        term, strvalue = chunk.split("=", 1)
+        try:
+            values.append(float(strvalue))
+            terms.append(term)
+        except ValueError:
+            other.append(chunk)     # FILTER=, SCHEMA=
+
+    # F<n> do nothing at zero colors (and need a schema), leave them out of the evaluation
+    def response_at_zero_color(keep):
+        ffit = fotfit()
+        ffit.fixterm([t for t in terms if keep(t)], values=[v for t, v in zip(terms, values) if keep(t)])
+        return ffit.model(np.array(ffit.fitvalues),
+            (   np.asarray(det['MAG_AUTO']),
+                0,                                          # airmass relative to image center
+                (np.asarray(det['X_IMAGE']) - det.meta['CTRX'])/1024,
+                (np.asarray(det['Y_IMAGE']) - det.meta['CTRY'])/1024,
+                0, 0, 0, 0,                                 # colors
+                0,                                          # image index (RESPONSE has no per-image terms)
+                0, 0,
+                np.asarray(det['X_IMAGE']), np.asarray(det['Y_IMAGE']),
+                det.meta['AIRMASS']))
+
+    not_f = lambda t: not (t[0] == 'F' and t[1:].isdigit())
+    correction = response_at_zero_color(not_f) \
+        - response_at_zero_color(lambda t: not_f(t) and is_color_term(t))
+    det['MAG_AUTO'] += correction
+
+    removed = [t for t in terms if not is_color_term(t)]
+    det.meta['RESPONSE'] = ",".join(other + [f"{t}={v}" for t, v in zip(terms, values) if is_color_term(t)])
+    if removed:
+        det.meta['FLATTENED'] = ",".join(removed)
+    logging.info(f"Removed {','.join(removed) or 'nothing'}, correction "
+                 f"min {np.min(correction):.3f} max {np.max(correction):.3f} mean {np.mean(correction):.3f}")
+    return det

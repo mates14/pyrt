@@ -81,6 +81,9 @@ pyrt-fetch-gcvs = "pyrt.cli.fetch_gcvs:main"
 # Transient search (new objects, flaring catalogued stars, movers)
 pyrt-transients = "pyrt.cli.transients:main"
 
+# Fold spatial/nonlinearity response into MAG_AUTO (foo.ecsv -> foo-flat.ecsv)
+pyrt-flatten = "pyrt.cli.flatten:main"
+
 # General purpose tools
 pyrt-combine = "pyrt.cli.combine:main"
 pyrt-cphead = "pyrt.cli.cphead:main"
