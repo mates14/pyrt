@@ -766,7 +766,7 @@ def flatten_response(det):
     removed = [t for t in terms if not is_color_term(t)]
     det.meta['RESPONSE'] = ",".join(other + [f"{t}={v}" for t, v in zip(terms, values) if is_color_term(t)])
     if removed:
-        det.meta['FLATTENED'] = ",".join(removed)
+        det.meta['FLATRESP'] = ",".join(removed)
     logging.info(f"Removed {','.join(removed) or 'nothing'}, correction "
                  f"min {np.min(correction):.3f} max {np.max(correction):.3f} mean {np.mean(correction):.3f}")
     return det
