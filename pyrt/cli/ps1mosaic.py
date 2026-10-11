@@ -8,6 +8,12 @@ clips silently at the cell boundary and pads the remainder with zeros.  This
 script queries the 4 corners of the FoV as well as the centre to discover every
 overlapping cell, downloads a cutout from each, and reprojects+coadds them into
 one clean FITS file ready for image subtraction.
+
+Each cutout is divided by its stack EXPTIME before mosaicking: PS1 stack pixels
+are linear counts with an AB zero point of 25 + 2.5 log10(EXPTIME), and EXPTIME
+differs from skycell to skycell (and band to band).  The output is therefore in
+counts per second with an AB zero point of 25 in every band (header PS1ZP=25),
+so templates of different bands can be combined in flux directly.
 """
 
 import argparse
@@ -23,6 +29,7 @@ PS1_FILENAMES_URL = "https://ps1images.stsci.edu/cgi-bin/ps1filenames.py"
 PS1_CUTOUT_URL    = "https://ps1images.stsci.edu/cgi-bin/fitscut.cgi"
 PS1_PIXSCALE      = 0.25   # arcsec/pixel
 PS1_FILTERS       = "grizy"
+PS1_ZP            = 25.0   # AB magnitude of 1 count/s in a normalised stack
 
 
 def _query_filenames(ra, dec, filt):
@@ -87,10 +94,25 @@ def download_cutout(filename, ra, dec, size_pix):
     return fits.open(io.BytesIO(r.content))
 
 
+def normalise(hdu):
+    """Divide a stack cutout by its EXPTIME (-> counts/s, AB ZP 25) in place.
+    Pixels outside the skycell come back as exact zeros; they become NaN."""
+    exptime = hdu.header.get("EXPTIME")
+    if not exptime:
+        raise ValueError("PS1 cutout without EXPTIME, cannot normalise")
+    data = hdu.data.astype(np.float32)
+    data[data == 0] = np.nan
+    hdu.data = data / float(exptime)
+    hdu.header["PS1ZP"] = (PS1_ZP, "AB mag of 1 count/s (data = counts/EXPTIME)")
+    return hdu
+
+
 def mosaic(cutouts):
     """Reproject all cutouts to a common WCS and mean-coadd them.
 
     Returns a single PrimaryHDU.  Requires the `reproject` package.
+    The cutouts must already be normalised (NaN outside their skycell, so that
+    the zero padding does not halve the flux where cells overlap).
     """
     try:
         from reproject import reproject_interp
@@ -114,12 +136,15 @@ def mosaic(cutouts):
         [(h.data, WCS(h.header)) for h in hdus]
     )
     array, _ = reproject_and_coadd(
-        [(h.data, WCS(h.header)) for h in hdus],
+        [(np.nan_to_num(h.data), WCS(h.header)) for h in hdus],
         wcs_out, shape_out=shape_out,
+        input_weights=[np.isfinite(h.data).astype(np.float32) for h in hdus],
         reproject_function=reproject_interp,
         combine_function="mean",
     )
-    return fits.PrimaryHDU(data=array.astype(np.float32), header=wcs_out.to_header())
+    header = wcs_out.to_header()
+    header["PS1ZP"] = (PS1_ZP, "AB mag of 1 count/s (data = counts/EXPTIME)")
+    return fits.PrimaryHDU(data=array.astype(np.float32), header=header)
 
 
 def build_parser():
@@ -173,7 +198,8 @@ def main(args=None):
             print("empty — skipping")
         else:
             img = next(h for h in hdul if h.data is not None)
-            print(f"ok  {img.data.shape}")
+            print(f"ok  {img.data.shape}  EXPTIME={img.header.get('EXPTIME')}")
+            normalise(img)
             cutouts.append(hdul)
 
     if not cutouts:
@@ -182,10 +208,11 @@ def main(args=None):
 
     if len(cutouts) == 1:
         hdu = next(h for h in cutouts[0] if h.data is not None)
-        hdu.writeto(outfile, overwrite=True)
     else:
         print(f"Mosaicking {len(cutouts)} cutouts...")
-        mosaic(cutouts).writeto(outfile, overwrite=True)
+        hdu = mosaic(cutouts)
+    hdu.data = np.nan_to_num(hdu.data)   # uncovered pixels as zeros, as before
+    hdu.writeto(outfile, overwrite=True)
 
     print(f"Done: {outfile}")
 

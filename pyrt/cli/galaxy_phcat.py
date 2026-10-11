@@ -6,6 +6,9 @@ Workflow:
   0. If {base}h.fits does not already exist, prepare it automatically:
        a. Locate the PS1 master template ~/ps1-templates/{target}-{filter}.fits
           (TARGET/OBJECT and FILTER keywords from the science image header).
+          For a clear (unfiltered) frame the template is built from the PS1
+          g, r, i, z masters, weighted as the frame's photometric model says
+          (F1/F3/F4/PAC terms of RESPONSE, see build_clear_template).
        b. Reproject the master to the science frame WCS with pyrt-combine.
        c. Run hotpants to produce {base}h.fits.
   1. Run pyrt-phcat on the original image to build the reference catalog.
@@ -161,11 +164,154 @@ def _diffim_is_stable(diffim_file, sci_sigma, factor=200.0, min_finite_frac=0.9)
     return 0.01 * sci_sigma < clipped_std < factor * sci_sigma
 
 
+CLEAR_FILTERS = {"clear"}
+CLEAR_BANDS = "griz"   # schema positions 1..4 of F1..F4; r is the reference (F2)
+
+
+def _ps1_master(target, band, hdr, normalised=False):
+    """Path of ~/ps1-templates/{target}-{band}.fits, downloaded if missing.
+    normalised=True also replaces a master from before PS1ZP normalisation
+    (raw counts of one stack, not comparable between bands)."""
+    master = os.path.join(PS1_TEMPLATE_DIR, f"{target}-{band}.fits")
+    if os.path.exists(master) and not (normalised and
+                                       "PS1ZP" not in astropy.io.fits.getheader(master)):
+        return master
+    orira, oridec = hdr.get("ORIRA"), hdr.get("ORIDEC")
+    if orira is None or oridec is None:
+        print(f"ERROR: PS1 master not usable and ORIRA/ORIDEC missing: {master}", file=sys.stderr)
+        return None
+    print(f"PS1 master {'not normalised' if os.path.exists(master) else 'not found'}"
+          f" — downloading {master}")
+    os.makedirs(PS1_TEMPLATE_DIR, exist_ok=True)
+    from pyrt.cli.ps1mosaic import main as ps1mosaic_main
+    ps1mosaic_main([str(orira), str(oridec), "30", band, master])
+    if not os.path.exists(master):
+        print(f"ERROR: ps1mosaic failed to create {master}", file=sys.stderr)
+        return None
+    return master
+
+
+def _read_response(science_file, hdr):
+    """RESPONSE (the dophot photometric model) from the header, else from the ECSV
+    of the same frame ({base}.ecsv, or {base minus a trailing t}.ecsv)."""
+    if hdr.get("RESPONSE"):
+        return str(hdr["RESPONSE"])
+    base = os.path.splitext(science_file)[0]
+    for ecsv in (base + ".ecsv", base.removesuffix("t") + ".ecsv"):
+        if os.path.exists(ecsv):
+            meta = astropy.table.Table.read(ecsv, format="ascii.ecsv").meta
+            if meta.get("RESPONSE"):
+                return str(meta["RESPONSE"])
+    return None
+
+
+def clear_weights(response, airmass):
+    """Flux weights of the PS1 g, r, i, z templates that reproduce a clear frame.
+
+    The dophot model of the clear band is a flux combination of the catalogue
+    bands above the atmosphere (F1 = g, F3 = i, F4 = z, r gets 1 - F1 - F3 - F4)
+    plus PAC*airmass*(g-r).  Through the atmosphere the colour slope against g-r
+    is F1 - PAC*airmass, so PAC*airmass moves weight from g to r (linearised,
+    exact for small colours).  Missing terms count as 0; other colour terms
+    cannot be represented in a template and are ignored with a warning.
+    """
+    import re
+    schema = re.search(r"SCHEMA=\[([^\]]*)\]", response)
+    if schema:
+        bands = [b.strip(" '\"") for b in schema.group(1).split(",")]
+        if bands[:4] != ["Sloan_g", "Sloan_r", "Sloan_i", "Sloan_z"]:
+            raise ValueError(f"clear template needs the Sloan g,r,i,z schema, model has {bands}")
+        response = response.replace(schema.group(0), "")
+    terms = {}
+    for chunk in response.split(","):
+        if "=" not in chunk:
+            continue
+        name, value = chunk.split("=", 1)
+        name = name.strip()
+        if name == "FILTER":
+            if value.strip() != "Sloan_r":
+                raise ValueError(f"clear template needs Sloan_r as the reference filter, model has {value}")
+            continue
+        try:
+            terms[name.split(":")[0]] = float(value)
+        except ValueError:
+            continue
+
+    known = {"F1", "F3", "F4", "PAC"}
+    if not known & set(terms):
+        raise ValueError("no F1/F3/F4/PAC terms in RESPONSE: fit the clear band with "
+                         "F1/F3/F4/PAC for clear band subtraction to work")
+    colour = [t for t in terms if t not in known and (
+        t in ("XC", "SC") or (t[0] == "F" and t[1:].isdigit())
+        or (t[0] == "P" and any(c in t[1:] for c in "CDEF")))]
+    if colour:
+        print(f"WARNING: colour terms {colour} ignored in the clear template: fit with "
+              f"F1/F3/F4/PAC for clear band subtraction to work", file=sys.stderr)
+
+    f1, f3, f4, pac = (terms.get(t, 0.0) for t in ("F1", "F3", "F4", "PAC"))
+    w = {"g": f1 - pac * airmass, "r": 1.0 - f1 - f3 - f4 + pac * airmass, "i": f3, "z": f4}
+    return w
+
+
+def build_clear_template(science_file, hdr, target, outfile):
+    """Write a clear-band template (PS1 g,r,i,z masters weighted by clear_weights)
+    on the grid of the r master.  The other bands, reprojected onto that grid,
+    are cached as {target}-{band}@r.fits.  Returns True on success."""
+    response = _read_response(science_file, hdr)
+    if response is None:
+        print("ERROR: no RESPONSE in the header or ECSV — the clear template needs the "
+              "frame's F1/F3/F4/PAC model", file=sys.stderr)
+        return False
+    airmass = float(hdr.get("AIRMASS", 1.0))
+    try:
+        w = clear_weights(response, airmass)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return False
+    print("Clear template weights at airmass %.2f: %s" % (
+        airmass, "  ".join(f"{b}={w[b]:.3f}" for b in CLEAR_BANDS)))
+
+    masters = {}
+    for band in CLEAR_BANDS:
+        if band == "r" or w[band] != 0.0:
+            masters[band] = _ps1_master(target, band, hdr, normalised=True)
+            if masters[band] is None:
+                return False
+
+    from astropy.wcs import WCS
+    with astropy.io.fits.open(masters["r"]) as hl:
+        ref_header = hl[0].header
+        total = w["r"] * hl[0].data.astype(np.float64)
+    for band, master in masters.items():
+        if band == "r":
+            continue
+        aligned = os.path.join(PS1_TEMPLATE_DIR, f"{target}-{band}@r.fits")
+        if not (os.path.exists(aligned) and
+                os.path.getmtime(aligned) > max(os.path.getmtime(master),
+                                                os.path.getmtime(masters["r"]))):
+            from reproject import reproject_interp
+            print(f"Reprojecting PS1 {band} master onto the r master grid")
+            with astropy.io.fits.open(master) as hl:
+                data, _ = reproject_interp((hl[0].data, WCS(hl[0].header)), WCS(ref_header),
+                                           shape_out=total.shape)
+            astropy.io.fits.PrimaryHDU(np.nan_to_num(data).astype(np.float32),
+                                       header=ref_header).writeto(aligned, overwrite=True)
+        total += w[band] * astropy.io.fits.getdata(aligned).astype(np.float64)
+
+    header = ref_header.copy()
+    header["FILTER"] = "clear"
+    for band in CLEAR_BANDS:
+        header[f"CLRW_{band.upper()}"] = (w[band], f"weight of the PS1 {band} template")
+    astropy.io.fits.PrimaryHDU(total.astype(np.float32), header=header).writeto(outfile, overwrite=True)
+    return True
+
+
 def prepare_and_subtract(science_file, outfile, kernel_sigma_mult=None):
     """Reproject PS1 master template and run hotpants -> outfile.
 
     Reads TARGET (or OBJECT) and FILTER from the science image header to
-    locate ~/ps1-templates/{target}-{filter}.fits.  The reprojected template
+    locate ~/ps1-templates/{target}-{filter}.fits (for a clear frame, the
+    template is built from the g, r, i, z masters).  The reprojected template
     is a temporary file that is removed when done.
 
     Returns True on success, False on any recoverable error.
@@ -182,21 +328,22 @@ def prepare_and_subtract(science_file, outfile, kernel_sigma_mult=None):
         print("ERROR: TARGET/OBJECT keyword missing — cannot locate PS1 master", file=sys.stderr)
         return False
 
-    master = os.path.join(PS1_TEMPLATE_DIR, f"{target}-{filt}.fits")
-    if not os.path.exists(master):
-        orira  = hdr.get("ORIRA")
-        oridec = hdr.get("ORIDEC")
-        if orira is None or oridec is None:
-            print(f"ERROR: PS1 master not found and ORIRA/ORIDEC missing: {master}", file=sys.stderr)
-            return False
-        print(f"PS1 master not found — downloading {master}")
-        os.makedirs(PS1_TEMPLATE_DIR, exist_ok=True)
-        from pyrt.cli.ps1mosaic import main as ps1mosaic_main
-        ps1mosaic_main([str(orira), str(oridec), "30", filt, master])
-        if not os.path.exists(master):
-            print(f"ERROR: ps1mosaic failed to create {master}", file=sys.stderr)
-            return False
+    if filt.lower() in CLEAR_FILTERS:
+        os.makedirs(os.path.expanduser("~/tmp"), exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=os.path.expanduser("~/tmp")) as clrdir:
+            master = os.path.join(clrdir, f"{target}-clear.fits")
+            if not build_clear_template(science_file, hdr, target, master):
+                return False
+            return _subtract(science_file, outfile, master, kernel_sigma_mult)
 
+    master = _ps1_master(target, filt, hdr)
+    if master is None:
+        return False
+    return _subtract(science_file, outfile, master, kernel_sigma_mult)
+
+
+def _subtract(science_file, outfile, master, kernel_sigma_mult):
+    """Reproject master onto the science frame and run hotpants -> outfile."""
     hotpants = _find_hotpants()
     if not hotpants:
         print(f"ERROR: hotpants not found in PATH or at {HOTPANTS_FALLBACK}", file=sys.stderr)
