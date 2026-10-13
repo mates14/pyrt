@@ -9,6 +9,37 @@ import concurrent.futures
 from copy import deepcopy
 from scipy import stats as scipy_stats
 
+
+class _SerialExecutor:
+    """In-process stand-in for ProcessPoolExecutor: submit() runs the call
+    at once and hands back a finished future, so as_completed() works on it
+    unchanged.  The trial functions deep-copy the fit and its data, so
+    running them here leaves nothing behind that a worker process would not."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def submit(self, fn, *args, **kwargs):
+        future = concurrent.futures.Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except Exception as e:
+            future.set_exception(e)
+        return future
+
+
+def _executor(workers):
+    """Pool for the term trials: workers=None (or 0) is one process per CPU,
+    1 runs them in-process.  Batch reprocessing runs one frame per core and
+    wants 1 - a pool per frame there only multiplies processes past the CPU
+    count, and the pool is rebuilt for every forward and backward step."""
+    if workers == 1:
+        return _SerialExecutor()
+    return concurrent.futures.ProcessPoolExecutor(max_workers=workers or None)
+
 def format_polynomial_term(x_power, y_power):
     """
     Format polynomial term in human-friendly notation.
@@ -427,6 +458,8 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
     Returns:
         tuple: (selected_terms, final_wssrndf)
     """
+    workers = getattr(options, 'workers', None)
+
     # Initialize with always selected terms (direct terms)
     always_selected = always_selected or []
     selected_terms = always_selected.copy()
@@ -532,7 +565,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
         best_new_fitted_values = None
 
         if remaining_terms:
-            with concurrent.futures.ProcessPoolExecutor() as executor:
+            with _executor(workers) as executor:
                 # Submit all term trials in parallel
                 future_to_term = {
                     executor.submit(try_term_robust, ffit, term, selected_terms, fd.fotparams, combined_initial_values): term
@@ -590,7 +623,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
             worst_new_ndf = None
             worst_new_fitted_values = None
 
-            with concurrent.futures.ProcessPoolExecutor() as executor:
+            with _executor(workers) as executor:
                 # Submit all term removal trials in parallel (only for removable terms)
                 futures = [
                     executor.submit(try_remove_term_parallel,
