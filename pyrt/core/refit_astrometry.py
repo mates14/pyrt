@@ -632,7 +632,7 @@ def compute_error_model(zpntest, data):
     """
     Fit sigma_total² = S0 + SC·(ERRX2+ERRY2) from astrometric residuals.
     centering2 = image_var = ERRX2_IMAGE + ERRY2_IMAGE (total centroid variance, pix²).
-    Returns (sqrt(S0), SC) suitable for ASTSIGMA and ASTVAR headers.
+    Returns (sqrt(S0), SC, scatter) for the ASTSIGMA, ASTVAR and ASTSCATT headers.
     Uses the default mask (all matched stars, not just sigma-clipped).
     Slope estimated via Theil-Sen (median of pairwise slopes) for outlier robustness.
     """
@@ -646,9 +646,13 @@ def compute_error_model(zpntest, data):
     c2 = centering2[order]
     n  = len(r2)
 
+    # Actual scatter of all matched stars (telescope-quality metric for DB upload decisions).
+    # Uses the default mask so it reflects the full matched set, not just sigma-clipped stars.
+    scatter = float(np.median(np.abs(residuals_px)) / 0.67) if n else float('nan')
+
     if n < 10:
-        S0 = float(np.median(r2))
-        return np.sqrt(max(S0, 0.0)), 1.0
+        S0 = float(np.median(r2)) if n else float('nan')
+        return np.sqrt(max(S0, 0.0)), 1.0, scatter
 
     nbins = min(10, n // 5)
     bins  = np.array_split(np.arange(n), nbins)
@@ -668,10 +672,6 @@ def compute_error_model(zpntest, data):
     else:
         S0 = max(float(np.median(med_r2)), 0.0)
         SC = 0.0
-
-    # Actual scatter of all matched stars (telescope-quality metric for DB upload decisions).
-    # Uses the default mask so it reflects the full matched set, not just sigma-clipped stars.
-    scatter = float(np.median(np.abs(residuals_px)) / 0.67)
 
     logging.info(f"Error model fit: S0={S0:.6f} px², SC={SC:.4f}, ASTSIGMA={np.sqrt(S0):.4f} px, ASTSCATT={scatter:.4f} px")
     return np.sqrt(S0), SC, scatter
