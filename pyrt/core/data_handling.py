@@ -2,6 +2,7 @@ import numpy as np
 import logging
 import astropy.wcs
 from pyrt.utils.airmass import calculate_airmass_array
+from pyrt.catalog.catalog import extended_source_mask
 
 class FitData:
     """
@@ -444,6 +445,15 @@ def make_pairs_to_fit(det, cat, nearest_ind, imgwcs, options, data, maglim=None,
                     print(f"  Red limit: {options.redlim} (reddest color <= {options.redlim})")
                 if options.bluelim is not None:
                     print(f"  Blue limit: {options.bluelim} (bluest color >= {options.bluelim})")
+
+        # Galaxies (catalog entries without proper motion) have catalog magnitudes that miss
+        # part of the flux in the aperture; they bias the fit and inflate its scatter
+        if not getattr(options, 'keep_extended', False):
+            extended = extended_source_mask(cat)[cat_inds]
+            n_extended = np.sum(mag_mask & extended)
+            if n_extended > 0:
+                mag_mask &= ~extended
+                logging.info(f"Extended sources: {n_extended} catalog objects without proper motion excluded from the fit")
 
         # Exclude target object from calibration if requested
         logging.info(f"Target exclusion enabled: {options.exclude_target}, target found: {'Yes' if target_match is not None else 'No'}")

@@ -173,6 +173,10 @@ def parse_arguments(args=None):
                         default=config.get('exclude_target', 'True'),
                         help="Exclude the target object from photometric calibration (useful for variable sources) (default: True)")
 
+    parser.add_argument("--keep-extended", action='store_true',
+                        default=config.get('keep_extended', 'False'),
+                        help="Keep catalog objects without proper motion (likely galaxies) in the photometric fit")
+
     parser.add_argument("-v", "--verbose", action="store_true",
                         default=config.get('verbose', 'False'), help="Print debugging info")
 #   parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
@@ -185,7 +189,7 @@ def parse_arguments(args=None):
     args.filter_schemas = config['filter_schemas']
 
     # Convert string 'True'/'False' to boolean for action="store_true" arguments
-    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'use_stepwise', 'stars', 'autoupdate', 'target_photometry', 'exclude_target', 'single_zeropoint']:
+    for arg in ['astrometry', 'guessbase', 'johnson', 'verbose', 'makak', 'use_stepwise', 'stars', 'autoupdate', 'target_photometry', 'exclude_target', 'single_zeropoint', 'keep_extended']:
         setattr(args, arg, str(getattr(args, arg)).lower() == 'true')
 
     return args

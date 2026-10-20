@@ -882,3 +882,17 @@ class Catalog(astropy.table.Table):
             new_cat.meta['catalog_props'] = self.meta['catalog_props'].copy()
         return new_cat
 
+
+
+def extended_source_mask(cat: astropy.table.Table, max_fraction: float = 0.5) -> np.ndarray:
+    """Catalog entries that are likely galaxies: no proper motion at all (pmra == pmdec == 0
+    exactly, i.e. a Gaia 2-parameter solution). Their PSF-like catalog magnitude misses part
+    of the flux an aperture collects, so they look brighter than catalogued (by ~1 mag with
+    an 8" PSF). A catalog without proper motions (all zero, e.g. PanSTARRS) gives no mask."""
+    nomask = np.zeros(len(cat), dtype=bool)
+    if len(cat) == 0 or 'pmra' not in cat.colnames or 'pmdec' not in cat.colnames:
+        return nomask
+    pm0 = (np.asarray(cat['pmra'], dtype=np.float64) == 0) & (np.asarray(cat['pmdec'], dtype=np.float64) == 0)
+    if np.mean(pm0) > max_fraction:
+        return nomask
+    return pm0
