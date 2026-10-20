@@ -185,7 +185,8 @@ def readOptions(args=sys.argv[1:]):
   parser.add_argument("-f", "--frame", help="Image frame width to be ignored in pixels (default=32)", type=float, default=32)
   parser.add_argument("-g", "--regs", action='store_true', help="Save per image regs")
   parser.add_argument("-w", "--web-output", help="Save web-friendly JSON output to specified file", type=str)
-  parser.add_argument("-s", "--siglim", help="Sigma limit for detections to be taken into account.", type=float, default=5)
+  parser.add_argument("-s", "--siglim", help="Sigma limit for detections to be taken into account (default=5).", type=float, default=5)
+  parser.add_argument("-S", "--devsig", help="Sigma limit for a catalogued star to be considered brighter/fainter than the catalog (default=5).", type=float, default=5)
   parser.add_argument("-m", "--min-found", help="Minimum number of occurences to consider candidate valid", type=int, default=4)
   parser.add_argument("-u", "--usno", help="Use USNO catalog.", action='store_true', default=True)
   parser.add_argument("-q", "--usnox", help="Use USNO catalog extra.", action='store_true')
@@ -408,12 +409,13 @@ def compare_to_catalog(magdet, errdet, expect, dist, single, extended, blend_r, 
     be in the aperture. A candidate containing an `extended` source (galaxy) may be up to
     galaxy_margin brighter, its catalog magnitude misses part of the flux.
 
-    Returns (sigma, expected magnitude, principal catalog star, number of stars, residual)
-    of the candidate with the smallest |sigma| (>0 = detection brighter), or None."""
+    Returns (sigma, expected magnitude, principal catalog star, number of stars, residual,
+    contains a galaxy) of the candidate with the smallest |sigma| (>0 = detection brighter),
+    or None."""
     ok = np.isfinite(expect)
-    cands = []  # (expected, may be brighter by, may be fainter by, principal star, nstars)
+    cands = []  # (expected, may be brighter by, may be fainter by, principal star, nstars, galaxy)
     for k in np.where(ok & single)[0]:
-        cands.append((expect[k], galaxy_margin if extended[k] else 0.0, 0.0, k, 1))
+        cands.append((expect[k], galaxy_margin if extended[k] else 0.0, 0.0, k, 1, extended[k]))
     if len(cands) == 0:
         return None
     near = np.where(ok & (dist <= blend_r))[0]
@@ -421,14 +423,15 @@ def compare_to_catalog(magdet, errdet, expect, dist, single, extended, blend_r, 
     for n in range(2, len(near)+1):
         sel = near[:n]
         summed = -2.5*np.log10(np.sum(np.power(10.0, -0.4*expect[sel])))
-        cands.append((summed, blend_margin + (galaxy_margin if np.any(extended[sel]) else 0.0), blend_margin, sel[0], n))
+        gal = np.any(extended[sel])
+        cands.append((summed, blend_margin + (galaxy_margin if gal else 0.0), blend_margin, sel[0], n, gal))
     best = None
-    for exp, up, down, k, n in cands:
+    for exp, up, down, k, n, gal in cands:
         r = exp - magdet
         r -= np.clip(r, -down, up)  # zero within the allowed band
         sigma = r/errdet
         if best is None or np.abs(sigma) < np.abs(best[0]):
-            best = (sigma, exp, k, n, r)
+            best = (sigma, exp, k, n, r, gal)
     return best
 
 # ******** main() **********
@@ -760,7 +763,7 @@ def main():
                 np.isin(expect_cat, i), extended[expect_cat], blend_r,
                 options.blend_margin, options.galaxy_margin)
             if best is not None:
-                match, bestmag, k, nblend, resid = best
+                match, bestmag, k, nblend, resid, galaxy = best
                 bestcat = expect_cat[k]
                 mdiff = np.abs(resid)
             # (catalogued but without a magnitude in PHFILTER: neither a new object nor comparable)
@@ -823,10 +826,11 @@ def main():
                 continue
 
             # 3. objekt je jasnejsi nez v katalogu (= kandidat)
-            if match is not None and match > options.siglim and errdet<1.091/options.siglim and mdiff>0.05:
+            if match is not None and match > options.devsig and errdet<1.091/options.siglim and mdiff>0.05:
     #            print("+",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet,mdiff)
-                if options.regs:
-                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=yellow\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
+                in_frame = not (d['X_IMAGE'] < options.frame or d['Y_IMAGE']<options.frame or d['X_IMAGE'] > d.meta['IMGAXIS1']-options.frame or d['Y_IMAGE']>d.meta['IMGAXIS2']-options.frame)
+                if options.regs:  # dashed = brighter, but in the frame margin, not taken further
+                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=yellow%s\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL'], "" if in_frame else " dash=1"))
 
                 # Web output for brighter objects
                 if web_objects is not None:
@@ -846,7 +850,7 @@ def main():
                         'status': f'Brighter than catalog ({match:.1f}σ, Δmag={bestmag-magdet:.2f})'
                     })
 
-                if not (d['X_IMAGE'] < options.frame or d['Y_IMAGE']<options.frame or d['X_IMAGE'] > d.meta['IMGAXIS1']-options.frame or d['Y_IMAGE']>d.meta['IMGAXIS2']-options.frame):
+                if in_frame:
                     candx.append(d["X_IMAGE"])
                     candy.append(d["Y_IMAGE"])
                     candra.append(d['ALPHA_J2000'])
@@ -862,7 +866,7 @@ def main():
                     candflt.append(str(det.meta.get('FILTER', '')))
 
             # 4. objekt je slabsi nez v katalogu (= zajimavost)
-            if match is not None and match < -options.siglim and errdet<1.091/options.siglim and mdiff>0.05:
+            if match is not None and match < -options.devsig and errdet<1.091/options.siglim and mdiff>0.05:
     #            print("-",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet,mdiff)
                 if options.regs:
                     some_file.write("circle(%.7f,%.7f,%.3f\") # color=blue\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
@@ -886,9 +890,12 @@ def main():
                     })
 
             # 5. objekt odpovida katalogu (nic)
-            if match is not None and (np.abs(match) <= options.siglim or mdiff<0.05) and errdet<1.091/options.siglim:
+            if match is not None and (np.abs(match) <= options.devsig or mdiff<0.05) and errdet<1.091/options.siglim:
                 if options.regs:
-                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=green\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
+                    # green (the file default) = one catalog star, cyan = needed its neighbours
+                    # (a blend), cyan dashed = contains a galaxy (allowed to be brighter)
+                    style = ["color=cyan", "dash=1"] if galaxy else ["color=cyan"] if nblend > 1 else []
+                    some_file.write("circle(%.7f,%.7f,%.3f\")%s\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL'], " # " + " ".join(style) if style else ""))
 
                 # Web output for normal objects
                 if web_objects is not None:
@@ -919,6 +926,7 @@ def main():
             # Store original candidates
             orig_candidates = list(zip(candx, candy, candra, canddec, candtime,
                                      candexp, candmag, canddmag, candfw))
+            orig_catalogued = np.isfinite(candcat)  # brightened stars, already yellow in the reg file
 
             # Track killed candidates for reg file
             killed_candidates = set()  # Store indices of killed candidates
@@ -990,10 +998,10 @@ def main():
                 fwhm_margin = 1.5  # Define FWHM margin
 
                 for i, (x, y, _, _, _, _, mag, _, fw) in enumerate(orig_candidates):
-                    if mag < options.maglim:
+                    if mag < options.maglim and not orig_catalogued[i]:
                         if i in killed_candidates:
-                            # Write killed candidates in cyan
-                            some_file.write(f"circle({x:.7f},{y:.7f},{1.5*idlimit*d.meta['PIXEL']}\") # color=cyan\n")
+                            # killed by the secondary catalog (USNO): green dashed
+                            some_file.write(f"circle({x:.7f},{y:.7f},{1.5*idlimit*d.meta['PIXEL']}\") # dash=1\n")
                         else:
                             # Check FWHM ratio for surviving candidates
                             fwhm_ratio = fw / det.meta['FWHM']
@@ -1024,6 +1032,7 @@ def main():
                 'objects': web_objects,
                 'metadata': {
                     'siglim': options.siglim,
+                    'devsig': options.devsig,
                     'frame_width': options.frame,
                     'maglim': options.maglim,
                     'image_fwhm': float(det.meta.get('FWHM', 0)),
@@ -1471,7 +1480,7 @@ def main():
             print(f"other   ra/dec {np.average(oo['ALPHA_J2000']):.7f} {np.average(oo['DELTA_J2000']):.7f} num: {len(trail_detections):.0f} ({motion_significance:.1f}σ motion, ot_ness={ot_score:.1f}, mp={mp_score:.1f})")
 
         # Write to reg file with appropriate color
-        some_file.write(f"circle({np.average(oo['ALPHA_J2000']):.7f},{np.average(oo['DELTA_J2000']):.7f},{5*idlimit*d.meta['PIXEL']:.3f}\") # color={color} text={{{object_type} id:{oo['INDEX']},mag:{oo['MAG_CALIB']:.1f},var:{oo['MAG_VAR']:.1f},pos:{motion_significance:.1f}σ}}\n")
+        some_file.write(f"circle({np.average(oo['ALPHA_J2000']):.7f},{np.average(oo['DELTA_J2000']):.7f},{3*d.meta['FWHM']*d.meta['PIXEL']:.3f}\") # color={color} text={{{object_type} id:{oo['INDEX']},mag:{oo['MAG_CALIB']:.1f},var:{oo['MAG_VAR']:.1f},pos:{motion_significance:.1f}σ}}\n")
     some_file.close()
 
     # MATPLOTLIB LIGHTCURVE
