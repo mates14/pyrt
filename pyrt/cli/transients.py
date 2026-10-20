@@ -117,7 +117,7 @@ class MovingObjectTrail:
             self.motion_sigma_dec = 5.0
 
     def get_search_radius(self, time_jd, base_idlimit=3.6, max_radius=30.0):
-        """Calculate adaptive search radius for matching"""
+        """Calculate adaptive search radius for matching (all in arcsec)"""
         if len(self.detections) < 2:
             return base_idlimit  # Conservative for new objects
 
@@ -1087,7 +1087,9 @@ def main():
             for trail in object_trails:
                 pred_ra, pred_dec = trail.predict_position(current_time)
                 predicted_positions.append([pred_ra, pred_dec])
-                search_radius = trail.get_search_radius(current_time, base_idlimit=idlimit)
+                # base radius in arcsec (idlimit is in pixels and stretched to the most
+                # extended object of the frame): one FWHM tolerates seeing changes
+                search_radius = trail.get_search_radius(current_time, base_idlimit=d.meta['FWHM']*d.meta['PIXEL'])
                 search_radii.append(search_radius)
 
             if options.verbose and imgno <= 3:  # Only show for first few images
