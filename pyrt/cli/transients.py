@@ -250,6 +250,17 @@ def get_usno(rasc, decl, width=0.25, height=0.25, mlim=17):
 
     return cat
 
+def usno_rmag(usno):
+    """Red magnitude of USNO-B entries: R2, else R1, else B2, B1 or I. A missing magnitude
+    is stored as 0 (R1 for ~1/3 of the entries) and there are junk values like 50 or 83;
+    taken at face value a 0 makes the star 'very bright'. NaN if nothing usable."""
+    rmag = np.full(len(usno), np.nan)
+    for band in ['I', 'B1', 'B2', 'R1', 'R2']:  # later bands take precedence
+        m = np.asarray(usno[band], dtype=np.float64)
+        good = (m > 0) & (m < 25)
+        rmag[good] = m[good]
+    return rmag
+
 def remove_junk(hdr):
     for delme in ['comments','COMMENTS','history','HISTORY']:
         try:
@@ -523,6 +534,7 @@ def main():
         candcol=[]  # catalog color schema[0]-schema[1]
         candplx=[]  # catalog parallax [mas]
         candflt=[]  # filter of the frame
+        candrad=[]  # identification radius [px], also used for the USNO check
 
         det = open_ecsv_file(arg, verbose=options.verbose)
         if det is None:
@@ -593,6 +605,12 @@ def main():
         ffit = response_model(det.meta, schema)
         extended = extended_source_mask(cat)
 
+        # with zero colors the model must give back MAG_CALIB, otherwise the file was
+        # calibrated by a different fotfit (e.g. before the RS/RC fix) and needs a new dophot
+        recalib = np.asarray(model_magnitude(ffit, det.meta, det, [0, 0, 0, 0])) - np.asarray(det['MAG_CALIB'])
+        if np.nanmax(np.abs(recalib)) > 0.01:
+            print("WARNING: RESPONSE in %s does not reproduce MAG_CALIB (up to %.2f mag off), rerun dophot"%(arg, np.nanmax(np.abs(recalib))))
+
         # MAGERR_CALIB vs. the scatter dophot actually found (e.g. stacks with resampling-
         # correlated noise have WSSRNDF ~5, i.e. the errors are ~2x too small)
         wssrndf = det.meta.get('WSSRNDF')
@@ -646,6 +664,8 @@ def main():
         idlimit = compute_effective_idlimit(det, options)
         if use_object_specific:  # the KDTree query must reach the per-object radii (FWHM/2 floor)
             idlimit = max(idlimit, min(np.max(sample_radii), 10.0))
+        obj_radius = np.array(sample_radii) if use_object_specific else np.full(len(det), idlimit)
+        regrad = 3*det.meta['FWHM']*det.meta['PIXEL']  # region circle radius [arcsec]
         if options.verbose: print("Identification radius: %.2f pixels"%(idlimit))
 
         # ===  identification with KDTree  ===
@@ -744,7 +764,7 @@ def main():
 
         # make pairs to be fitted
         pair_start = 0
-        for i, bi, d in zip(nearest_ind, blend_ind, det):
+        for j, (i, bi, d) in enumerate(zip(nearest_ind, blend_ind, det)):
 
             mdiff = 0
             match = None
@@ -779,10 +799,10 @@ def main():
                 if options.regs and (not options.usno) and d['MAG_CALIB'] < options.maglim:
                     print("#",d["FWHM_IMAGE"],det.meta['FWHM'])
                     if d["FWHM_IMAGE"] > 1.5*det.meta['FWHM'] or d["FWHM_IMAGE"] < 1.5*det.meta['FWHM']:
-    #                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=brown\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
+    #                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=brown\n"%(d["X_IMAGE"], d["Y_IMAGE"],regrad))
                         some_file.write("circle(%.7f,%.7f,%.3f\") # color=brown\n"%(d["X_IMAGE"], d["Y_IMAGE"],10*d["FWHM_IMAGE"]))
                     else:
-    #                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
+    #                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(d["X_IMAGE"], d["Y_IMAGE"],regrad))
                         some_file.write("circle(%.7f,%.7f,%.3f\") # color=red\n"%(d["X_IMAGE"], d["Y_IMAGE"],10*d["FWHM_IMAGE"]))
 
                 # Web output for uncatalogued objects
@@ -823,6 +843,7 @@ def main():
                 candcol.append(np.nan)
                 candplx.append(np.nan)
                 candflt.append(str(det.meta.get('FILTER', '')))
+                candrad.append(obj_radius[j])
                 continue
 
             # 3. objekt je jasnejsi nez v katalogu (= kandidat)
@@ -830,7 +851,7 @@ def main():
     #            print("+",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet,mdiff)
                 in_frame = not (d['X_IMAGE'] < options.frame or d['Y_IMAGE']<options.frame or d['X_IMAGE'] > d.meta['IMGAXIS1']-options.frame or d['Y_IMAGE']>d.meta['IMGAXIS2']-options.frame)
                 if options.regs:  # dashed = brighter, but in the frame margin, not taken further
-                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=yellow%s\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL'], "" if in_frame else " dash=1"))
+                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=yellow%s\n"%(d["X_IMAGE"], d["Y_IMAGE"],regrad, "" if in_frame else " dash=1"))
 
                 # Web output for brighter objects
                 if web_objects is not None:
@@ -864,12 +885,13 @@ def main():
                     candcol.append(catcolors[0][bestcat])
                     candplx.append(cat['parallax'][bestcat] if 'parallax' in cat.colnames else np.nan)
                     candflt.append(str(det.meta.get('FILTER', '')))
+                    candrad.append(obj_radius[j])
 
             # 4. objekt je slabsi nez v katalogu (= zajimavost)
             if match is not None and match < -options.devsig and errdet<1.091/options.siglim and mdiff>0.05:
     #            print("-",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet,mdiff)
                 if options.regs:
-                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=blue\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
+                    some_file.write("circle(%.7f,%.7f,%.3f\") # color=blue\n"%(d["X_IMAGE"], d["Y_IMAGE"],regrad))
 
                 # Web output for fainter objects
                 if web_objects is not None:
@@ -895,7 +917,7 @@ def main():
                     # green (the file default) = one catalog star, cyan = needed its neighbours
                     # (a blend), cyan dashed = contains a galaxy (allowed to be brighter)
                     style = ["color=cyan", "dash=1"] if galaxy else ["color=cyan"] if nblend > 1 else []
-                    some_file.write("circle(%.7f,%.7f,%.3f\")%s\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL'], " # " + " ".join(style) if style else ""))
+                    some_file.write("circle(%.7f,%.7f,%.3f\")%s\n"%(d["X_IMAGE"], d["Y_IMAGE"],regrad, " # " + " ".join(style) if style else ""))
 
                 # Web output for normal objects
                 if web_objects is not None:
@@ -931,68 +953,40 @@ def main():
             # Track killed candidates for reg file
             killed_candidates = set()  # Store indices of killed candidates
 
-            # Define USNO filtering phases: candidate near any USNO star (simple), near a
-            # brighter one = close neighbour/blend (double, 4 px), near a very bright one (10 px).
-            # (The radii are the original ones; per-object percentiles made them sub-pixel.)
-            phase_simple = idlimit
-            phase_double = max(4.0, idlimit)
-            phase_bright = max(10.0, idlimit)
-
+            # USNO filtering phases: candidate near any USNO star (simple), near a brighter
+            # one = close neighbour/blend (double, 4 px), near a very bright one (10 px). The
+            # radius is the candidate's own identification radius (as for the reference catalog);
+            # the image-wide idlimit is stretched to the most extended object in the frame.
+            candrad = np.array(candrad)
             usno_phases = [
-                ('simple', imglim, phase_simple, 0),
-                ('double', imglim - 1, phase_double, 1),
-                ('bright', imglim - 5, phase_bright, 0)
+                ('simple', imglim, candrad),
+                ('double', imglim - 1, np.maximum(4.0, candrad)),
+                ('bright', imglim - 5, np.maximum(10.0, candrad))
             ]
 
-            # Run through each USNO filtering phase
-            for uphase, umaglim, uidlim, unumber in usno_phases:
-                if len(candy) < 1:
+            urmag = usno_rmag(usno)
+            alive = np.ones(len(candx), dtype=bool)
+            catalogued = np.isfinite(candcat)  # brightened stars are not removed
+            Y = np.array([candx, candy]).transpose()
+            for uphase, umaglim, urad in usno_phases:
+                if not np.any(alive):
                     break
-
-                # Create USNO KDTree for this phase
+                bright_enough = urmag < umaglim
+                if not np.any(bright_enough):
+                    continue
                 tree_u = KDTree(np.array(imgwcs.all_world2pix(
-                    usno['radeg'][usno['R1'] < umaglim],
-                    usno['decdeg'][usno['R1'] < umaglim],
-                    1)).transpose())
+                    usno['radeg'][bright_enough], usno['decdeg'][bright_enough], 1)).transpose())
+                hits = tree_u.query_radius(Y, r=urad, count_only=True)
+                kill = alive & (hits > 0) & ~catalogued
+                killed_candidates.update(np.where(kill)[0])
+                alive &= ~kill
+                print(f'USNO {uphase} left {np.sum(alive)} candidates, killed {np.sum(kill)}')
 
-                Y = np.array([candx, candy]).transpose()
-                nearest_ind_u, nearest_dist_u = tree_u.query_radius(
-                    Y, r=uidlim, return_distance=True, count_only=False)
-
-                # Filter candidates
-                cand2x = []; cand2y = []; cand2ra = []; cand2dec = []
-                cand2time = []; cand2exp = []; cand2mag = []
-                cand2dmag = []; cand2fw = []
-                cand2cat = []; cand2col = []; cand2plx = []; cand2flt = []
-
-                live = 0; kill = 0
-                for i in range(0, len(candx)):
-                    if len(nearest_ind_u[i]) > 0 and not np.isfinite(candcat[i]):
-                        killed_candidates.add(i)
-                        kill += 1
-                    else:
-                        live += 1
-                        cand2x.append(candx[i])
-                        cand2y.append(candy[i])
-                        cand2ra.append(candra[i])
-                        cand2dec.append(canddec[i])
-                        cand2time.append(candtime[i])
-                        cand2exp.append(candexp[i])
-                        cand2mag.append(candmag[i])
-                        cand2dmag.append(canddmag[i])
-                        cand2fw.append(candfw[i])
-                        cand2cat.append(candcat[i])
-                        cand2col.append(candcol[i])
-                        cand2plx.append(candplx[i])
-                        cand2flt.append(candflt[i])
-
-                print(f'USNO {uphase} left {live} candidates, killed {kill}')
-
-                # Update candidate lists for next phase
-                candx = cand2x; candy = cand2y; candra = cand2ra
-                canddec = cand2dec; candtime = cand2time; candexp = cand2exp
-                candmag = cand2mag; canddmag = cand2dmag; candfw = cand2fw
-                candcat = cand2cat; candcol = cand2col; candplx = cand2plx; candflt = cand2flt
+            keep = np.where(alive)[0]
+            candx, candy, candra, canddec, candtime, candexp, candmag, canddmag, candfw, \
+                candcat, candcol, candplx, candflt, candrad = [[c[k] for k in keep] for c in
+                (candx, candy, candra, canddec, candtime, candexp, candmag, canddmag, candfw,
+                 candcat, candcol, candplx, candflt, candrad)]
 
             if options.regs:
                 fwhm_margin = 1.5  # Define FWHM margin
@@ -1001,16 +995,16 @@ def main():
                     if mag < options.maglim and not orig_catalogued[i]:
                         if i in killed_candidates:
                             # killed by the secondary catalog (USNO): green dashed
-                            some_file.write(f"circle({x:.7f},{y:.7f},{1.5*idlimit*d.meta['PIXEL']}\") # dash=1\n")
+                            some_file.write(f"circle({x:.7f},{y:.7f},{regrad}\") # dash=1\n")
                         else:
                             # Check FWHM ratio for surviving candidates
                             fwhm_ratio = fw / det.meta['FWHM']
                             if 1/fwhm_margin < fwhm_ratio < fwhm_margin:
                                 # Normal FWHM ratio - use red
-                                some_file.write(f"circle({x:.7f},{y:.7f},{1.5*idlimit*d.meta['PIXEL']}\") # color=red\n")
+                                some_file.write(f"circle({x:.7f},{y:.7f},{regrad}\") # color=red\n")
                             else:
                                 # Abnormal FWHM ratio - use magenta
-                                some_file.write(f"circle({x:.7f},{y:.7f},{1.5*idlimit*d.meta['PIXEL']}\") # color=magenta\n")
+                                some_file.write(f"circle({x:.7f},{y:.7f},{regrad}\") # color=magenta\n")
 
         if options.regs:
             some_file.close()
