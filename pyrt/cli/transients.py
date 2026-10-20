@@ -26,7 +26,7 @@ from sklearn.neighbors import KDTree,BallTree
 
 from pyrt.core import zpnfit
 from pyrt.core import fotfit
-from pyrt.catalog.catalog import Catalog
+from pyrt.catalog.catalog import Catalog, extended_source_mask
 from pyrt.core.match_stars import apply_catalog_astrometric_corrections, compute_effective_idlimit
 from pyrt.utils.dophot_config import load_config
 
@@ -189,6 +189,8 @@ def readOptions(args=sys.argv[1:]):
   parser.add_argument("-m", "--min-found", help="Minimum number of occurences to consider candidate valid", type=int, default=4)
   parser.add_argument("-u", "--usno", help="Use USNO catalog.", action='store_true', default=True)
   parser.add_argument("-q", "--usnox", help="Use USNO catalog extra.", action='store_true')
+  parser.add_argument("--blend-margin", help="Tolerance [mag] for a detection blending several catalog stars, whose light is only partly in the aperture (default=0.2)", type=float, default=0.2)
+  parser.add_argument("--galaxy-margin", help="How much brighter [mag] than catalogued a galaxy (no proper motion) may be (default=2.0)", type=float, default=2.0)
 # General for more tools:
   parser.add_argument("-l", "--maglim", help="Do not get any more than this mag from the catalog to compare.", type=float)
   parser.add_argument("-L", "--brightlim", help="Do not get any less than this mag from the catalog to compare.", type=float)
@@ -397,6 +399,38 @@ def brightening_fit(oo):
         rate_err *= np.sqrt(max(chi2/ndf, 1.0))
     return dmag, rate, rate_err
 
+def compare_to_catalog(magdet, errdet, expect, dist, single, extended, blend_r, blend_margin, galaxy_margin):
+    """Best catalog explanation of a detected magnitude `magdet` (error `errdet`).
+
+    Candidate brightnesses (expected magnitudes of catalog stars `expect` at distances `dist`):
+    each identified star alone (`single`), and the stars within `blend_r` summed nearest first
+    (two, three, ... all), these within +-blend_margin as only part of a neighbour's light may
+    be in the aperture. A candidate containing an `extended` source (galaxy) may be up to
+    galaxy_margin brighter, its catalog magnitude misses part of the flux.
+
+    Returns (sigma, expected magnitude, principal catalog star, number of stars, residual)
+    of the candidate with the smallest |sigma| (>0 = detection brighter), or None."""
+    ok = np.isfinite(expect)
+    cands = []  # (expected, may be brighter by, may be fainter by, principal star, nstars)
+    for k in np.where(ok & single)[0]:
+        cands.append((expect[k], galaxy_margin if extended[k] else 0.0, 0.0, k, 1))
+    if len(cands) == 0:
+        return None
+    near = np.where(ok & (dist <= blend_r))[0]
+    near = near[np.argsort(dist[near])]
+    for n in range(2, len(near)+1):
+        sel = near[:n]
+        summed = -2.5*np.log10(np.sum(np.power(10.0, -0.4*expect[sel])))
+        cands.append((summed, blend_margin + (galaxy_margin if np.any(extended[sel]) else 0.0), blend_margin, sel[0], n))
+    best = None
+    for exp, up, down, k, n in cands:
+        r = exp - magdet
+        r -= np.clip(r, -down, up)  # zero within the allowed band
+        sigma = r/errdet
+        if best is None or np.abs(sigma) < np.abs(best[0]):
+            best = (sigma, exp, k, n, r)
+    return best
+
 # ******** main() **********
 
 def main():
@@ -554,8 +588,20 @@ def main():
         catcolors = [catmags[k%len(schema)] - catmags[(k+1)%len(schema)] for k in range(4)]
         catmag = catmags[schema.index(phfilter)] if phfilter in schema else np.array(cat[phfilter], dtype=np.float64)
         ffit = response_model(det.meta, schema)
+        extended = extended_source_mask(cat)
 
-        print("Catalog %s returned %d results (filter %s, schema %s)"%(catname, len(cat), phfilter, phschema))
+        # MAGERR_CALIB vs. the scatter dophot actually found (e.g. stacks with resampling-
+        # correlated noise have WSSRNDF ~5, i.e. the errors are ~2x too small)
+        wssrndf = det.meta.get('WSSRNDF')
+        if wssrndf is None or not np.isfinite(wssrndf) or wssrndf <= 0:
+            print("WARNING: no usable WSSRNDF in %s, magnitude errors taken as they are"%(arg))
+            errscale = 1.0
+        else:
+            if wssrndf < 1:
+                print("WARNING: WSSRNDF=%.2f < 1 in %s, magnitude errors overestimated (wrong GAIN?)"%(wssrndf, arg))
+            errscale = np.sqrt(wssrndf)
+
+        print("Catalog %s returned %d results (filter %s, schema %s), %d extended, errors scaled by %.2f"%(catname, len(cat), phfilter, phschema, np.sum(extended), errscale))
         if options.usnox:
             usno = get_usno(det.meta['CTRRA'], det.meta['CTRDEC'], width=enlarge*det.meta['FIELD'], height=enlarge*det.meta['FIELD'], mlim=options.maglim)
         if options.verbose: print("Catalog search took %.3fs"%(time.time()-start))
@@ -673,11 +719,18 @@ def main():
 
         # Initialize web output data structure
         web_objects = [] if options.web_output else None
+        # Catalog stars whose light may reach the aperture of a detection (identified ones
+        # included): candidates for a blend, i.e. one detection of several catalog stars
+        blend_r = det.meta.get('APERTURE', det.meta['FWHM']) + det.meta['FWHM']/2.0
+        blend_ind, blend_dist = tree.query_radius(Y, r=max(blend_r, idlimit), return_distance=True, count_only=False)
+        if options.verbose: print("Blend radius: %.2f pixels"%(blend_r))
+
         # Every detection-catalog pair through dophot's model: the magnitude the detection
         # should have (in MAG_CALIB terms) given the catalog star's magnitude and colors.
         # (expected - MAG_CALIB) is exactly the residual of dophot's photometric fit.
-        pair_det = np.repeat(np.arange(len(det)), [len(ii) for ii in nearest_ind])
-        pair_cat = np.concatenate(nearest_ind).astype(int) if len(pair_det) > 0 else np.array([], dtype=int)
+        pair_det = np.repeat(np.arange(len(det)), [len(ii) for ii in blend_ind])
+        pair_cat = np.concatenate(blend_ind).astype(int) if len(pair_det) > 0 else np.array([], dtype=int)
+        pair_dist = np.concatenate(blend_dist) if len(pair_det) > 0 else np.array([])
         if len(pair_det) > 0:
             # a missing color is taken as 0, i.e. the star is compared to plain MAG_CALIB
             pcolors = [np.nan_to_num(c[pair_cat]) for c in catcolors]
@@ -688,7 +741,7 @@ def main():
 
         # make pairs to be fitted
         pair_start = 0
-        for i, d in zip(nearest_ind, det):
+        for i, bi, d in zip(nearest_ind, blend_ind, det):
 
             mdiff = 0
             match = None
@@ -697,18 +750,19 @@ def main():
             errdet = np.float64(d['MAGERR_CALIB'])
             imglim = d.meta['MAGZERO']+d.meta['LIMFLX3']
 
-            expect = pair_expect[pair_start:pair_start+len(i)]
-            expect_cat = pair_cat[pair_start:pair_start+len(i)]
-            pair_start += len(i)
+            expect = pair_expect[pair_start:pair_start+len(bi)]
+            expect_cat = pair_cat[pair_start:pair_start+len(bi)]
+            expect_dist = pair_dist[pair_start:pair_start+len(bi)]
+            pair_start += len(bi)
 
-            error_for_comparison = np.sqrt(errdet*errdet+0.01*0.01)
-            mpar = (expect-magdet)/error_for_comparison
-            if np.any(np.isfinite(mpar)):
-                best = np.nanargmin(np.abs(mpar))
-                bestmag = expect[best]
-                bestcat = expect_cat[best]
-                match = mpar[best]
-                mdiff = np.abs(bestmag-magdet)
+            error_for_comparison = np.sqrt((errscale*errdet)**2 + 0.01*0.01)
+            best = compare_to_catalog(magdet, error_for_comparison, expect, expect_dist,
+                np.isin(expect_cat, i), extended[expect_cat], blend_r,
+                options.blend_margin, options.galaxy_margin)
+            if best is not None:
+                match, bestmag, k, nblend, resid = best
+                bestcat = expect_cat[k]
+                mdiff = np.abs(resid)
             # (catalogued but without a magnitude in PHFILTER: neither a new object nor comparable)
 
             # pet moznosti:
@@ -832,7 +886,7 @@ def main():
                     })
 
             # 5. objekt odpovida katalogu (nic)
-            if match is not None and (( match > -options.siglim and (bestmag-magdet)/errdet < options.siglim) or mdiff<0.05 ) and errdet<1.091/options.siglim:
+            if match is not None and (np.abs(match) <= options.siglim or mdiff<0.05) and errdet<1.091/options.siglim:
                 if options.regs:
                     some_file.write("circle(%.7f,%.7f,%.3f\") # color=green\n"%(d["X_IMAGE"], d["Y_IMAGE"],1.5*idlimit*d.meta['PIXEL']))
 
