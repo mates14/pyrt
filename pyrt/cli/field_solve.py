@@ -247,6 +247,64 @@ def remove_pv_coefficients(fits_file, verbose=False):
         return False
 
 
+def is_fits_file(path):
+    """True if path looks like a FITS file (starts with the SIMPLE card)"""
+    try:
+        with open(path, 'rb') as f:
+            return f.read(6) == b'SIMPLE'
+    except OSError:
+        return False
+
+
+# Header keywords describing a WCS solution, removed before inserting a new one
+WCS_KEY_RE = re.compile(r'^(WCSAXES|CTYPE\d|CUNIT\d|CRPIX\d|CRVAL\d|CDELT\d|CROTA\d|'
+                        r'CD\d_\d|PC\d_\d|PV\d_\d+|LONPOLE|LATPOLE|RADESYS|EQUINOX|'
+                        r'A_ORDER|B_ORDER|AP_ORDER|BP_ORDER|A_\d+_\d+|B_\d+_\d+|'
+                        r'AP_\d+_\d+|BP_\d+_\d+|A_DMAX|B_DMAX)$')
+
+
+def read_hints(header, scale=None, verbose=False):
+    """Get (ra, dec, scale) hints from a FITS header or ecsv meta dictionary"""
+    ra_hint = None
+    dec_hint = None
+    # RA hint: try OBJRA first (telescope commanded position), then RASC
+    for key in ('OBJRA', 'RASC', 'RA', 'TELRA'):
+        if key in header:
+            ra_hint = float(header[key])
+            break
+    for key in ('OBJDEC', 'DECL', 'DEC', 'TELDEC'):
+        if key in header:
+            dec_hint = float(header[key])
+            break
+    # Scale from header if not provided on command line
+    if scale is None:
+        if 'CD1_1' in header:
+            cd11 = header['CD1_1']
+            cd12 = header.get('CD1_2', 0.0)
+            scale = math.sqrt(cd11**2 + cd12**2) * 3600.0
+            if verbose:
+                print(f"Scale from CD matrix: {scale:.4f} arcsec/pixel")
+        elif 'CDELT1' in header:
+            scale = abs(header['CDELT1']) * 3600.0
+            if verbose:
+                print(f"Scale from CDELT1: {scale:.4f} arcsec/pixel")
+    return ra_hint, dec_hint, scale
+
+
+def update_catalog_wcs(cat_file, wcs_dict, verbose=False):
+    """Replace the WCS keywords in an ecsv catalog's metadata"""
+    cat = astropy.table.Table.read(cat_file, format='ascii.ecsv')
+    for key in [k for k in cat.meta if WCS_KEY_RE.match(k)]:
+        del cat.meta[key]
+    for key, value in wcs_dict.items():
+        cat.meta[key] = value
+    tmp = cat_file + '.tmp'
+    cat.write(tmp, format='ascii.ecsv', overwrite=True)
+    os.replace(tmp, cat_file)
+    if verbose:
+        print(f"Updated WCS in {cat_file}")
+
+
 def create_xyls_from_cat(cat_file, fits_file, output_xyls, verbose=False):
     """Convert a .cat file to .xyls format for astrometry.net
 
@@ -255,8 +313,9 @@ def create_xyls_from_cat(cat_file, fits_file, output_xyls, verbose=False):
     - Binary table extension with X, Y coordinates and optionally FLUX
 
     Args:
-        cat_file: Input .cat file from phcat
-        fits_file: FITS image file (to get dimensions)
+        cat_file: Input .cat file from phcat (or any ecsv with X_IMAGE/Y_IMAGE)
+        fits_file: FITS image file (to get dimensions), or None to take
+                   them from the catalog metadata
         output_xyls: Output .xyls filename
         verbose: Print debugging info
 
@@ -274,10 +333,22 @@ def create_xyls_from_cat(cat_file, fits_file, output_xyls, verbose=False):
             return (False, 0, 0)
 
         # Get image dimensions
-        with pyfits.open(fits_file) as hdul:
-            header = hdul[0].header
-            imagew = header.get('NAXIS1', 0)
-            imageh = header.get('NAXIS2', 0)
+        if fits_file is not None:
+            with pyfits.open(fits_file) as hdul:
+                header = hdul[0].header
+                imagew = header.get('NAXIS1', 0)
+                imageh = header.get('NAXIS2', 0)
+        else:
+            imagew = imageh = 0
+            for kw, kh in (('IMAGEW', 'IMAGEH'), ('NAXIS1', 'NAXIS2'), ('IMGAXIS1', 'IMGAXIS2')):
+                if kw in cat.meta and kh in cat.meta:
+                    imagew = int(cat.meta[kw])
+                    imageh = int(cat.meta[kh])
+                    break
+            if imagew <= 0 or imageh <= 0:
+                if verbose:
+                    print(f"Warning: {cat_file} has no image dimensions in metadata")
+                return (False, 0, 0)
 
         # Create minimal primary HDU with AN_FILE marker
         primary = pyfits.PrimaryHDU()
@@ -293,10 +364,19 @@ def create_xyls_from_cat(cat_file, fits_file, output_xyls, verbose=False):
         cols = [x_col, y_col]
 
         # Add FLUX if available (helps solve-field prioritize bright stars)
-        if 'FLUX_AUTO' in cat.colnames:
-            flux_col = pyfits.Column(name='FLUX', format='1D',
-                                    array=cat['FLUX_AUTO'].astype(numpy.float64))
-            cols.append(flux_col)
+        flux = None
+        for name in ('FLUX_AUTO', 'FLUX'):
+            if name in cat.colnames:
+                flux = numpy.asarray(cat[name], dtype=numpy.float64)
+                break
+        else:
+            for name in ('MAG_AUTO', 'MAG_SEX'):
+                if name in cat.colnames:
+                    flux = 10**(-0.4 * numpy.asarray(cat[name], dtype=numpy.float64))
+                    break
+        if flux is not None:
+            flux = numpy.where(numpy.isfinite(flux), flux, 0.0)
+            cols.append(pyfits.Column(name='FLUX', format='1D', array=flux))
 
         # Create the binary table HDU
         tbhdu = pyfits.BinTableHDU.from_columns(cols)
@@ -575,7 +655,9 @@ class AstrometryScript:
         """Run the field recognition pipeline
 
         Args:
-            fits_file: FITS image file to solve
+            fits_file: FITS image file to solve, or an ecsv catalog
+                       (X_IMAGE/Y_IMAGE + image size in meta) to solve
+                       without the image; its meta WCS gets replaced
             scale: Pixel scale in arcsec/pixel
             ra: Initial RA guess in degrees (optional, greatly speeds up solving)
             dec: Initial Dec guess in degrees (optional, greatly speeds up solving)
@@ -594,8 +676,14 @@ class AstrometryScript:
         # Use context manager for temporary directory
         with tempfile.TemporaryDirectory(suffix='', prefix='field-solve.') as odir:
 
-            infpath = os.path.join(odir, 'input.fits')
-            shutil.copy(fits_file, infpath)
+            # Catalog-only mode: the input itself is the source list
+            catalog_only = not is_fits_file(fits_file)
+            if catalog_only:
+                cat_file = fits_file
+                infpath = None
+            else:
+                infpath = os.path.join(odir, 'input.fits')
+                shutil.copy(fits_file, infpath)
 
             # Handle catalog file if provided
             xyls_file = None
@@ -603,7 +691,11 @@ class AstrometryScript:
             img_height = None
             if cat_file and os.path.exists(cat_file):
                 xyls_file = os.path.join(odir, 'input.xyls')
-                success, img_width, img_height = create_xyls_from_cat(cat_file, fits_file, xyls_file, verbose=True)
+                success, img_width, img_height = create_xyls_from_cat(
+                    cat_file, None if catalog_only else fits_file, xyls_file, verbose=True)
+                if not success and catalog_only:
+                    print(f"Error: Could not create .xyls from {cat_file}")
+                    return None
                 if not success:
                     xyls_file = None
                     img_width = None
@@ -640,8 +732,9 @@ class AstrometryScript:
             solve_field.append('--uniformize')
             solve_field.append('10')
 
-            # Always pass the FITS image (needed for WCS output)
-            solve_field.append(infpath)
+            # Pass the FITS image if we have one
+            if infpath is not None:
+                solve_field.append(infpath)
 
             # If we have a .xyls file from the catalog, also pass it
             # solve-field will use it for source positions instead of running source extraction
@@ -651,8 +744,11 @@ class AstrometryScript:
                 solve_field.append('--height')
                 solve_field.append(str(img_height))
                 # Sort by FLUX (brightest first - descending order is default)
-                solve_field.append('--sort-column')
-                solve_field.append('FLUX')
+                with pyfits.open(xyls_file) as xy:
+                    has_flux = 'FLUX' in xy[1].columns.names
+                if has_flux:
+                    solve_field.append('--sort-column')
+                    solve_field.append('FLUX')
                 solve_field.append(xyls_file)
 
             proc = subprocess.Popen(solve_field, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -675,12 +771,16 @@ class AstrometryScript:
                 new_file = os.path.join(odir, 'input.new')
                 wcs_file = os.path.join(odir, 'input.wcs')
 
-                if return_wcs:
+                if return_wcs or catalog_only:
                     # Extract WCS from .wcs file and return it (don't modify original)
                     if os.path.exists(wcs_file):
                         wcs_dict = read_wcs_from_file(wcs_file)
                         if wcs_dict is not None:
-                            return (ret[0], ret[1], wcs_dict)
+                            if return_wcs:
+                                return (ret[0], ret[1], wcs_dict)
+                            if replace:
+                                update_catalog_wcs(fits_file, wcs_dict, verbose=True)
+                            return ret
                         else:
                             print(f"Warning: Could not read WCS from {wcs_file}")
                             return None
@@ -726,9 +826,13 @@ Examples:
 
   # With both catalog and scale:
   %(prog)s image.fits --cat image.cat --scale 1.2
+
+  # Catalog only, no image (WCS is written into the ecsv metadata):
+  %(prog)s image.ecsv
         """)
 
-    parser.add_argument('fits_file', help='FITS image file to solve')
+    parser.add_argument('fits_file', help='FITS image file to solve, or an ecsv catalog '
+                        '(e.g. .cat or dophot .ecsv) to solve without the image')
     parser.add_argument('--cat', dest='cat_file', metavar='FILE',
                         help='Use catalog from pyrt-phcat instead of letting solve-field detect stars')
     parser.add_argument('--scale', type=float, metavar='ARCSEC',
@@ -748,35 +852,19 @@ Examples:
         print(f"Warning: Catalog file '{args.cat_file}' not found, solve-field will detect stars")
         args.cat_file = None
 
-    # Read hints from FITS header
+    # Read hints from FITS header (or catalog metadata)
     ra_hint = None
     dec_hint = None
     scale = args.scale
     try:
-        with pyfits.open(args.fits_file, 'readonly') as ff:
-            hdr = ff[0].header
-            # RA hint: try OBJRA first (telescope commanded position), then RASC
-            for key in ('OBJRA', 'RASC', 'RA', 'TELRA'):
-                if key in hdr:
-                    ra_hint = float(hdr[key])
-                    break
-            # DEC hint
-            for key in ('OBJDEC', 'DECL', 'DEC', 'TELDEC'):
-                if key in hdr:
-                    dec_hint = float(hdr[key])
-                    break
-            # Scale from header if not provided on command line
-            if scale is None:
-                if 'CD1_1' in hdr:
-                    cd11 = hdr['CD1_1']
-                    cd12 = hdr.get('CD1_2', 0.0)
-                    scale = math.sqrt(cd11**2 + cd12**2) * 3600.0
-                    print(f"Scale from CD matrix: {scale:.4f} arcsec/pixel")
-                elif 'CDELT1' in hdr:
-                    scale = abs(hdr['CDELT1']) * 3600.0
-                    print(f"Scale from CDELT1: {scale:.4f} arcsec/pixel")
+        if is_fits_file(args.fits_file):
+            with pyfits.open(args.fits_file, 'readonly') as ff:
+                hdr = ff[0].header
+        else:
+            hdr = astropy.table.Table.read(args.fits_file, format='ascii.ecsv').meta
+        ra_hint, dec_hint, scale = read_hints(hdr, scale, verbose=True)
     except Exception as e:
-        print(f"Warning: Could not read hints from FITS header: {e}")
+        print(f"Warning: Could not read hints from {args.fits_file}: {e}")
 
     if ra_hint is not None and dec_hint is not None:
         print(f"Hints from header: RA={ra_hint:.4f} Dec={dec_hint:.4f}")
