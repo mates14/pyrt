@@ -146,6 +146,19 @@ def fix_time(hdr, target_photometry=True, verbose=False):
             hdr['BJD'] = hdr['JD'] + time.light_travel_time(target, kind='barycentric', location=ondrejov,
                 ephemeris='builtin').to_value('jd',subfmt='float')
 
+def check_target_coords(hdr):
+    """Drop ORIRA/ORIDEC from hdr (with a warning) if they are not valid sky coordinates"""
+    if 'ORIRA' not in hdr and 'ORIDEC' not in hdr: return
+    try:
+        ra, dec = float(hdr['ORIRA']), float(hdr['ORIDEC'])
+        if not (np.isfinite(ra) and np.isfinite(dec)) or abs(dec) > 90:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        print(f"Warning: invalid target coordinates ORIRA={hdr.get('ORIRA')} "
+              f"ORIDEC={hdr.get('ORIDEC')}, ignoring them", file=sys.stderr)
+        for key in ('ORIRA', 'ORIDEC'):
+            with suppress(KeyError): del hdr[key]
+
 def calculate_background_stats(data):
     """Calculate background sigma using row differences method"""
     if data is None or len(data) < 2:
@@ -405,6 +418,7 @@ def process_detections(det: astropy.table.Table,
     det.meta['CHIP_ID'] = load_chip_id(c)
 
     fix_latlon(det.meta, verbose=verbose)
+    check_target_coords(det.meta)
     fix_time(det.meta, target_photometry=target_photometry, verbose=verbose)
     get_limits(det, verbose=verbose)
 
@@ -433,9 +447,9 @@ def process_detections(det: astropy.table.Table,
     # RTS2 true target coordinates: ORIRA/ORIDEC
     if target_photometry:
         det.meta['OBJRA'] = -100
-        with suppress(KeyError): det.meta['OBJRA'] = np.float64(c['ORIRA'])
+        with suppress(KeyError): det.meta['OBJRA'] = np.float64(det.meta['ORIRA'])
         det.meta['OBJDEC'] = -100
-        with suppress(KeyError): det.meta['OBJDEC'] = np.float64(c['ORIDEC'])
+        with suppress(KeyError): det.meta['OBJDEC'] = np.float64(det.meta['ORIDEC'])
     else:
         det.meta['OBJRA'] = -100
         det.meta['OBJDEC'] = -100
