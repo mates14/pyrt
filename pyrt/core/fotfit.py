@@ -368,7 +368,10 @@ class fotfit(termfit.termfit):
 
         # Apply reference magnitude offset for numerical stability
         # Calculate base magnitude relative to reference point
-        model = mct = mc + 10
+        # (a separate array: the terms below add to model in place, while the nonlinearity
+        # terms RS/RC/PN must see the instrumental magnitude, not the partly built model)
+        mct = np.asarray(mc + 10, dtype=np.float64)
+        model = mct.copy()
 
         # Variables to collect rational function parameters
         rational_s = rational_o = rational_c = 0
