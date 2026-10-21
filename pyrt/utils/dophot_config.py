@@ -147,7 +147,9 @@ def parse_arguments(args=None):
                         help="Maximum number of matched stars per image to use for fitting (randomly subsampled if exceeded)")
     parser.add_argument("--workers", type=int, default=config.get('workers'),
                         help="Processes for the stepwise term search (default: in-process; 0 = one per CPU, worth it only when trials are slow, e.g. with nonlinear terms on large frames)")
-    parser.add_argument("-S", "--sip", help="Order of SIP refinement for the astrometric solution (0=disable)", type=int)
+    parser.add_argument("-S", "--sip", help="Maximum order of SIP refinement for the astrometric solution (0=disable); orders are added one at a time while each pays off (see --sip-gain)", type=int)
+    parser.add_argument("--sip-gain", type=float, default=config.get('sip_gain'),
+                        help="Minimum relative WSSR improvement for the next SIP order to be kept, besides being significant (default 0.02; 0 = significance alone)")
     parser.add_argument("-u", "--autoupdate", action='store_true', help="Update .det if .fits is newer", default=config.get('autoupdate', 'False'))
     parser.add_argument("--force-regen", action='store_true', help="Force regeneration of .det file (runs phcat+cat2det)", default=False)
     parser.add_argument("-U", "--terms",

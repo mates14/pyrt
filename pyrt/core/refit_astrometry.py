@@ -6,7 +6,7 @@ import numpy as np
 import astropy.wcs
 #import astropy.io.fits
 from pyrt.core import zpnfit
-from pyrt.core.stepwise_regression import ftest_accept
+from pyrt.core.stepwise_regression import ftest_accept, ftest_pvalue
 import logging
 import matplotlib
 matplotlib.use('Agg')
@@ -213,6 +213,55 @@ def test_crpix_block(zpntest_test, data, proj_name, crpix1_default, crpix2_defau
         logging.info(msg)
         print(msg)
         return zpntest_fixed
+
+def fit_sip_orders(zpntest, data, max_order, min_gain=0.02, alpha=0.05):
+    """
+    Add SIP to the (fixed) projection one order at a time, from 2 up to
+    max_order, for as long as it pays off.  Each order is refitted in full (a linear solve,
+    so its start does not matter) and kept only if, on the stars of its own
+    fit, it beats the lower order both significantly (partial F-test) and by at
+    least min_gain in WSSR: with ten thousand stars every order is
+    significant long after it stops improving the solution measurably.
+
+    Expects the photometry mask in use; leaves the 'combined' mask of the
+    accepted model in use.  Returns the accepted model.
+    """
+    best = zpntest
+    best_mask = None
+    # Order 1 alone repeats the CD matrix that has just been fitted, it is
+    # never worth it: the first step is order 2 (with the linear terms)
+    for order in range(min(2, max_order), max_order + 1):
+        trial = deepcopy(best)
+        trial.add_sip_terms(order)
+        data.use_mask('photometry')
+        refine_fit(trial, data)
+        refine_fit(trial, data)
+
+        # Both models on the stars the new one was fitted with
+        _, params = _get_fitdata_ast(data, trial)
+        saved = trial.delin, best.delin
+        trial.delin = best.delin = False
+        r_new = trial.residuals(trial.fitvalues, params)
+        r_old = best.residuals(best.fitvalues, params)
+        trial.delin, best.delin = saved
+        wssr_new, wssr_old = np.sum(r_new**2), np.sum(r_old**2)
+        ndf = trial.calculate_ndf(params, r_new)
+        p = ftest_pvalue(wssr_old, wssr_new, ndf, len(trial.fitvalues) - len(best.fitvalues))
+        gain = 1.0 - wssr_new / wssr_old if wssr_old > 0 else 0.0
+
+        accept = p < alpha and gain >= min_gain
+        msg = (f"SIP order {order}: WSSR/NDF {wssr_old/ndf:.3f} -> {wssr_new/ndf:.3f} "
+               f"(gain {100*gain:.1f}%, p={p:.2g}) {'accepted' if accept else 'rejected'}")
+        logging.info(msg)
+        print(msg)
+        if not accept:
+            break
+        best, best_mask = trial, data.get_current_mask().copy()
+
+    if best_mask is not None:
+        data.add_mask('combined', best_mask)
+        data.use_mask('combined')
+    return best
 
 def select_best_projection(zpntest, data):
     """
@@ -1094,14 +1143,9 @@ def refit_astrometry(det, data, options):
 
         zpntest.fixall()
         data.use_mask('photometry')
-        if options.sip > 2:
-            ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
-            rms,num = zpntest.fit_sip2(ad.astparams, options.sip)
-            logging.info(f"Fitted a SIP{options.sip} on {num} objects with rms={rms}")
-        else:
-            zpntest.add_sip_terms(options.sip)
-            refine_fit(zpntest, data)
-            refine_fit(zpntest, data)
+        sip_gain = getattr(options, 'sip_gain', None)
+        zpntest = fit_sip_orders(zpntest, data, options.sip,
+                                 min_gain=0.02 if sip_gain is None else sip_gain)
 
         # Validate the final Projection+SIP combination
         # Some specific combinations of PV and SIP coefficients can fail WCSLIB validation
