@@ -21,6 +21,7 @@ class fotfit(termfit.termfit):
 
     modelname = "FotFit photometric model"
     fit_xy = False
+    ro_range = None
     zero = []
     px = []
     py = []
@@ -110,6 +111,9 @@ class fotfit(termfit.termfit):
         """F<n> flux weights have no physical meaning outside [0,1]; RC < 0
         puts a pole of the rational nonlinearity RS*x/(1+RC*x^2) at
         |x| = 1/sqrt(-RC), inside the data, and the fit wanders around it.
+        The centre of that curve (instrumental magnitude + 10 = -RO) is kept
+        within the magnitudes fitted: far outside them the curve is a constant
+        plus a slope, RO and RS run off together trading against Z.
         Every other term type is unbounded."""
         bounds = []
         for term in terms:
@@ -118,6 +122,8 @@ class fotfit(termfit.termfit):
                 bounds.append((0.0, 1.0))
             elif base_term == 'RC':
                 bounds.append((0.0, np.inf))
+            elif base_term == 'RO' and self.ro_range is not None:
+                bounds.append(self.ro_range)
             else:
                 bounds.append((-np.inf, np.inf))
         return bounds
@@ -160,6 +166,9 @@ class fotfit(termfit.termfit):
 
     def fit(self, data):
 
+        # x = -(mc+10) - RO: RO is bounded to the magnitudes being fitted
+        mct = np.asarray(data[0]) + 10
+        self.ro_range = (-float(np.max(mct)), -float(np.min(mct))) if len(mct) else None
         self.fitvalues = self.fitvalues[0:(len(self.fitterms))] + self.zero
         if self.fit_xy:
             self.fitvalues = np.append(self.fitvalues, np.zeros(2*len(self.zero)))
