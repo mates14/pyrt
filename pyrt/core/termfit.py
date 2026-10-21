@@ -8,6 +8,7 @@ generic fitter for models with terms
 import os
 import numpy as np
 import scipy.optimize as fit
+from scipy.optimize._numdiff import approx_derivative
 from scipy.linalg import cho_factor, cho_solve
 from astropy.table import Table
 import logging
@@ -31,6 +32,7 @@ class termfit:
     wssr = np.nan
     wssrndf = np.nan
     modelname="Model"
+    varpro = False
 
     def fixall(self):
         self.fixterms = self.fixterms + self.fitterms
@@ -219,6 +221,8 @@ class termfit:
         lin, non = self._split_linear(bounds)
         if SOLVER == 'linear' and lin and not non:
             values, jac = self._fit_linear(data, lin)
+        elif SOLVER == 'linear' and lin and self.varpro:
+            values, jac = self._fit_varpro(data, lin, non, lower, upper)
         else:
             res = fit.least_squares(self.fit_residuals, self.fitvalues,\
                 args=[data], ftol=1e-15, x_scale='jac', bounds=(lower, upper))
@@ -341,7 +345,11 @@ class termfit:
     # cold start when the terms are tiny (SIP).  Cauchy delinearization is
     # reproduced by iteratively reweighted least squares with weights
     # 1/(1+d^2), which minimizes the same sum of log(1+d^2).  Fits with any
-    # nonlinear term keep using least_squares, which is faster for them.
+    # nonlinear term keep using least_squares over all terms, unless the class
+    # sets varpro: then least_squares searches the nonlinear terms only and the
+    # linear ones are solved exactly for each of its trials (variable
+    # projection) - worth it where a model evaluation is expensive against the
+    # linear solve, as in zpnfit.
     #
     # A subclass opts in by implementing linear_term() and residual_vector();
     # linear_columns() is optional and only makes building the columns cheaper.
@@ -382,8 +390,10 @@ class termfit:
         non = [i for i in range(len(self.fitterms)) if i not in lin]
         return lin, non
 
-    def _solve_linear(self, values, lin, data, max_irls=50):
-        """Solve the linear terms with the others fixed at values.
+    def _solve_linear(self, values, lin, data, max_irls=50, weights=None):
+        """Solve the linear terms with the others fixed at values: with given
+        per-object weights a single weighted least-squares solve, otherwise
+        with delin the Cauchy loss by IRLS, else plain least squares.
 
         Returns full value vector, residual_vector at it, and the unscaled columns.
         """
@@ -396,9 +406,10 @@ class termfit:
         scale[scale == 0] = 1.0
         Js = J / scale
 
-        w = np.ones(n)
+        irls = weights is None and self.delin
+        w = np.ones(n) if weights is None else weights
         prev = np.inf
-        for _ in range(max_irls if self.delin else 1):
+        for _ in range(max_irls if irls else 1):
             sw = np.tile(np.sqrt(w), m)
             A = Js * sw[:, None]
             b = -r0.ravel() * sw
@@ -408,7 +419,7 @@ class termfit:
             except np.linalg.LinAlgError:
                 c = np.linalg.lstsq(A, b, rcond=None)[0]
             r = (r0.ravel() + Js @ c).reshape(m, n)
-            if not self.delin:
+            if not irls:
                 break
             d2 = np.sum(r * r, axis=0)
             cost = np.sum(np.log1p(d2))
@@ -427,6 +438,12 @@ class termfit:
         by the chain rule, without further model evaluations.
         """
         values, r, J = self._solve_linear(self.fitvalues, lin, data)
+        return values, self._jac_linear(r, J)
+
+    def _jac_linear(self, r, J):
+        """Jacobian of fit_residuals by the linear terms from residual_vector r
+        and its columns J: fit_residuals is the length d of each object's r, or
+        cauchy_delin(d) with delin, so it follows by the chain rule"""
         m, n = r.shape
         d = np.sqrt(np.sum(r * r, axis=0))
         jac = np.einsum('mn,mnk->nk', r, J.reshape(m, n, -1)) / np.where(d > 0, d, 1.0)[:, None]
@@ -435,6 +452,46 @@ class termfit:
             # d(f)/d(d); f ~ d for small d, so the limit at d = 0 is 1
             fprime = np.where(d > 0, d / ((1 + d * d) * np.where(f > 0, f, 1.0)), 1.0)
             jac = jac * fprime[:, None]
+        return jac
+
+    def _fit_varpro(self, data, lin, non, lower, upper):
+        """Variable projection: least_squares searches the nonlinear terms only,
+        the linear ones are solved exactly for each of its trials.  Returns
+        values and the Jacobian of fit_residuals.
+
+        The search minimizes plain least squares, where each trial is a single
+        solve.  With Cauchy delin, the linear terms are then solved under the
+        Cauchy loss (IRLS) with the nonlinear ones as found: a Cauchy objective
+        for the search itself means an IRLS of ~40 rounds per trial, and a
+        least_squares polish of all terms afterwards took 3x the time of the
+        whole fit for a final WSSR within ~1% (fits of the ~/test frames,
+        whose outliers refine_fit has already clipped at 3 sigma)."""
+        values = np.array(self.fitvalues, dtype=float)
+        plain = np.ones(len(data[0]))   # unit weights: plain least squares, no IRLS
+
+        def outer(theta):
+            v = values.copy()
+            v[non] = theta
+            _, r, _ = self._solve_linear(v, lin, data, weights=plain)
+            return r.ravel()
+
+        res = fit.least_squares(outer, values[non], ftol=1e-15, x_scale='jac',
+                                bounds=(np.array(lower)[non], np.array(upper)[non]))
+        values[non] = res.x
+        values, r, J = self._solve_linear(values, lin, data, weights=plain)
+
+        if self.delin:
+            # the linear terms under the Cauchy loss, the nonlinear ones as found
+            values, r, J = self._solve_linear(values, lin, data)
+
+        jac = np.empty((r.shape[1], len(values)))
+        jac[:, lin] = self._jac_linear(r, J)
+
+        def at(theta):
+            v = values.copy()
+            v[non] = theta
+            return self.fit_residuals(v, data)
+        jac[:, non] = approx_derivative(at, values[non], method='2-point')
         return values, jac
 
     def cauchy_delin(self, arg):

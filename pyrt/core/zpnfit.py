@@ -23,6 +23,10 @@ class zpnfit(termfit.termfit):
     Supports TAN, ZPN, ZEA, AZP, ARC projections
     """
 
+    # a model call costs far more than solving the linear terms (CRPIX, PV2
+    # of ZPN, SIP), so least_squares searches only CRVAL and CD
+    varpro = True
+
     PROJ_TAN = 0
     PROJ_ZPN = 1
     PROJ_ZEA = 2
@@ -490,6 +494,8 @@ class zpnfit(termfit.termfit):
             sin_dec * np.cos(CRVAL2_rad) - cos_dec * np.sin(CRVAL2_rad) * cos_ra_diff,
             -cos_dec * np.sin(ra_rad - CRVAL1_rad)
         )
+        # kept for linear_columns(): the ZPN terms are linear given these
+        self._native = (u, b, CD1_1, CD1_2, CD2_1, CD2_2)
 
         # the actual kernel of projection:
         if proj == self.PROJ_ZEA:
@@ -627,10 +633,17 @@ class zpnfit(termfit.termfit):
 
     def linear_term(self, term):
         """CRPIX shifts the model pixel position and the SIP polynomial is
-        evaluated on the ideal (pre-distortion) offsets, so both are linear;
-        CRVAL, CD and PV2_j are not."""
+        evaluated on the ideal (pre-distortion) offsets, so both are linear.
+        So is the ZPN/ARC radial polynomial r(u) = sum PV2_n u^n, as long as
+        no SIP acts on its result; CRVAL, CD and the PV2 of other projections
+        are not."""
         if term in ('CRPIX1', 'CRPIX2'):
             return True
+        if term.startswith('PV2_') and term[4:].isdigit():
+            terms = self.fitterms + self.fixterms
+            values = list(self.fitvalues) + list(self.fixvalues)
+            proj = values[terms.index('PROJ')] if 'PROJ' in terms else self.PROJ_TAN
+            return proj in (self.PROJ_ZPN, self.PROJ_ARC) and self.sip_order == 0
         return term[:2] in ('A_', 'B_') and term[2:].replace('_', '').isdigit()
 
     def residual_vector(self, values, data):
@@ -643,7 +656,9 @@ class zpnfit(termfit.termfit):
         """CRPIX shifts the model position by one pixel per unit, A_i_j adds
         u^i v^j to x and B_i_j to y, (u, v) being the ideal offsets from CRPIX:
         what the model returns with the linear terms (fitted and fixed) at
-        zero, so one model call gives all the columns."""
+        zero.  PV2_n adds CD^-1 of u^n along the position angle, with the
+        native angle u and the CD of that same call, so one model call gives
+        all the columns."""
         v = np.array(values, dtype=float)
         v[lin] = 0.0
         saved = self.fixvalues
@@ -662,6 +677,15 @@ class zpnfit(termfit.termfit):
                 cx, cy = -1.0 / err, zero
             elif term == 'CRPIX2':
                 cx, cy = zero, -1.0 / err
+            elif term.startswith('PV2_'):
+                # r = u^n along the position angle b, through CD^-1 (see model())
+                ang, b, cd11, cd12, cd21, cd22 = self._native
+                rn = np.power(ang, int(term[4:]))
+                x1 = -rn * np.cos(b) / rad
+                y1 = rn * np.sin(b) / rad
+                det = cd11 * cd22 - cd21 * cd12
+                cx = -((cd22 * x1 - cd12 * y1) / det) / err
+                cy = -((-cd21 * x1 + cd11 * y1) / det) / err
             else:
                 p, q = (int(k) for k in term[2:].split('_'))
                 c = -(u**p * w**q) / err
