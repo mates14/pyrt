@@ -625,6 +625,20 @@ class zpnfit(termfit.termfit):
             return self.cauchy_delin(dist)
         return dist
 
+    def linear_term(self, term):
+        """CRPIX shifts the model pixel position and the SIP polynomial is
+        evaluated on the ideal (pre-distortion) offsets, so both are linear;
+        CRVAL, CD and PV2_j are not."""
+        if term in ('CRPIX1', 'CRPIX2'):
+            return True
+        return term[:2] in ('A_', 'B_') and term[2:].replace('_', '').isdigit()
+
+    def residual_vector(self, values, data):
+        """Signed weighted x and y residuals: two components per object"""
+        x, y, err = data[0], data[1], data[4]
+        xmod, ymod = self.model(values, data)
+        return np.vstack(((x - xmod) / err, (y - ymod) / err))
+
     def calculate_ndf(self, data, stat_residuals):
         """Override NDF calculation for 2D astrometric fitting
 

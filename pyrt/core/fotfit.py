@@ -122,6 +122,37 @@ class fotfit(termfit.termfit):
                 bounds.append((-np.inf, np.inf))
         return bounds
 
+    def linear_term(self, term):
+        """Zeropoints, polynomial P-terms, subpixel S-terms and the RS scale
+        enter the model linearly; RO, RC, SC, XC, F<n>, GA/GW, EA/EW do not."""
+        base_term = term.split(':')[0]
+        return base_term in ('Z', 'RS', 'SX', 'SY', 'SXY') or base_term[0] == 'P'
+
+    def residual_vector(self, values, data):
+        """Signed weighted residuals as one component per object"""
+        return ((data[9] - self.model(values, data)) / data[10])[None, :]
+
+    def linear_columns(self, values, lin, data):
+        """Each linear term evaluated alone, one cheap model call instead of a
+        full one; the nonlinear terms (fitted and fixed) stay as context, so
+        RS sees RO/RC and P*N terms see the F<n>-adjusted instrumental magnitude."""
+        terms = list(self.fitterms)
+        ctx_terms = [t for i, t in enumerate(terms) if i not in lin]
+        ctx_values = [values[i] for i in range(len(terms)) if i not in lin]
+        saved = self.fitterms, self.fixterms, self.fixvalues
+        try:
+            self.fixterms = [t for t in saved[1] if not self.linear_term(t)]
+            self.fixvalues = [v for t, v in zip(saved[1], saved[2]) if not self.linear_term(t)]
+            cols = []
+            for i in lin:
+                self.fitterms = [terms[i]] + ctx_terms
+                m1 = self.model(np.array([1.0] + ctx_values), data)
+                m0 = self.model(np.array([0.0] + ctx_values), data)
+                cols.append(-(m1 - m0) / data[10])
+        finally:
+            self.fitterms, self.fixterms, self.fixvalues = saved
+        return np.column_stack(cols) if cols else np.zeros((len(data[10]), 0))
+
     def set_filter_info(self, base_filter, color_schema):
         """Store filter information used in the fit"""
         self.base_filter = base_filter

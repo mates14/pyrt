@@ -5,10 +5,17 @@ generic fitter for models with terms
 (c) Martin Jelinek, ASU AV CR, 2021-2023
 """
 
+import os
 import numpy as np
 import scipy.optimize as fit
+from scipy.optimize._numdiff import approx_derivative
+from scipy.linalg import cho_factor, cho_solve
 from astropy.table import Table
 import logging
+
+# 'linear': fits whose terms are all linear are solved directly (default),
+# 'lsq': least_squares for every fit (the previous behaviour, for comparisons)
+SOLVER = os.environ.get('PYRT_SOLVER', 'linear')
 
 class termfit:
     """Fit data with string identified terms"""
@@ -210,10 +217,15 @@ class termfit:
                 logging.warning(f"Initial value for '{term}' ({orig}) outside bounds, "
                                  f"clamped to {new}")
         self.fitvalues = list(clamped)
-        res = fit.least_squares(self.fit_residuals, self.fitvalues,\
-            args=[data], ftol=1e-15, x_scale='jac', bounds=(lower, upper))
+        lin, non = self._split_linear(bounds)
+        if SOLVER == 'linear' and lin and not non:
+            values, jac = self._fit_linear(data, lin)
+        else:
+            res = fit.least_squares(self.fit_residuals, self.fitvalues,\
+                args=[data], ftol=1e-15, x_scale='jac', bounds=(lower, upper))
+            values, jac = res.x, res.jac
         self.fitvalues = []
-        for x in res.x:
+        for x in values:
             self.fitvalues += [ x ]
         # Compute statistics with plain residuals regardless of delin state
         saved_delin = self.delin
@@ -234,7 +246,7 @@ class termfit:
         self.fitcov = None   # full covariance where available (zero_val propagates it)
         try:
             # Method 1: Direct inverse (original method)
-            jac_matrix = res.jac.T.dot(res.jac)
+            jac_matrix = jac.T.dot(jac)
 
             # Check condition number
             cond_num = np.linalg.cond(jac_matrix)
@@ -311,7 +323,106 @@ class termfit:
 
         except Exception as e:
             logging.debug(f"Warning: Error calculation failed with message: {str(e)}")
-            self.fiterrors = res.x * np.nan
+            self.fiterrors = np.asarray(values) * np.nan
+
+    # --- direct linear solve ---------------------------------------------
+    #
+    # Most models are linear in most of their terms (zeropoint, polynomials,
+    # SIP, CRPIX).  When every fitted term is linear the fit is one weighted
+    # linear least-squares solve instead of an iterative search, exact and
+    # independent of the starting values; least_squares stops early from a
+    # cold start when the terms are tiny (SIP).  Cauchy delinearization is
+    # reproduced by iteratively reweighted least squares with weights
+    # 1/(1+d^2), which minimizes the same sum of log(1+d^2).  Fits with any
+    # nonlinear term keep using least_squares, which is faster for them.
+    #
+    # A subclass opts in by implementing linear_term() and residual_vector();
+    # linear_columns() is optional and only makes building the columns cheaper.
+
+    def linear_term(self, term):
+        """True if the model is linear in this term (for any values of the others)"""
+        return False
+
+    def residual_vector(self, values, data):
+        """Signed weighted residuals, shape (m, N): m components per object.
+
+        Must be affine in the linear terms; sum over m of squares per object
+        is the squared fit_residuals() of the object without delin.
+        """
+        return None
+
+    def linear_columns(self, values, lin, data):
+        """Derivatives of residual_vector() by the linear terms, shape (m*N, len(lin)).
+
+        Default: the model is affine in them, so column k = r(e_k) - r(0).
+        """
+        v = np.array(values, dtype=float)
+        v[lin] = 0.0
+        r0 = self.residual_vector(v, data).ravel()
+        cols = []
+        for i in lin:
+            v[i] = 1.0
+            cols.append(self.residual_vector(v, data).ravel() - r0)
+            v[i] = 0.0
+        return np.column_stack(cols) if cols else np.zeros((len(r0), 0))
+
+    def _split_linear(self, bounds):
+        """Indices of the linear and of the nonlinear fitted terms; bounded terms count as nonlinear"""
+        if self.residual_vector.__func__ is termfit.residual_vector:
+            return [], list(range(len(self.fitterms)))
+        lin = [i for i, (term, b) in enumerate(zip(self.fitterms, bounds))
+               if self.linear_term(term) and not np.isfinite(b).any()]
+        non = [i for i in range(len(self.fitterms)) if i not in lin]
+        return lin, non
+
+    def _solve_linear(self, values, lin, data, max_irls=50):
+        """Solve the linear terms with the others fixed at values.
+
+        Returns full value vector, residual_vector at it, and the unscaled columns.
+        """
+        v = np.array(values, dtype=float)
+        v[lin] = 0.0
+        r0 = self.residual_vector(v, data)
+        m, n = r0.shape
+        J = self.linear_columns(v, lin, data)
+        scale = np.sqrt(np.sum(J * J, axis=0))
+        scale[scale == 0] = 1.0
+        Js = J / scale
+
+        w = np.ones(n)
+        prev = np.inf
+        for _ in range(max_irls if self.delin else 1):
+            sw = np.tile(np.sqrt(w), m)
+            A = Js * sw[:, None]
+            b = -r0.ravel() * sw
+            try:
+                # normal equations: N x K with K << N, columns of unit norm
+                c = cho_solve(cho_factor(A.T @ A), A.T @ b)
+            except np.linalg.LinAlgError:
+                c = np.linalg.lstsq(A, b, rcond=None)[0]
+            r = (r0.ravel() + Js @ c).reshape(m, n)
+            if not self.delin:
+                break
+            d2 = np.sum(r * r, axis=0)
+            cost = np.sum(np.log1p(d2))
+            if prev - cost <= 1e-12 * cost:
+                break
+            prev = cost
+            w = 1.0 / (1.0 + d2)
+        v[lin] = c / scale
+        return v, r, J
+
+    def _fit_linear(self, data, lin):
+        """Fit with all fitted terms linear; returns values and the Jacobian of fit_residuals"""
+        values, r, J = self._solve_linear(self.fitvalues, lin, data)
+        if not self.delin and r.shape[0] == 1:
+            # fit_residuals is |r| of the single component: its Jacobian rows are the
+            # columns up to sign, which J^T J (all that is used of it) does not see
+            jac = J
+        else:
+            jac = approx_derivative(lambda p: self.fit_residuals(p, data), values,
+                                    method='2-point')
+        return values, jac
 
     def cauchy_delin(self, arg):
         """Cauchy delinearization to give outliers less weight and have
