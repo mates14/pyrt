@@ -107,13 +107,17 @@ class fotfit(termfit.termfit):
         return output
 
     def term_bounds(self, terms):
-        """F<n> flux weights have no physical meaning outside [0,1]; leave
-        every other term type unbounded, matching prior behaviour."""
+        """F<n> flux weights have no physical meaning outside [0,1]; RC < 0
+        puts a pole of the rational nonlinearity RS*x/(1+RC*x^2) at
+        |x| = 1/sqrt(-RC), inside the data, and the fit wanders around it.
+        Every other term type is unbounded."""
         bounds = []
         for term in terms:
             base_term = term.split(':')[0]
             if len(base_term) >= 2 and base_term[0] == 'F' and base_term[1:].isdigit():
                 bounds.append((0.0, 1.0))
+            elif base_term == 'RC':
+                bounds.append((0.0, np.inf))
             else:
                 bounds.append((-np.inf, np.inf))
         return bounds
