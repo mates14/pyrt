@@ -639,6 +639,36 @@ class zpnfit(termfit.termfit):
         xmod, ymod = self.model(values, data)
         return np.vstack(((x - xmod) / err, (y - ymod) / err))
 
+    def linear_columns(self, values, lin, data):
+        """CRPIX shifts the model position by one pixel per unit, A_i_j adds
+        u^i v^j to x and B_i_j to y, (u, v) being the ideal offsets from CRPIX:
+        what the model returns with the linear terms (fitted and fixed) at
+        zero, so one model call gives all the columns."""
+        v = np.array(values, dtype=float)
+        v[lin] = 0.0
+        saved = self.fixvalues
+        self.fixvalues = [0.0 if self.linear_term(t) else fv
+                          for t, fv in zip(self.fixterms, saved)]
+        try:
+            u, w = self.model(v, data)
+        finally:
+            self.fixvalues = saved
+        err = data[4]
+        zero = np.zeros_like(u)
+        cols = []
+        for i in lin:
+            term = self.fitterms[i]
+            if term == 'CRPIX1':
+                cx, cy = -1.0 / err, zero
+            elif term == 'CRPIX2':
+                cx, cy = zero, -1.0 / err
+            else:
+                p, q = (int(k) for k in term[2:].split('_'))
+                c = -(u**p * w**q) / err
+                cx, cy = (c, zero) if term[0] == 'A' else (zero, c)
+            cols.append(np.concatenate((cx, cy)))
+        return np.column_stack(cols) if cols else np.zeros((2 * len(u), 0))
+
     def calculate_ndf(self, data, stat_residuals):
         """Override NDF calculation for 2D astrometric fitting
 

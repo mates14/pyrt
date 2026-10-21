@@ -8,7 +8,6 @@ generic fitter for models with terms
 import os
 import numpy as np
 import scipy.optimize as fit
-from scipy.optimize._numdiff import approx_derivative
 from scipy.linalg import cho_factor, cho_solve
 from astropy.table import Table
 import logging
@@ -245,14 +244,22 @@ class termfit:
         # Improved covariance matrix calculation with diagnostics
         self.fitcov = None   # full covariance where available (zero_val propagates it)
         try:
+            # Columns scaled to unit norm before inverting, the covariance
+            # unscaled after: terms can differ by many orders of magnitude in
+            # scale (SIP u^5 against CRPIX), which J^T J itself cannot survive
+            colscale = np.sqrt(np.sum(np.asarray(jac)**2, axis=0))
+            colscale[colscale == 0] = 1.0
+            unscale = np.outer(colscale, colscale)
+            jacs = jac / colscale
+
             # Method 1: Direct inverse (original method)
-            jac_matrix = jac.T.dot(jac)
+            jac_matrix = jacs.T.dot(jacs)
 
             # Check condition number
             cond_num = np.linalg.cond(jac_matrix)
 
             try:
-                cov = np.linalg.inv(jac_matrix)
+                cov = np.linalg.inv(jac_matrix) / unscale
 #                logging.debug("Using direct inverse method")
                 self.fitcov = cov
                 self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
@@ -271,7 +278,7 @@ class termfit:
                 # Identify near-zero singular values (effectively rank-deficient)
                 rank_threshold = 1e-12
                 effective_rank = sum(s > rank_threshold * s[0])
-                cov = np.linalg.pinv(jac_matrix, rcond=rank_threshold)
+                cov = np.linalg.pinv(jac_matrix, rcond=rank_threshold) / unscale
 #                logging.debug("Using SVD pseudo-inverse method")
                 self.fitcov = cov
                 self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
@@ -291,7 +298,7 @@ class termfit:
             try:
                 epsilon = 1e-10 * np.trace(jac_matrix) / jac_matrix.shape[0]
                 reg_matrix = jac_matrix + epsilon * np.eye(jac_matrix.shape[0])
-                cov = np.linalg.inv(reg_matrix)
+                cov = np.linalg.inv(reg_matrix) / unscale
 #                logging.debug("Using regularized inverse method")
                 self.fitcov = cov
                 self.fiterrors = np.sqrt(np.abs(np.diagonal(cov)))
@@ -413,15 +420,21 @@ class termfit:
         return v, r, J
 
     def _fit_linear(self, data, lin):
-        """Fit with all fitted terms linear; returns values and the Jacobian of fit_residuals"""
+        """Fit with all fitted terms linear; returns values and the Jacobian of fit_residuals.
+
+        fit_residuals() is the length d of each object's residual_vector, or
+        cauchy_delin(d) with delin, so its Jacobian follows from the columns
+        by the chain rule, without further model evaluations.
+        """
         values, r, J = self._solve_linear(self.fitvalues, lin, data)
-        if not self.delin and r.shape[0] == 1:
-            # fit_residuals is |r| of the single component: its Jacobian rows are the
-            # columns up to sign, which J^T J (all that is used of it) does not see
-            jac = J
-        else:
-            jac = approx_derivative(lambda p: self.fit_residuals(p, data), values,
-                                    method='2-point')
+        m, n = r.shape
+        d = np.sqrt(np.sum(r * r, axis=0))
+        jac = np.einsum('mn,mnk->nk', r, J.reshape(m, n, -1)) / np.where(d > 0, d, 1.0)[:, None]
+        if self.delin:
+            f = np.sqrt(np.log1p(d * d))
+            # d(f)/d(d); f ~ d for small d, so the limit at d = 0 is 1
+            fprime = np.where(d > 0, d / ((1 + d * d) * np.where(f > 0, f, 1.0)), 1.0)
+            jac = jac * fprime[:, None]
         return values, jac
 
     def cauchy_delin(self, arg):
