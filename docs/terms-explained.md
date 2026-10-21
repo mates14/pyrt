@@ -252,6 +252,30 @@ The `--use-stepwise` option controls unmarked terms:
 -U '@.p2,&.r2'        # .p2 uses stepwise, .r2 always included
 ```
 
+## How Stepwise Selects: Blocks and Orders
+
+Stepwise candidates enter and leave the model as **blocks**, not one term at a time:
+
+- **A polynomial order is one block**: `.p5` is tried as "order 1" (`PX,PY`), then "order 2"
+  (`P2X,PXY,P2Y`), and so on.  Orders are **nested**: order n is only tried once the lower
+  orders are in, and only the highest order in the model can be removed.  The question
+  answered is "at which order does the polynomial stop adding value", and a stray `P5X`
+  without the rest of the polynomial cannot get in.  `.r`, `.c`, ... orders (`PR`, `P2R`, ...)
+  nest the same way, each as their own family.
+- **`.l` is a family of two orders**: `RS` alone (a slope in instrumental magnitude), then
+  `RO,RC` together (the S-curve).
+- **`.s`** (`SX,SY,SXY`) is one block; any other term is a block of its own.
+- Per-image copies of a term (`*`) are in the same block as each other.
+
+Blocks are compared by the p-value of a partial F-test with as many degrees of freedom
+as the block has terms (alpha = 0.05).  Pre-selection from initial values (see below)
+takes whole blocks, together with the lower orders of their family.
+
+While other blocks are tried, nonlinear terms already in the model (`RO`, `RC`, ...) are
+held at their current values, so that every trial stays a linear solve; the final fit
+refits everything together.  Trials run in-process by default (`--workers 0` for a process
+pool, worth it only when the trials are slow).
+
 ## Why This Design Makes Sense
 
 The notation maps directly to how astronomers think about calibration:

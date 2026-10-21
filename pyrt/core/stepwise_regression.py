@@ -4,10 +4,13 @@ Stepwise regression module for photometric model fitting.
 Includes functions for term expansion, model setup, and bidirectional stepwise regression.
 """
 
+import re
 import numpy as np
 import concurrent.futures
 from copy import deepcopy
 from scipy import stats as scipy_stats
+
+from pyrt.core import termfit
 
 
 class _SerialExecutor:
@@ -32,11 +35,13 @@ class _SerialExecutor:
 
 
 def _executor(workers):
-    """Pool for the term trials: workers=None (or 0) is one process per CPU,
-    1 runs them in-process.  Batch reprocessing runs one frame per core and
-    wants 1 - a pool per frame there only multiplies processes past the CPU
-    count, and the pool is rebuilt for every forward and backward step."""
-    if workers == 1:
+    """Pool for the term trials: workers=None (default) or 1 runs them
+    in-process, 0 is one process per CPU, n > 1 n processes.  Trials of linear
+    terms are single linear solves, far cheaper than starting worker
+    processes (which re-import pyrt and astropy), and the pool is rebuilt for
+    every forward and backward step; batch reprocessing with one frame per
+    core would only multiply processes past the CPU count."""
+    if workers is None or workers == 1:
         return _SerialExecutor()
     return concurrent.futures.ProcessPoolExecutor(max_workers=workers or None)
 
@@ -361,19 +366,92 @@ def setup_terms(ffit, terms, initial_values=None):
     # Add all terms as fitting terms
     ffit.fitterm(terms, values=values)
 
-def try_term_robust(ffit, term, current_terms, fdata, initial_values=None):
-    """Try fitting with a new term or subset of terms, using robust statistics"""
+_POLY_TERM = re.compile(r'^P((?:\d*[A-Z])+)$')
+
+def term_block_key(term):
+    """(family, order) of a term for block-wise stepwise selection, None if the
+    term is a block of its own.
+
+    Polynomial terms group by total degree: PX, PY are order 1 of family 'XY',
+    P2X, PXY, P2Y order 2 ...; PR, P2R ... and PC, P2C ... are families of
+    their own.  The rational nonlinearity is a family of two orders: RS alone
+    is a slope in instrumental magnitude, RO with RC bend it into the S-curve.
+    SX/SY/SXY (subpixel) are one block.  A per-image suffix (:n) does not change
+    the block, so the per-image copies of a term enter and leave together.
+    """
+    base = term.split(':')[0]
+    if base == 'RS':
+        return ('L', 1)
+    if base in ('RO', 'RC'):
+        return ('L', 2)
+    if base in ('SX', 'SY', 'SXY'):
+        return ('S', 0)
+    m = _POLY_TERM.match(base)
+    if not m:
+        return None
+    family, order = set(), 0
+    for power, letter in re.findall(r'(\d*)([A-Z])', m.group(1)):
+        family.add('XY' if letter in 'XY' else letter)
+        order += int(power) if power else 1
+    return (''.join(sorted(family)), order)
+
+def group_blocks(terms):
+    """{key: tuple of terms} in the order the terms come; a lone term's key is ('=', term)"""
+    blocks = {}
+    for term in terms:
+        key = term_block_key(term) or ('=', term)
+        blocks[key] = blocks.get(key, ()) + (term,)
+    return blocks
+
+def _lower_order_pending(key, keys):
+    """True if keys hold a lower order of the same polynomial family as key"""
+    family, order = key
+    return family != '=' and order > 0 and any(
+        k[0] == family and 0 < k[1] < order for k in keys)
+
+def _higher_order_present(key, keys):
+    """True if keys hold a higher order of the same polynomial family as key"""
+    family, order = key
+    return family != '=' and order > 0 and any(
+        k[0] == family and k[1] > order for k in keys)
+
+def default_start(term, fdata):
+    """Starting value of a term a fit has no value for.  The rational
+    nonlinearity is flat at RS=0 whatever RO and RC are, so a start near zero
+    leaves RO/RC without a gradient: start RO at the median instrumental
+    magnitude, RC at a moderate curvature and RS small but nonzero."""
+    base = term.split(':')[0]
+    if base == 'RO':
+        return -float(np.median(fdata[0] + 10))   # x = -(mc+10) - RO is zero there
+    if base == 'RC':
+        return 0.2
+    if base == 'RS':
+        return 1e-3
+    return 1e-6
+
+def try_term_robust(ffit, term, current_terms, fdata, initial_values=None, hold=()):
+    """Try fitting with a new term (or a tuple of terms, a block) added, or
+    with current_terms alone if term is None, using robust statistics.
+    Terms in hold stay fixed at their initial values."""
     new_ffit = deepcopy(ffit)
 
     # Determine which terms to use
-    terms_to_fit = current_terms + [term] if term is not None else current_terms
+    if term is None:
+        terms_to_fit = list(current_terms)
+    elif isinstance(term, (tuple, list)):
+        terms_to_fit = list(current_terms) + list(term)
+    else:
+        terms_to_fit = list(current_terms) + [term]
 
     # Create dictionary of initial values
-    term_values = {t: 1e-6 for t in terms_to_fit}
+    term_values = {t: default_start(t, fdata) for t in terms_to_fit}
     if initial_values:
         term_values.update({k: v for k, v in initial_values.items() if k in terms_to_fit})
 
     setup_terms(new_ffit, terms_to_fit, term_values)
+    hold = [t for t in hold if t in terms_to_fit]
+    if hold:
+        new_ffit.fixterm(hold, [term_values[t] for t in hold])
 
     # Make a copy of the input data
     thread_data = tuple(np.copy(arr) for arr in fdata)
@@ -422,15 +500,18 @@ def try_term_robust(ffit, term, current_terms, fdata, initial_values=None):
 
     return new_ffit.wssrndf, current_mask, fitted_values, new_ffit.ndf
 
-def try_remove_term_parallel(term_to_remove, current_terms, ffit, fdata, initial_values):
-    """Try removing a term in parallel context"""
-    test_terms = [t for t in current_terms if t != term_to_remove]
-    new_wssrndf, new_mask, fitted_values, new_ndf = try_term_robust(ffit, None, test_terms, fdata, initial_values)
+def try_remove_term_parallel(term_to_remove, current_terms, ffit, fdata, initial_values, hold=()):
+    """Try removing a term (or a tuple of terms, a block) in parallel context"""
+    drop = set(term_to_remove) if isinstance(term_to_remove, (tuple, list)) else {term_to_remove}
+    test_terms = [t for t in current_terms if t not in drop]
+    new_wssrndf, new_mask, fitted_values, new_ndf = try_term_robust(ffit, None, test_terms, fdata, initial_values, hold)
     return term_to_remove, new_wssrndf, new_mask, fitted_values, new_ndf
 
-def ftest_accept(wssr_restricted, wssr_full, ndf_full, delta_k=1, alpha=0.05):
+def ftest_pvalue(wssr_restricted, wssr_full, ndf_full, delta_k=1):
     """
-    Partial F-test.  Returns True if the full model is significantly better at alpha.
+    Partial F-test p-value of the full model against the restricted one
+    (1 when the full model is not better).  P-values, unlike F, compare
+    candidates of different sizes delta_k.
     wssr_restricted: WSSR of the model *without* the candidate term(s)
     wssr_full:       WSSR of the model *with* the candidate term(s)
     ndf_full:        residual degrees of freedom of the full model
@@ -438,9 +519,13 @@ def ftest_accept(wssr_restricted, wssr_full, ndf_full, delta_k=1, alpha=0.05):
     """
     delta_wssr = wssr_restricted - wssr_full
     if delta_wssr <= 0 or ndf_full <= 0:
-        return False
+        return 1.0
     F = (delta_wssr / delta_k) / (wssr_full / ndf_full)
-    return float(scipy_stats.f.sf(F, delta_k, ndf_full)) < alpha
+    return float(scipy_stats.f.sf(F, delta_k, ndf_full))
+
+def ftest_accept(wssr_restricted, wssr_full, ndf_full, delta_k=1, alpha=0.05):
+    """Partial F-test: True if the full model is significantly better at alpha"""
+    return ftest_pvalue(wssr_restricted, wssr_full, ndf_full, delta_k) < alpha
 
 def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, always_selected=None):
     """
@@ -527,12 +612,26 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
     # Track how many terms we started with before pre-selection
     initial_selected_count = len(selected_terms)
 
-    # Move ANY terms with initial values from remaining to selected (source-agnostic warm start)
-    for term in list(remaining_terms):
-        if term in combined_initial_values:
-            selected_terms.append(term)
-            remaining_terms.remove(term)
-            print(f"Pre-selected term: {term} = {combined_initial_values[term]:.6f}")
+    # Candidates enter and leave as blocks: a polynomial order as a whole (is
+    # order n needed at all?), RS/RO/RC together.  Orders of a family are
+    # nested: order n is tried only when the lower orders are in, and only the
+    # highest order in can be removed, so no stray P5X without the rest.
+    remaining_blocks = group_blocks(remaining_terms)
+    always_keys = set(group_blocks(always_selected))
+
+    # Move ANY block with an initial value from remaining to selected (source-agnostic
+    # warm start), with the lower orders of its family so that the model stays nested
+    preselect = {k for k, block in remaining_blocks.items()
+                 if any(t in combined_initial_values for t in block)}
+    preselect |= {k for k in remaining_blocks for p in preselect
+                  if k[0] == p[0] and k[0] != '=' and 0 < k[1] < p[1]}
+    for key in [k for k in remaining_blocks if k in preselect]:
+        block = remaining_blocks.pop(key)
+        selected_terms.extend(block)
+        values = ", ".join(f"{t} = {combined_initial_values[t]:.6f}" for t in block
+                           if t in combined_initial_values)
+        print(f"Pre-selected {'block ' + str(list(block)) if len(block) > 1 else 'term ' + block[0]}"
+              f"{': ' + values if values else ''}")
 
     # Refit with all selected terms ONLY if we actually added new terms
     if len(selected_terms) > initial_selected_count:
@@ -550,61 +649,69 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
     iteration = 0
     total_checks = 0  # Track total number of model evaluations
 
-    print(f"[DEBUG] Entering stepwise loop: {len(remaining_terms)} remaining candidates, {len(selected_terms)} selected")
+    print(f"[DEBUG] Entering stepwise loop: {len(remaining_blocks)} remaining candidate blocks, {len(selected_terms)} terms selected")
+
+    can_hold = type(ffit).linear_term is not termfit.termfit.linear_term
+
+    def describe(block):
+        return f"block {list(block)}" if len(block) > 1 else f"term {block[0]}"
 
     while iteration < max_iterations:
-#        print(f"=== Cycle {iteration}: WSSRNDF={best_wssrndf:.6f}, Selected={len(selected_terms)} terms, Remaining={len(remaining_terms)} candidates ===")
         iteration += 1
         made_change = False
 
-        # Forward step - try adding terms in parallel
-        best_new_term = None
-        best_improvement = 0.0  # best F-statistic seen so far
+        # Forward step - try adding blocks in parallel
+        best_new_key = None
+        best_pvalue = 1.0  # smallest p-value seen so far
         best_new_mask = None
         best_new_ndf = None
         best_new_fitted_values = None
 
-        if remaining_terms:
+        # Nonlinear terms already in the model are held at their current values
+        # while other blocks are tried, so that those trials stay linear solves;
+        # the final fit refits them with the rest
+        held = [t for t in selected_terms if can_hold and not ffit.linear_term(t)]
+
+        candidates = [k for k in remaining_blocks if not _lower_order_pending(k, remaining_blocks)]
+        if candidates:
             with _executor(workers) as executor:
-                # Submit all term trials in parallel
-                future_to_term = {
-                    executor.submit(try_term_robust, ffit, term, selected_terms, fd.fotparams, combined_initial_values): term
-                    for term in remaining_terms
+                # Submit all block trials in parallel
+                future_to_key = {
+                    executor.submit(try_term_robust, ffit, remaining_blocks[k], selected_terms, fd.fotparams, combined_initial_values, held): k
+                    for k in candidates
                 }
 
                 # Process results as they complete
                 completed_forward = 0
-                for future in concurrent.futures.as_completed(future_to_term):
+                for future in concurrent.futures.as_completed(future_to_key):
                     completed_forward += 1
                     total_checks += 1
-                    print(f"\rStepwise regression: pass {iteration}, checking {completed_forward}/{len(remaining_terms)} terms for addition, total checks {total_checks}", end="", flush=True)
+                    print(f"\rStepwise regression: pass {iteration}, checking {completed_forward}/{len(candidates)} blocks for addition, total checks {total_checks}", end="", flush=True)
 
-                    term = future_to_term[future]
+                    key = future_to_key[future]
                     try:
                         new_wssrndf, new_mask, fitted_values, new_ndf = future.result()
                         wssr_new = new_wssrndf * new_ndf
                         wssr_best = best_wssrndf * best_ndf
-                        if ftest_accept(wssr_best, wssr_new, new_ndf):
-                            F_stat = (wssr_best - wssr_new) / (wssr_new / new_ndf)
-                            if F_stat > best_improvement:
-                                best_improvement = F_stat
-                                best_new_term = term
-                                best_new_mask = new_mask
-                                best_new_wssrndf = new_wssrndf
-                                best_new_ndf = new_ndf
-                                best_new_fitted_values = fitted_values
+                        p = ftest_pvalue(wssr_best, wssr_new, new_ndf, len(remaining_blocks[key]))
+                        if p < 0.05 and p < best_pvalue:
+                            best_pvalue = p
+                            best_new_key = key
+                            best_new_mask = new_mask
+                            best_new_wssrndf = new_wssrndf
+                            best_new_ndf = new_ndf
+                            best_new_fitted_values = fitted_values
                     except Exception as e:
-                        print(f"\nError trying term {term}: {str(e)}", flush=True)
+                        print(f"\nError trying {describe(remaining_blocks[key])}: {str(e)}", flush=True)
 
-#        print(f"After search for new: wssrndf={best_wssrndf}")
-        # Add best term if found
-        if best_new_term:
-            selected_terms.append(best_new_term)
-            remaining_terms.remove(best_new_term)
+        # Add best block if found
+        if best_new_key is not None:
+            block = remaining_blocks.pop(best_new_key)
+            selected_terms.extend(block)
             best_wssrndf = best_new_wssrndf
             best_ndf = best_new_ndf
             made_change = True
-            print(f" Added term {best_new_term} (F={best_improvement:.1f}, NDF={best_new_ndf}). New wssrndf: {best_wssrndf:.4f}")
+            print(f" Added {describe(block)} (p={best_pvalue:.2g}, NDF={best_new_ndf}). New wssrndf: {best_wssrndf:.4f}")
 
             # Apply the new mask to data
             data.apply_mask(best_new_mask, 'photometry')
@@ -612,24 +719,27 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
             # Update combined_initial_values with fitted values from successful addition
             combined_initial_values.update(best_new_fitted_values)
 
-        # Backward step - always try removing terms (independent of forward step)
-        # Only consider removing terms that are not in always_selected
-        removable_terms = [t for t in selected_terms if t not in always_selected]
-#        print(f"--- Backward step: Trying to remove from {len(removable_terms)} removable terms: {removable_terms}")
-        if len(removable_terms) > 0:  # Try removing terms if any are removable
-            worst_term = None
-            smallest_degradation = float('inf')  # smallest F-stat seen (least significant term)
+        # Backward step - always try removing blocks (independent of forward step)
+        # Only blocks that are not always selected, and of a polynomial family
+        # only the highest order in the model
+        selected_blocks = group_blocks(selected_terms)
+        removable = [k for k in selected_blocks
+                     if k not in always_keys and not _higher_order_present(k, selected_blocks)]
+        if removable:
+            worst_key = None
+            largest_pvalue = -1.0  # largest p-value seen (least significant block)
             worst_new_mask = None
             worst_new_ndf = None
             worst_new_fitted_values = None
 
             with _executor(workers) as executor:
-                # Submit all term removal trials in parallel (only for removable terms)
+                # Submit all block removal trials in parallel
                 futures = [
                     executor.submit(try_remove_term_parallel,
-                                 term, selected_terms,
-                                 ffit, fd.fotparams, combined_initial_values)
-                    for term in removable_terms
+                                 selected_blocks[k], selected_terms,
+                                 ffit, fd.fotparams, combined_initial_values,
+                                 [t for t in held if t not in selected_blocks[k]])
+                    for k in removable
                 ]
 
                 # Process results as they complete
@@ -637,35 +747,35 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
                 for future in concurrent.futures.as_completed(futures):
                     completed_backward += 1
                     total_checks += 1
-                    print(f"\rStepwise regression: pass {iteration}, checking {completed_backward}/{len(removable_terms)} terms for removal, total checks {total_checks}", end="", flush=True)
+                    print(f"\rStepwise regression: pass {iteration}, checking {completed_backward}/{len(removable)} blocks for removal, total checks {total_checks}", end="", flush=True)
 
                     try:
-                        term, new_wssrndf, new_mask, fitted_values, new_ndf = future.result()
+                        block, new_wssrndf, new_mask, fitted_values, new_ndf = future.result()
                         wssr_without = new_wssrndf * new_ndf
                         wssr_with = best_wssrndf * best_ndf
-                        # F-stat for this term: how much does removing it hurt?
-                        F_stat = (wssr_without - wssr_with) / (wssr_with / best_ndf) \
-                            if (wssr_without > wssr_with and best_ndf > 0) else 0.0
-                        if F_stat < smallest_degradation:
-                            smallest_degradation = F_stat
-                            # Only remove if wssr actually increased (guard against sigma-clipping artifacts)
-                            if wssr_without > wssr_with and not ftest_accept(wssr_without, wssr_with, best_ndf):
-                                worst_term = term
-                                worst_new_wssrndf = new_wssrndf
-                                worst_new_ndf = new_ndf
-                                worst_new_mask = new_mask
-                                worst_new_fitted_values = fitted_values
+                        # p-value of the block: how significant is what removing it loses?
+                        p = ftest_pvalue(wssr_without, wssr_with, best_ndf, len(block))
+                        # Only remove if wssr actually increased (guard against sigma-clipping artifacts)
+                        if wssr_without > wssr_with and p >= 0.05 and p > largest_pvalue:
+                            largest_pvalue = p
+                            worst_key = term_block_key(block[0]) or ('=', block[0])
+                            worst_new_wssrndf = new_wssrndf
+                            worst_new_ndf = new_ndf
+                            worst_new_mask = new_mask
+                            worst_new_fitted_values = fitted_values
                     except Exception as e:
-                        print(f"\nError trying to remove term: {str(e)}", flush=True)
+                        print(f"\nError trying to remove block: {str(e)}", flush=True)
 
-            # Remove term if its contribution is minimal
-            if worst_term:
-                print(f" Removing term {worst_term} (F={smallest_degradation:.2f}, not significant at α=0.05)")
-                ffit.removeterm(worst_term)
+            # Remove block if its contribution is not significant
+            if worst_key is not None:
+                block = selected_blocks[worst_key]
+                print(f" Removing {describe(block)} (p={largest_pvalue:.2g}, not significant at α=0.05)")
+                for term in block:
+                    ffit.removeterm(term)
+                    selected_terms.remove(term)
                 best_wssrndf = worst_new_wssrndf
                 best_ndf = worst_new_ndf
-                selected_terms.remove(worst_term)
-                remaining_terms.append(worst_term)
+                remaining_blocks[worst_key] = block
                 made_change = True
 
                 # Update the photometry mask after term removal
@@ -673,11 +783,7 @@ def perform_stepwise_regression(data, ffit, initial_terms, options, metadata, al
 
                 # Update combined_initial_values with fitted values after term removal
                 combined_initial_values.update(worst_new_fitted_values)
-#            else:
-#                print(f"--- No terms removed (best candidate improvement: {-smallest_degradation:.3%} vs threshold: {-improvement_threshold:.1%})")
 
-
-#        print(f"At the end: wssrndf={best_wssrndf}")
         # Stop if no changes were made in this iteration
         if not made_change:
 #            print(f"=== Converged after {iteration} cycles: No forward or backward changes possible ===")
