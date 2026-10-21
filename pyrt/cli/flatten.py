@@ -15,6 +15,7 @@ import argparse
 from astropy.table import Table
 
 from pyrt.core import fotfit
+from pyrt.utils.file_utils import write_ecsv
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
@@ -34,7 +35,7 @@ def main():
             if 'RESPONSE' not in det.meta:
                 raise KeyError("no RESPONSE in the header, not a dophot output?")
             fotfit.flatten_response(det)
-            det.write(out, format="ascii.ecsv", overwrite=True)
+            write_ecsv(det, out)
             if args.verbose:
                 print(f"{fn} -> {out}")
         except Exception as e:

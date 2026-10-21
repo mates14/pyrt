@@ -12,7 +12,7 @@ import astropy.table
 import astropy.io.fits
 
 from typing import Optional, Tuple
-from pyrt.utils.file_utils import get_sextractor_binary
+from pyrt.utils.file_utils import get_sextractor_binary, write_ecsv
 
 def read_options(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
@@ -410,7 +410,7 @@ def main():
                                gain_override=options.gain,
                                verbose=True)
 
-        tbl.write(base+".cat", format="ascii.ecsv", overwrite=True)
+        write_ecsv(tbl, base+".cat")
         print(f'OBJECTS={len(tbl)}')
 
         # Handle background subtraction if -B option is used

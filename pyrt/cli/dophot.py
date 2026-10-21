@@ -30,7 +30,7 @@ from pyrt.core import fotfit
 from pyrt.catalog.catalog import Catalog
 from pyrt.cli.cat2det import remove_junk
 from pyrt.core.refit_astrometry import refit_astrometry, refit_astrometry_multi
-from pyrt.utils.file_utils import try_det, try_img, write_region_file
+from pyrt.utils.file_utils import try_det, try_img, write_region_file, write_ecsv
 from pyrt.utils.dophot_config import parse_arguments
 from pyrt.core.data_handling import PhotometryData, make_pairs_to_fit, compute_zeropoints_all_filters
 from pyrt.core.match_stars import process_image_with_dynamic_limits
@@ -712,7 +712,7 @@ def write_results(data, ffit, options, alldet, target, zpntest):
         det.meta['RESPONSE'] = ffit.oneline_for_image(img + 1)
 
         if (zerr[zerr_idx] < 0.2) or (options.reject is None):
-            det.write(fn, format="ascii.ecsv", overwrite=True)
+            write_ecsv(det, fn)
         else:
             if options.verbose:
                 logging.warning("rejected (too large uncertainty in zeropoint)")

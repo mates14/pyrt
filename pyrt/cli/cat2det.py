@@ -18,7 +18,7 @@ import astropy.table
 from astropy.coordinates import SkyCoord, EarthLocation
 from astropy.time import Time
 import astropy.units as u
-from pyrt.utils.file_utils import try_sex, try_ecsv, try_img
+from pyrt.utils.file_utils import try_sex, try_ecsv, try_img, write_ecsv
 from pyrt.cli.field_solve import check_wcs_needs_solving, solve_wcs_return_header
 
 from typing import Optional, Tuple
@@ -571,7 +571,7 @@ def main():
 
         output = os.path.splitext(filef)[0] + ".det"
         if options.verbose: print(f"Writing output file {output}")
-        det.write(output, format="ascii.ecsv", overwrite=True)
+        write_ecsv(det, output)
 
 # this way, the variables local to main() are not globally available, avoiding some programming errors
 if __name__ == "__main__":
