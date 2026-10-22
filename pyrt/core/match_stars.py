@@ -57,7 +57,8 @@ def match_stars(det, cat, imgwcs, idlimit=2.0):
         idlimit: Match radius in pixels (default: 2.0)
 
     Returns:
-        nearest_indices: Indices into original catalog
+        nearest_indices: Indices into the catalog as given (catalog stars
+        that do not project into the image are left out of the matching)
     """
     # Transform catalog coordinates to pixel space
     try:
@@ -96,24 +97,28 @@ def match_stars(det, cat, imgwcs, idlimit=2.0):
             logging.error("All catalog stars failed WCS transformation")
             return None
 
-        # Filter catalog to only valid stars
         n_removed = len(cat) - np.sum(valid_mask)
-        cat = cat[valid_mask]
-        cat_x = cat_x[valid_mask]
-        cat_y = cat_y[valid_mask]
-
-        logging.info(f"Filtered out {n_removed} catalog stars outside valid WCS region, continuing with {len(cat)} stars")
+        logging.info(f"Filtered out {n_removed} catalog stars outside valid WCS region, "
+                     f"continuing with {np.sum(valid_mask)} stars")
+        # divergent stars may have finite (but wrong) positions: drop them below
+        cat_x = np.where(valid_mask, cat_x, np.nan)
+        cat_y = np.where(valid_mask, cat_y, np.nan)
 
     except Exception as e:
         # Any other transformation failure is a real error
         logging.error(f"WCS transformation failed: {type(e).__name__}: {e}")
         return None
 
-    # Create coordinate arrays
+    # Only catalog stars with a pixel position take part.  The indices the
+    # tree returns count those; the caller indexes the whole catalog, so
+    # they are mapped back to its rows.
+    kept = np.flatnonzero(np.isfinite(cat_x) & np.isfinite(cat_y))
     det_coords = np.array([det['X_IMAGE'], det['Y_IMAGE']]).T
-    cat_coords = np.array([cat_x, cat_y]).T
+    cat_coords = np.array([cat_x[kept], cat_y[kept]]).T
 
     nearest_ind, _ = _query_radius(cat_coords, det_coords, idlimit)
+    for i in range(len(nearest_ind)):
+        nearest_ind[i] = kept[nearest_ind[i]]
     return nearest_ind
 
 def find_target(det, imgwcs, idlimit=2.0):
