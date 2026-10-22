@@ -214,14 +214,35 @@ def test_crpix_block(zpntest_test, data, proj_name, crpix1_default, crpix2_defau
         print(msg)
         return zpntest_fixed
 
+def _judge_step(trial, base, data, min_gain, alpha):
+    """
+    Is trial, base with terms added and refitted (its 'combined' mask in use),
+    worth it?  Both models are evaluated on the stars trial was fitted with,
+    so that a different sigma-clipped set cannot fake an improvement, and
+    trial must be both significantly better (partial F-test) and better by at
+    least min_gain in WSSR: with ten thousand stars every addition is
+    significant long after it stops improving the solution measurably.
+    Returns (accept, description).
+    """
+    _, params = _get_fitdata_ast(data, trial)
+    saved = trial.delin, base.delin
+    trial.delin = base.delin = False
+    r_new = trial.residuals(trial.fitvalues, params)
+    r_old = base.residuals(base.fitvalues, params)
+    trial.delin, base.delin = saved
+    wssr_new, wssr_old = np.sum(r_new**2), np.sum(r_old**2)
+    ndf = trial.calculate_ndf(params, r_new)
+    p = ftest_pvalue(wssr_old, wssr_new, ndf, len(trial.fitvalues) - len(base.fitvalues))
+    gain = 1.0 - wssr_new / wssr_old if wssr_old > 0 else 0.0
+    accept = p < alpha and gain >= min_gain
+    return accept, (f"WSSR/NDF {wssr_old/ndf:.3f} -> {wssr_new/ndf:.3f} "
+                    f"(gain {100*gain:.1f}%, p={p:.2g}) {'accepted' if accept else 'rejected'}")
+
 def fit_sip_orders(zpntest, data, max_order, min_gain=0.02, alpha=0.05):
     """
     Add SIP to the (fixed) projection one order at a time, from 2 up to
-    max_order, for as long as it pays off.  Each order is refitted in full (a linear solve,
-    so its start does not matter) and kept only if, on the stars of its own
-    fit, it beats the lower order both significantly (partial F-test) and by at
-    least min_gain in WSSR: with ten thousand stars every order is
-    significant long after it stops improving the solution measurably.
+    max_order, for as long as it pays off (see _judge_step).  Each order is
+    refitted in full, a linear solve, so its start does not matter.
 
     Expects the photometry mask in use; leaves the 'combined' mask of the
     accepted model in use.  Returns the accepted model.
@@ -237,21 +258,8 @@ def fit_sip_orders(zpntest, data, max_order, min_gain=0.02, alpha=0.05):
         refine_fit(trial, data)
         refine_fit(trial, data)
 
-        # Both models on the stars the new one was fitted with
-        _, params = _get_fitdata_ast(data, trial)
-        saved = trial.delin, best.delin
-        trial.delin = best.delin = False
-        r_new = trial.residuals(trial.fitvalues, params)
-        r_old = best.residuals(best.fitvalues, params)
-        trial.delin, best.delin = saved
-        wssr_new, wssr_old = np.sum(r_new**2), np.sum(r_old**2)
-        ndf = trial.calculate_ndf(params, r_new)
-        p = ftest_pvalue(wssr_old, wssr_new, ndf, len(trial.fitvalues) - len(best.fitvalues))
-        gain = 1.0 - wssr_new / wssr_old if wssr_old > 0 else 0.0
-
-        accept = p < alpha and gain >= min_gain
-        msg = (f"SIP order {order}: WSSR/NDF {wssr_old/ndf:.3f} -> {wssr_new/ndf:.3f} "
-               f"(gain {100*gain:.1f}%, p={p:.2g}) {'accepted' if accept else 'rejected'}")
+        accept, verdict = _judge_step(trial, best, data, min_gain, alpha)
+        msg = f"SIP order {order}: {verdict}"
         logging.info(msg)
         print(msg)
         if not accept:
@@ -477,205 +485,78 @@ def select_best_projection(zpntest, data):
     return best_zpntest
 
 def perform_stepwise_astrometry(zpntest, data,
-                                 # pv_terms=['PV2_3', 'PV2_5', 'PV2_7'],
-                                 pv_terms=['PV2_2', 'PV2_3', 'PV2_4', 'PV2_5', 'PV2_6', 'PV2_7'],
-                                 initial_values=None, max_iterations=20):
+                                 families=((('PV2_3', 'PV2_5', 'PV2_7'), 0.005),
+                                           (('PV2_2', 'PV2_4', 'PV2_6'), 0.02)),
+                                 alpha=0.05):
     """
-    Perform bidirectional stepwise regression for ZPN polynomial terms.
-    Uses forward selection and backward elimination to find optimal term set.
+    Select the ZPN radial terms, r(u) = u + sum PV2_n u^n, as nested chains.
+
+    The first chain, PV2_3, PV2_5, PV2_7, is the expansion of tan(u): a
+    slightly-off tangent projection.  The second, PV2_2, PV2_4, PV2_6, makes
+    r(u) a generic polynomial that can turn wavy, so it is offered only once
+    the first chain has stopped, and has to gain more to get in.  Within a
+    chain each term is tried only after the previous one was kept, and kept
+    only if it pays off (see _judge_step: significant and better in WSSR by
+    the chain's minimum gain, on the same stars).
+
+    The first chain's 0.5% is low on purpose: on the SkyScan test frame PV2_3
+    alone gains 0.8% but opens PV2_5 (2.9%); with 1% the selection fell
+    through to PV2_2 and PV2_4 instead.
 
     Args:
-        zpntest: ZPN fitting object (will be modified in place)
+        zpntest: ZPN fitting object, already refined; updated in place
         data: PhotometryData with astrometric data
-        pv_terms: List of PV2_N terms to consider (default: ['PV2_3', 'PV2_5', 'PV2_7'] - odd terms only)
-                  For difficult cases, can use: ['PV2_2', 'PV2_3', 'PV2_4', 'PV2_5', 'PV2_6', 'PV2_7']
-        initial_values: Initial guesses for each term (default: odd=Taylor series, even=0)
-        improvement_threshold: Minimum relative improvement to keep/remove term (default: 0.001 = 0.1%)
-        max_iterations: Maximum forward+backward cycles (default: 20)
+        families: (chain of PV2 terms, minimum WSSR gain), in the order offered
 
     Returns:
         list: Terms that were kept
     """
-    if initial_values is None:
-        # Default initial values from Taylor series of tan(θ) for odd terms
-        # tan(θ) = θ + θ³/3 + 2θ⁵/15 + 17θ⁷/315 + ...
-        # Even terms start at 0 (no contribution in ideal TAN projection)
-        if len(pv_terms) == 3:
-            # Odd terms only (default)
-            initial_values = [1.0/3.0, 2.0/15.0, 17.0/315.0]
-        else:
-            # All terms including even
-            initial_values = [0.0, 1.0/3.0, 0.0, 2.0/15.0, 0.0, 17.0/315.0]
+    # Starts for least_squares (PYRT_SOLVER=lsq); the linear solve needs none.
+    # tan(u) = u + u^3/3 + 2u^5/15 + 17u^7/315 + ...
+    start = {'PV2_3': 1.0/3.0, 'PV2_5': 2.0/15.0, 'PV2_7': 17.0/315.0}
 
-    # Ensure we have enough initial values
-    while len(initial_values) < len(pv_terms):
-        initial_values.append(0.0)
+    best = zpntest
+    best_mask = None
+    selected = []
+    logging.info(f"Stepwise astrometry from WSSR/NDF = {zpntest.wssrndf:.6f}")
+    print(f"Stepwise astrometry from WSSR/NDF = {zpntest.wssrndf:.6f}")
 
-    # Create a dictionary for term -> initial value lookup
-    term_init_values = dict(zip(pv_terms, initial_values))
-
-    # Save the initial clean state (before any PV2_* terms are added)
-    # This is our baseline to rebuild from
-    zpntest_clean = deepcopy(zpntest)
-
-    selected_terms = []
-    remaining_terms = list(pv_terms)
-    baseline_wssrndf = zpntest.wssrndf
-    baseline_wssr = zpntest.wssrndf * zpntest.ndf
-    baseline_ndf = zpntest.ndf
-
-    logging.info(f"Starting bidirectional stepwise astrometry with baseline WSSR/NDF = {baseline_wssrndf:.6f}")
-    print(f"Starting bidirectional stepwise astrometry with baseline WSSR/NDF = {baseline_wssrndf:.6f}")
-
-    for iteration in range(max_iterations):
-        made_change = False
-
-        # FORWARD STEP: Try adding best remaining term
-        best_new_term = None
-        best_F = 0.0
-        best_new_wssrndf = baseline_wssrndf
-        best_new_wssr = baseline_wssr
-        best_new_ndf = baseline_ndf
-
-        for term in remaining_terms:
-            # Try adding this term - start from clean state + selected terms
-            zpntest_test = deepcopy(zpntest_clean)
-            for t in selected_terms:
-                zpntest_test.fitterm([t], [term_init_values[t]])
-            zpntest_test.fitterm([term], [term_init_values[term]])
-
-            # Refit with sigma clipping
+    for chain, min_gain in families:
+        for term in chain:
+            trial = deepcopy(best)
+            trial.fitterm([term], [start.get(term, 0.0)])
             try:
-                refine_fit(zpntest_test, data)
-                refine_fit(zpntest_test, data)
+                refine_fit(trial, data)
+                refine_fit(trial, data)
             except Exception as e:
-                continue
-
-            new_wssr = zpntest_test.wssrndf * zpntest_test.ndf
-            new_ndf = zpntest_test.ndf
-            if ftest_accept(baseline_wssr, new_wssr, new_ndf):
-                F_stat = (baseline_wssr - new_wssr) / (new_wssr / new_ndf)
-                if F_stat > best_F:
-                    best_F = F_stat
-                    best_new_term = term
-                    best_new_wssrndf = zpntest_test.wssrndf
-                    best_new_wssr = new_wssr
-                    best_new_ndf = new_ndf
-
-        # Add best term if F-test passed
-        if best_new_term:
-            msg = (f"[Iter {iteration+1}] Adding {best_new_term}: WSSR/NDF {baseline_wssrndf:.6f} → "
-                   f"{best_new_wssrndf:.6f} (F={best_F:.1f}, NDF={best_new_ndf})")
+                logging.warning(f"Fitting with {term} failed: {e}")
+                break
+            accept, verdict = _judge_step(trial, best, data, min_gain, alpha)
+            msg = f"Adding {term}: {verdict}"
             logging.info(msg)
             print(msg)
+            if not accept:
+                break
+            best, best_mask = trial, data.get_current_mask().copy()
+            selected.append(term)
 
-            selected_terms.append(best_new_term)
-            remaining_terms.remove(best_new_term)
+    if best_mask is not None:
+        data.add_mask('combined', best_mask)
+        data.use_mask('combined')
+        # Copy the fitted state back to zpntest
+        for attr in ('fixterms', 'fixvalues', 'fitterms', 'fitvalues', 'fiterrors', 'fitcov',
+                     'wssr', 'wssrndf', 'ndf', 'sigma', 'variance'):
+            value = getattr(best, attr, None)
+            setattr(zpntest, attr, value.copy() if hasattr(value, 'copy') else value)
 
-            # Rebuild zpntest from clean state with all selected terms
-            zpntest_new = deepcopy(zpntest_clean)
-            for t in selected_terms:
-                zpntest_new.fitterm([t], [term_init_values[t]])
-            refine_fit(zpntest_new, data)
-            refine_fit(zpntest_new, data)
-
-            # Copy the fitted state back to zpntest
-            zpntest.fixterms = zpntest_new.fixterms.copy()
-            zpntest.fixvalues = zpntest_new.fixvalues.copy()
-            zpntest.fitterms = zpntest_new.fitterms.copy()
-            zpntest.fitvalues = zpntest_new.fitvalues.copy()
-            zpntest.fiterrors = zpntest_new.fiterrors.copy()
-            zpntest.wssrndf = zpntest_new.wssrndf
-            zpntest.ndf = zpntest_new.ndf
-            zpntest.sigma = zpntest_new.sigma
-
-            baseline_wssrndf = zpntest.wssrndf
-            baseline_wssr = zpntest.wssrndf * zpntest.ndf
-            baseline_ndf = zpntest.ndf
-            made_change = True
-
-        # BACKWARD STEP: Try removing worst selected term
-        if len(selected_terms) > 0:
-            worst_term = None
-            smallest_F = float('inf')
-            worst_new_wssrndf = baseline_wssrndf
-            worst_new_wssr = baseline_wssr
-            worst_new_ndf = baseline_ndf
-
-            for term in selected_terms:
-                # Try removing this term - start from clean state
-                terms_without = [t for t in selected_terms if t != term]
-
-                # Build from clean state with only the terms we want
-                zpntest_test = deepcopy(zpntest_clean)
-                for t in terms_without:
-                    zpntest_test.fitterm([t], [term_init_values[t]])
-
-                try:
-                    refine_fit(zpntest_test, data)
-                    refine_fit(zpntest_test, data)
-                except Exception as e:
-                    continue
-
-                new_wssr = zpntest_test.wssrndf * zpntest_test.ndf
-                new_ndf = zpntest_test.ndf
-                F_stat = (new_wssr - baseline_wssr) / (baseline_wssr / baseline_ndf) \
-                    if (new_wssr > baseline_wssr and baseline_ndf > 0) else 0.0
-                if F_stat < smallest_F:
-                    smallest_F = F_stat
-                    worst_new_wssrndf = zpntest_test.wssrndf
-                    worst_new_wssr = new_wssr
-                    worst_new_ndf = new_ndf
-                    # Only remove if wssr actually increased (guard against sigma-clipping artifacts)
-                    if new_wssr > baseline_wssr and not ftest_accept(new_wssr, baseline_wssr, baseline_ndf):
-                        worst_term = term
-
-            # Remove term if F-test says it is not significant
-            if worst_term:
-                msg = (f"[Iter {iteration+1}] Removing {worst_term}: WSSR/NDF {baseline_wssrndf:.6f} → "
-                       f"{worst_new_wssrndf:.6f} (F={smallest_F:.2f}, not significant at α=0.05)")
-                logging.info(msg)
-                print(msg)
-
-                selected_terms.remove(worst_term)
-                remaining_terms.append(worst_term)
-
-                # Rebuild zpntest from clean state with remaining terms
-                zpntest_new = deepcopy(zpntest_clean)
-                for t in selected_terms:
-                    zpntest_new.fitterm([t], [term_init_values[t]])
-                refine_fit(zpntest_new, data)
-                refine_fit(zpntest_new, data)
-
-                # Copy the fitted state back to zpntest
-                zpntest.fixterms = zpntest_new.fixterms.copy()
-                zpntest.fixvalues = zpntest_new.fixvalues.copy()
-                zpntest.fitterms = zpntest_new.fitterms.copy()
-                zpntest.fitvalues = zpntest_new.fitvalues.copy()
-                zpntest.fiterrors = zpntest_new.fiterrors.copy()
-                zpntest.wssrndf = zpntest_new.wssrndf
-                zpntest.ndf = zpntest_new.ndf
-                zpntest.sigma = zpntest_new.sigma
-
-                baseline_wssrndf = zpntest.wssrndf
-                baseline_wssr = zpntest.wssrndf * zpntest.ndf
-                baseline_ndf = zpntest.ndf
-                made_change = True
-
-        # Stop if no changes in this iteration
-        if not made_change:
-            logging.info(f"Converged after {iteration+1} iterations")
-            print(f"Converged after {iteration+1} iterations")
-            break
-
-    if selected_terms:
-        logging.info(f"Stepwise astrometry selected terms: {selected_terms}")
-        print(f"Stepwise astrometry selected terms: {selected_terms}")
+    if selected:
+        logging.info(f"Stepwise astrometry selected terms: {selected}")
+        print(f"Stepwise astrometry selected terms: {selected}")
     else:
         logging.info("Stepwise astrometry: no terms improved the fit")
         print("Stepwise astrometry: no terms improved the fit")
 
-    return selected_terms
+    return selected
 
 def compute_error_model(zpntest, data):
     """
