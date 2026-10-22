@@ -32,6 +32,7 @@ from pyrt.cli.cat2det import remove_junk
 from pyrt.core.refit_astrometry import refit_astrometry, refit_astrometry_multi
 from pyrt.utils.file_utils import try_det, try_img, write_region_file, write_ecsv
 from pyrt.utils.dophot_config import parse_arguments
+from pyrt.utils.camera_config import CameraParams
 from pyrt.core.data_handling import PhotometryData, make_pairs_to_fit, compute_zeropoints_all_filters
 from pyrt.core.match_stars import process_image_with_dynamic_limits
 from pyrt.core.stepwise_regression import perform_stepwise_regression, parse_terms, expand_pseudo_term
@@ -756,7 +757,9 @@ def save_weight_image(det, ffData, options, zpntest):
     :param options: Command line options
     """
     start = time.time()
-    gain = options.gain if options.gain is not None else 2.3
+    gain, src = CameraParams.from_header(det.meta).resolve('gain', det.meta, 'GAIN', cli=options.gain)
+    if src not in ('cli', 'header'):
+        gain *= float(det.meta.get('NCOMBINE', 1))   # cameras.ini gain is per readout
     wwData = np.power(10, -0.4 * (22 - ffData))
     wwData = np.power(wwData * gain, 2) / (wwData * gain + 3.1315 * np.power(det.meta['BGSIGMA'] * gain * det.meta['FWHM'] / 2, 2))
     wwHDU = astropy.io.fits.PrimaryHDU(data=wwData)

@@ -13,6 +13,7 @@ import astropy.io.fits
 
 from typing import Optional, Tuple
 from pyrt.utils.file_utils import get_sextractor_binary, write_ecsv
+from pyrt.utils.camera_config import CameraParams
 
 def read_options(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
@@ -44,9 +45,11 @@ def get_accnum(file):
     return 1
 
 def get_saturation(file):
-    '''Saturation level in ADU: SATURATE keyword if present, else 60000 per summed readout'''
-    try: return float(astropy.io.fits.getval(file, "SATURATE"))
-    except (KeyError, ValueError): return 60000.0 * get_accnum(file)
+    '''Saturation level in ADU: SATURATE keyword if present, else the camera's
+    saturation (cameras.ini, per readout) times the summed readouts'''
+    hdr = astropy.io.fits.getheader(file)
+    datamax, src = CameraParams.from_header(hdr).resolve('saturation', hdr, 'SATURATE')
+    return datamax if src == 'header' else datamax * get_accnum(file)
 
 def do_matrix(file, fwhm):
     '''Generate sextractor convolution matrix of a given FWHM'''
@@ -187,21 +190,22 @@ def call_iraf(file, det, fwhm, aperture=None, gain_override=None):
     danu = 1.5*ape
     anu = 2.0*ape
 
-    # D50 Andor gain and rnoise, this stuff needs to be seriously improved
-    try: ncombine = astropy.io.fits.getval(file, "NCOMBINE")
-    except: ncombine = 1.0
-    if gain_override is not None:
-        epadu = gain_override
-        print(f"Using command-line gain override: epadu={epadu}")
-    else:
-        try: epadu = astropy.io.fits.getval(file, "GAIN")
-        except: epadu = 0.81 * ncombine
+    # gain and read noise: cameras.ini values are per single readout
+    hdr = astropy.io.fits.getheader(file)
+    cam = CameraParams.from_header(hdr)
+    try: ncombine = float(hdr["NCOMBINE"])
+    except (KeyError, ValueError): ncombine = 1.0
+    epadu, gain_src = cam.resolve('gain', hdr, 'GAIN', cli=gain_override)
+    if gain_src not in ('cli', 'header'):
+        epadu *= ncombine
 
     # on-chip accumulation: gain unchanged, read noise adds in quadrature
     accnum = get_accnum(file)
-    rnoise = 4.63 * np.sqrt(accnum) / np.sqrt(ncombine)
+    rnoise, rnoise_src = cam.resolve('rnoise')
+    rnoise *= np.sqrt(accnum) / np.sqrt(ncombine)
     datamax = get_saturation(file)
-    print(f"ape={ape} anu={anu} danu={danu} accnum={accnum} rnoise={rnoise:.2f} datamax={datamax:.0f}")
+    print(f"ape={ape} anu={anu} danu={danu} accnum={accnum} epadu={epadu} ({gain_src}) "
+          f"rnoise={rnoise:.2f} ({rnoise_src}) datamax={datamax:.0f}")
 
     script = f"""noao
 digiphot

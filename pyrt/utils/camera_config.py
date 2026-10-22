@@ -128,7 +128,10 @@ class CameraParams:
         if f'force.{key}' in self.values:
             return self.get(f'force.{key}', type=type), self.source[f'force.{key}']
         if header is not None and header_key is not None and header.get(header_key) is not None:
-            return type(header[header_key]), 'header'
+            try:
+                return type(header[header_key]), 'header'
+            except (TypeError, ValueError):
+                logging.warning(f"camera_config: unusable {header_key}={header[header_key]!r} in the header")
         if key in self.values:
             return self.get(key, type=type), self.source[key]
         return None, None

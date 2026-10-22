@@ -18,7 +18,6 @@ johnson = False
 makak = False
 filter_check = none
 stars = False
-gain = 2.3
 use_stepwise = True
 target_photometry = True
 terms = .p3,.r3
@@ -125,7 +124,7 @@ def parse_arguments(args=None):
     parser.add_argument("-j", "--johnson", action="store_true", default=config.get('johnson', 'False'),
                         help="Use Stetson Johnson/Cousins filters and not SDSS")
     parser.add_argument("-X", "--tryflt", action='store_true', help="Try different filters (broken)")
-    parser.add_argument("-G", "--gain", action='store', help="Provide camera gain", type=float, default=config.get('gain', 2.3))
+    parser.add_argument("-G", "--gain", action='store', help="Provide camera gain (default: header GAIN, else cameras.ini)", type=float, default=config.get('gain'))
     parser.add_argument("-i", "--idlimit", help="Set a custom idlimit", type=float, default=config.get('idlimit'))
     parser.add_argument("-k", "--makak", help="Makak tweaks", action='store_true', default=config.get('makak','False'))
     parser.add_argument("-R", "--redlim", help="Do not get stars redder than this g-r", type=float, default=config.get("redlim"))
