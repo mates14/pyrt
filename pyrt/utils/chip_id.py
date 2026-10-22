@@ -166,8 +166,16 @@ COMPOUND_PATTERNS = [
     ({"CCD_SER": "G4KF16000-0616", "INSTRUME": "SBT camera C1"}, "mi6166"),
     ({"CCD_SER": "G4KF16000-0616", "INSTRUME": "SBT camera C2"}, "mi6167"),
 
-    # G2-1600 with truncated serial - truly ambiguous, use generic ID
-    # (cameras are mobile, can't reliably distinguish by position)
+    # G2-1600 with truncated serial: libgxccd returns the serial cut to 14
+    # characters, so G2KF1600-002065 and -002066 both read "G2KF1600-00206".
+    # The cameras are mobile (SBT C3, OVIS), so position cannot tell them
+    # apart, but RTS2 also writes the untruncated gxccd camera ID as
+    # PRODUCT_ID. Confirmed: 2065 (SBT C3) by its hot-pixel pattern and dark
+    # noise, 2066 on OVIS by its PRODUCT_ID. In 2018 the serial was still
+    # whole (G4KF16000-06167), so the cut came with a later libgxccd.
+    ({"CCD_SER": "G2KF1600-00206", "PRODUCT_ID": "2065"}, "mi2065"),
+    ({"CCD_SER": "G2KF1600-00206", "PRODUCT_ID": "2066"}, "mi2066"),
+    # Without PRODUCT_ID (older headers) it stays ambiguous: mi0206 fallback.
 ]
 
 # Fallback for truncated/ambiguous serials that can't be resolved
