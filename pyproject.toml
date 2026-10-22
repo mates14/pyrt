@@ -105,6 +105,7 @@ packages = [
 
 [tool.setuptools.package-data]
 pyrt = ["py.typed"]
+"pyrt.utils" = ["cameras.ini"]
 
 [tool.black]
 line-length = 100

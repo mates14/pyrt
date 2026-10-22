@@ -1,12 +1,14 @@
 # astrometry_refit.py
 
 import os
+import re
 import warnings
 import numpy as np
 import astropy.wcs
 #import astropy.io.fits
 from pyrt.core import zpnfit
 from pyrt.core.stepwise_regression import ftest_accept, ftest_pvalue
+from pyrt.utils.camera_config import CameraParams
 import logging
 from copy import deepcopy
 
@@ -608,19 +610,8 @@ def compute_error_model(zpntest, data):
     return np.sqrt(S0), SC, scatter
 
 
-# Solution validity limits for assess_astrometry().  First calibration on D50/C0
-# (53457, 2026-10-06): good fits ANISO~0.3%, DCEN~1px, DMAX~6px; fits broken by
-# a runaway -z refit ANISO 9-25%, DCEN 38-68px, DMAX 92-278px.
-QUAL_MAX_DSCAL = 0.02       # |final/input pixel scale - 1|
-QUAL_MAX_ANISO = 0.02       # CD singular value ratio - 1 (skew/anisotropy)
-QUAL_MAX_DROT  = 1.0        # rotation change against input WCS (deg)
-QUAL_MAX_DCEN  = 10.0       # chip centre shift against input WCS (px)
-QUAL_MAX_DMAX  = 20.0       # max final-vs-input displacement over the chip (px)
-QUAL_JAC_RANGE = (0.9, 1.1) # local scale over the chip relative to the centre
-QUAL_MAX_SIGF  = 0.5        # ASTSIGMA / FWHM
-QUAL_MIN_COVER = 0.75       # fraction of 4x4 chip cells holding a fitted star
-QUAL_MAX_CHI2C = 3.0        # chi2/dof of per-cell mean residual vectors
-QUAL_SYS_FWHM  = 0.04       # tolerated systematic shift of a cell mean (FWHM fraction)
+# Solution validity limits for assess_astrometry() are the astqual_* keys of
+# pyrt/utils/cameras.ini ([DEFAULT], overridable per camera).
 
 def _local_shape(w, x, y, ra0, dec0, step=10.0):
     """Mean scale ("/px), anisotropy, rotation (deg) and parity of the WCS at pixel (x, y),
@@ -659,6 +650,10 @@ def assess_astrometry(zpntest, meta, data, img_idx=0):
       OK      - otherwise
     """
     bad, partial = [], []
+    cam = CameraParams.from_header(meta)
+    lim = {k: cam.get(f'astqual_{k}') for k in
+           ('max_dscal', 'max_aniso', 'max_drot', 'max_dcen', 'max_dmax', 'jac_min', 'jac_max',
+            'max_sigf', 'min_cover', 'max_chi2c', 'sys_fwhm')}
 
     W = meta.get('IMGAXIS1', meta.get('IMAGEW', meta.get('NAXIS1')))
     H = meta.get('IMGAXIS2', meta.get('IMAGEH', meta.get('NAXIS2')))
@@ -712,8 +707,8 @@ def assess_astrometry(zpntest, meta, data, img_idx=0):
 
     m['SIGF'] = zpntest.sigma / fwhm
 
-    for key, limit in (('DSCAL', QUAL_MAX_DSCAL), ('ANISO', QUAL_MAX_ANISO), ('DROT', QUAL_MAX_DROT),
-                       ('DCEN', QUAL_MAX_DCEN), ('SIGF', QUAL_MAX_SIGF)):
+    for key, limit in (('DSCAL', lim['max_dscal']), ('ANISO', lim['max_aniso']), ('DROT', lim['max_drot']),
+                       ('DCEN', lim['max_dcen']), ('SIGF', lim['max_sigf'])):
         if key in m and not np.abs(m[key]) <= limit:   # NaN counts as failure
             bad.append(f"{key}={m[key]:.4g} (limit {limit})")
     # A large edge displacement against the input WCS alone is no proof of a broken
@@ -721,9 +716,9 @@ def assess_astrometry(zpntest, meta, data, img_idx=0):
     # (20261002211057-720: 1.7% radial, DMAX 28px at the corners, sane otherwise).
     # Runaway fits are caught by DCEN/ANISO/local scale; DMAX only marks PARTIAL,
     # which lets the next pass rematch with this solution and extend it.
-    if 'DMAX' in m and not m['DMAX'] <= QUAL_MAX_DMAX:
-        partial.append(f"DMAX={m['DMAX']:.4g} (limit {QUAL_MAX_DMAX})")
-    if not (QUAL_JAC_RANGE[0] <= m['JMIN'] and m['JMAX'] <= QUAL_JAC_RANGE[1]):
+    if 'DMAX' in m and not m['DMAX'] <= lim['max_dmax']:
+        partial.append(f"DMAX={m['DMAX']:.4g} (limit {lim['max_dmax']})")
+    if not (lim['jac_min'] <= m['JMIN'] and m['JMAX'] <= lim['jac_max']):
         bad.append(f"local scale {m['JMIN']:.3f}..{m['JMAX']:.3f}")
 
     # --- coverage and spatial systematics from residual vectors ---
@@ -739,9 +734,9 @@ def assess_astrometry(zpntest, meta, data, img_idx=0):
     var1 = r2model / (2 * np.log(2))
     used = dx**2 + dy**2 < 9 * r2model
     # With ~100+ stars per cell the mean is known to ~0.01px, so any leftover model
-    # pattern would count; shifts below QUAL_SYS_FWHM*FWHM per axis are tolerated
+    # pattern would count; shifts below astqual_sys_fwhm*FWHM per axis are tolerated
     # (20261002204607-609: cell means <=0.056px, FWHM 5.6px, CHI2C 5.9 without it)
-    sys2 = (QUAL_SYS_FWHM * fwhm)**2 if np.isfinite(fwhm) else 0.0
+    sys2 = (lim['sys_fwhm'] * fwhm)**2 if np.isfinite(fwhm) else 0.0
 
     ix = np.clip(((x - 0.5) / W * 4).astype(int), 0, 3)
     iy = np.clip(((y - 0.5) / H * 4).astype(int), 0, 3)
@@ -759,10 +754,10 @@ def assess_astrometry(zpntest, meta, data, img_idx=0):
     m['COVER'] = cover
     m['CHI2C'] = chi2 / dof if dof else np.nan
 
-    if cover < QUAL_MIN_COVER:
-        partial.append(f"COVER={cover:.2f} (limit {QUAL_MIN_COVER})")
-    if not m['CHI2C'] <= QUAL_MAX_CHI2C:
-        partial.append(f"CHI2C={m['CHI2C']:.3g} (limit {QUAL_MAX_CHI2C})")
+    if cover < lim['min_cover']:
+        partial.append(f"COVER={cover:.2f} (limit {lim['min_cover']})")
+    if not m['CHI2C'] <= lim['max_chi2c']:
+        partial.append(f"CHI2C={m['CHI2C']:.3g} (limit {lim['max_chi2c']})")
 
     qual = "BAD" if bad else "PARTIAL" if partial else "OK"
     stats = " ".join(f"{k}={v:.4g}" for k, v in m.items())
@@ -800,12 +795,11 @@ def refit_astrometry_multi(alldet, data, options):
         Fitted model with per-image CRVAL/CD terms and global CRPIX/PV2_* terms.
     """
     det0 = alldet[0]
-    camera = det0.meta.get('CCD_NAME', 'C0')
-    telescope = str(det0.meta.get('TELESCOP', ''))
+    cam = CameraParams.from_header(det0.meta)
     n_images = len(alldet)
-    from_camera = _from_camera(options, camera, telescope)
+    from_camera = _from_camera(options, cam)
 
-    msg = f"Multi-image astrometry: {n_images} images, camera={camera}"
+    msg = f"Multi-image astrometry: {n_images} images, camera={cam.camera}@{cam.telescope} ({cam.label})"
     logging.info(msg); print(msg)
 
     # --- Build the shared model (projection + global optical terms) ---
@@ -813,15 +807,8 @@ def refit_astrometry_multi(alldet, data, options):
         zpntest = zpnfit.zpnfit(proj="AZP")
         zpntest.fitterm(["PV2_1"], [1])
     elif options.refit_zpn or from_camera:
-        if camera in ["C0", "C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
-            zpntest = zpnfit.zpnfit(proj="ZPN")
-            zpntest.fixterm(["PV2_1"], [1])
-        elif camera in ["CAM-ZEA"]:
-            zpntest = zpnfit.zpnfit(proj="ZEA")
-        else:
-            zpntest = zpnfit.zpnfit(proj="ZPN")
-            zpntest.fixterm(["PV2_1"], [1])
-        setup_camera_params(zpntest, camera, options.refit_zpn, telescope, meta=det0.meta)
+        zpntest = _camera_projection(cam)
+        setup_camera_params(zpntest, cam, options.refit_zpn, meta=det0.meta)
     else:
         # Gentle refit: projection and global terms from first image's header
         ctype1 = str(det0.meta.get('CTYPE1', ''))
@@ -891,6 +878,7 @@ def refit_astrometry_multi(alldet, data, options):
 
     zpntest.astqual, zpntest.astcover, zpntest.astreason = zip(
         *(assess_astrometry(zpntest, d.meta, data, n) for n, d in enumerate(alldet)))
+    zpntest.camconf = cam.label
 
     return zpntest
 
@@ -918,15 +906,9 @@ def refit_astrometry(det, data, options):
         Boolean array indicating which stars were used in the final fit
     """
 
-    try:
-        camera = det.meta['CCD_NAME']
-        logging.info(f"CCD_NAME is {camera}")
-    except KeyError:
-        camera = "C0"
-        logging.info(f"CCD_NAME not found, setting {camera}")
-
-    telescope = str(det.meta.get('TELESCOP', ''))
-    from_camera = _from_camera(options, camera, telescope)
+    cam = CameraParams.from_header(det.meta)
+    logging.info(f"camera parameters: {cam}")
+    from_camera = _from_camera(options, cam)
 
     if options.szp:
         zpntest = zpnfit.zpnfit(proj="AZP")
@@ -934,23 +916,16 @@ def refit_astrometry(det, data, options):
 
     elif options.refit_zpn or from_camera:
         # Camera model (-z: priors as a start, --zpn-from-camera without -z: held fixed).
-        # Ignores header CTYPE/CRPIX and uses hardcoded camera model.
-        if camera in ["C0", "C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]:
-            logging.info(f"ZPN projection activated ({'refit_zpn' if options.refit_zpn else 'camera model fixed'})")
-            zpntest = zpnfit.zpnfit(proj="ZPN")
-            zpntest.fixterm(["PV2_1"], [1])
-        elif camera in ["CAM-ZEA"]:
-            zpntest = zpnfit.zpnfit(proj="ZEA")
-        else:
-            logging.info(f"ZPN projection activated via refit_zpn flag (unknown camera)")
-            zpntest = zpnfit.zpnfit(proj="ZPN")
-            zpntest.fixterm(["PV2_1"], [1])
+        # Ignores header CTYPE/CRPIX and uses the camera model of cameras.ini.
+        zpntest = _camera_projection(cam)
+        logging.info(f"{cam.get('proj', 'ZPN', type=str)} projection activated "
+                     f"({'refit_zpn' if options.refit_zpn else 'camera model fixed'}, {cam.label})")
 
     else:
         # Gentle refit (-a without -z): respect the existing WCS structure.
         # Read projection from CTYPE1, fix CRPIX and distortion terms at header values.
         # Only CD matrix and CRVAL are free.  Works correctly for both native ZPN images
-        # and reprojected TAN images regardless of CCD_NAME.
+        # and reprojected TAN images regardless of the camera.
         ctype1 = str(det.meta.get('CTYPE1', ''))
         if 'ZPN' in ctype1:
             logging.info(f"Gentle refit: ZPN projection from header CTYPE1={ctype1!r}")
@@ -971,8 +946,8 @@ def refit_astrometry(det, data, options):
         return None
 
     if options.refit_zpn or options.szp or from_camera:
-        # Hardcoded camera-specific CRPIX and distortion: fitted with -z, fixed without
-        setup_camera_params(zpntest, camera, options.refit_zpn, telescope, meta=det.meta)
+        # Camera-specific CRPIX and distortion: fitted with -z, fixed without
+        setup_camera_params(zpntest, cam, options.refit_zpn, meta=det.meta)
         if not from_camera:
             seed_zpn_from_header(zpntest, det.meta)
         reseat_crval(zpntest, det.meta)
@@ -996,8 +971,7 @@ def refit_astrometry(det, data, options):
     zpntest.fit(params)
 
     # Refine the fit - use stepwise for unknown cameras with refit_zpn
-    is_known_camera = (camera in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"] or
-                       (camera == "C0" and telescope == "D50"))
+    is_known_camera = _has_model(cam)
     is_zpn = (zpntest.fixvalues[zpntest.fixterms.index("PROJ")] == zpntest.projections.index("ZPN"))
 
     if options.refit_zpn and not is_known_camera and is_zpn:
@@ -1042,6 +1016,8 @@ def refit_astrometry(det, data, options):
             print(f"WARNING: Projection+SIP combination failed validation, using projection without SIP")
             # Restore state before SIP was added
             zpntest = zpntest_before_sip
+
+    zpntest.camconf = cam.label
 
     # Save WCS solution if requested
     if options.save_wcs:
@@ -1112,16 +1088,29 @@ def setup_initial_wcs(zpntest, meta):
 
     return keys_invalid
 
-def _from_camera(options, camera, telescope):
-    """--zpn-from-camera: use the hardcoded camera model instead of the header WCS
+_MODEL_TERM = re.compile(r'PV2_\d+|CRPIX[12]')
+
+def _has_model(cam):
+    """cameras.ini holds a camera model (PV2_n or CRPIX) for this frame"""
+    return any(_MODEL_TERM.fullmatch(k) for k in cam.values)
+
+def _camera_projection(cam):
+    """Empty model in the camera's projection (cameras.ini proj, default ZPN)"""
+    proj = cam.get('proj', 'ZPN', type=str)
+    zpntest = zpnfit.zpnfit(proj=proj)
+    if proj == 'ZPN':
+        zpntest.fixterm(["PV2_1"], [1])
+    return zpntest
+
+def _from_camera(options, cam):
+    """--zpn-from-camera: use the camera model of cameras.ini instead of the header WCS
     (with -z as the starting point, without -z held fixed with only CD and CRVAL fitted)."""
     if not getattr(options, 'zpn_from_camera', False):
         return False
-    known = (camera in ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"] or
-             (camera == "C0" and telescope == "D50"))
-    if not known:
-        logging.warning(f"--zpn-from-camera: no camera model for {camera}/{telescope}, using the header WCS")
-    return known
+    if not _has_model(cam):
+        logging.warning(f"--zpn-from-camera: no camera model for {cam.camera}@{cam.telescope}, using the header WCS")
+        return False
+    return True
 
 def _term_value(zpntest, term):
     for t, v in zip(zpntest.fitterms + zpntest.fixterms, zpntest.fitvalues + zpntest.fixvalues):
@@ -1175,8 +1164,8 @@ def _crpix_for_crop(crpix1, crpix2, meta):
     return (crpix1 - ltv1) / ltm11, (crpix2 - ltv2) / ltm22
 
 
-def setup_camera_params(zpntest, camera, refit_zpn, telescope='', meta=None):
-    """Set up camera-specific parameters.
+def setup_camera_params(zpntest, cam, refit_zpn, meta=None):
+    """Camera model (PV2_n, CRPIX) of cameras.ini: fitted with -z or always_fit, fixed otherwise.
 
     meta is the FITS header dict; when present, CRPIX values are corrected
     for sub-frame crops using the LTV1/LTV2/LTM1_1/LTM2_2 keywords.
@@ -1184,95 +1173,14 @@ def setup_camera_params(zpntest, camera, refit_zpn, telescope='', meta=None):
     if meta is None:
         meta = {}
 
-    def crpix(cx, cy):
-        return _crpix_for_crop(cx, cy, meta)
+    setterm = zpntest.fitterm if refit_zpn or cam.get('always_fit', False, type=bool) else zpntest.fixterm
+    pv = sorted((k for k in cam.values if re.fullmatch(r'PV2_\d+', k)), key=lambda k: int(k[4:]))
+    if pv:
+        setterm(pv, [cam.get(k) for k in pv])
+    if 'CRPIX1' in cam and 'CRPIX2' in cam:
+        setterm(["CRPIX1", "CRPIX2"], list(_crpix_for_crop(cam.get('CRPIX1'), cam.get('CRPIX2'), meta)))
 
-    if camera == "C0" and telescope == "D50":
-        if refit_zpn:
-            # until vii/26
-            # zpntest.fitterm(["PV2_3"], [300])
-            # zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(543, 530)))
-            # solution from 15.8.2026
-            # CRPIX1    = 547.966987321363 / ± 0.004418205312 (0.000806%)
-            # CRPIX2    = 564.348863674982 / ± 0.015983159117 (0.002832%)
-            zpntest.fitterm(["PV2_3"], [260])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(548, 565)))
-        else:
-            zpntest.fixterm(["PV2_3"], [300])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(543, 530)))
-
-    # SBT, from -113, -801, -267 of 2.10.2026 (-a --zpn-from-camera, then -zS2 twice):
-    # CRPIX (2076-2078, 2047-2050), PV2_3 8.19-8.29, PV2_5 430-468
-    # (until x/26: PV2_3=7.5, PV2_5=386.1, CRPIX 2090, 2043)
-    if camera == "C1":
-        if refit_zpn:
-            zpntest.fitterm(["PV2_3", "PV2_5"], [8.2, 450])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(2076, 2048)))
-        else:
-            zpntest.fixterm(["PV2_3", "PV2_5"], [8.2, 450])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(2076, 2048)))
-
-    if camera == "C2":
-        if refit_zpn:
-            zpntest.fitterm(["PV2_3", "PV2_5"], [8.255, 343.8])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(2124.0, 2039.0)))
-        else:
-            zpntest.fixterm(["PV2_3", "PV2_5"], [8.255, 343.8])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(2124.0, 2039.0)))
-
-    if camera == "SROT1":
-        if refit_zpn:
-            logging.info(f"SROT1 setup being loaded (active)")
-            zpntest.fitterm(["PV2_3", "PV2_5"], [38.561185, 3461.163423])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(1882.796706, 2055.012734)))
-        else:
-            logging.info(f"SROT1 setup being loaded (passive)")
-            zpntest.fixterm(["PV2_3", "PV2_5"], [38.561185, 3461.163423])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(1882.796706, 2055.012734)))
-
-    # Based on common fit of 100 random frames from 6.april 2026:
-    # PV2_3=0.1272 ± 0.0008, PV2_5 = 0.1689 +/- 0.0165
-    # Error model: ASTSIGMA=0.0730 px (floor), ASTVAR=2.0851, ASTSCATT=0.2759 px
-    if camera in ( "makak2",  "makak"):
-        if refit_zpn:
-            zpntest.fitterm(["PV2_3", "PV2_5"], [0.1272, 0.1689])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(609.2, 598.0)))
-        else:
-            zpntest.fixterm(["PV2_3", "PV2_5"], [0.1272, 0.1689]) 
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(609.2, 598.0)))
-            
-            # zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(813.6, 622.8)))
-
-    if camera == "NF4":
-        zpntest.fitterm(["PV2_3"], [65.913305900171])
-        zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(522.75, 569.96)))
-
-    if camera == "ASM1":
-        if refit_zpn:
-            zpntest.fitterm(["PV2_3", "PV2_5", "PV2_7"], [-0.0388566,0.001255,-0.002769])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(2054.5, 2059.0)))
-        else:
-            zpntest.fixterm(["PV2_3", "PV2_5", "PV2_7"], [-0.0388566,0.001255,-0.002769])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(2054.5, 2059.0)))
-    if camera == "ASM-S":
-        if refit_zpn:
-            zpntest.fitterm(["PV2_3", "PV2_5"], [-0.0456,0.0442])
-            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(128.5, 128.5)))
-#            zpntest.fitterm(["CRPIX1", "CRPIX2"], list(crpix(339.8, 335.5)))
-        else:
-            zpntest.fixterm(["PV2_3", "PV2_5"], [-0.0456,0.0442])
-            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(128.5, 128.5)))
-#            zpntest.fixterm(["CRPIX1", "CRPIX2"], list(crpix(339.8, 335.5)))
-# PV2_3   =  -0.045557711245 / ± 0.001318165008 (2.893396%)
-# PV2_5   =   0.044189874766 / ± 0.002482740922 (5.618348%)
-# CRPIX1  = 339.882095473812 / ± 0.262750191549 (0.077306%)
-# CRPIX2  = 335.523756136020 / ± 0.325225858217 (0.096931%)
-
-    # For unknown cameras (including C0 on non-D50 telescopes): stepwise regression selects terms.
-    known = ["C1", "C2", "makak", "makak2", "NF4", "ASM1", "ASM-S", "SROT1"]
-    if refit_zpn and not (camera in known or (camera == "C0" and telescope == "D50")):
-        # Stepwise regression will determine which terms to include
+    # For unknown cameras: stepwise regression selects terms.
+    if refit_zpn and not _has_model(cam):
         logging.info(f"ZPN projection will use stepwise regression to determine distortion terms")
-
-#    # ... (similar blocks for other camera types)
 

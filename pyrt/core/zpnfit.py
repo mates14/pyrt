@@ -248,6 +248,8 @@ class zpnfit(termfit.termfit):
             hdr['ASTQUAL'] = (self.astqual[img_idx], 'Astrometric solution verdict OK/PARTIAL/BAD')
             hdr['ASTCOVER'] = (self.astcover[img_idx], 'Chip fraction covered by fitted stars')
             hdr['ASTQREAS'] = (self.astreason[img_idx], 'Reasons for ASTQUAL other than OK')
+        if hasattr(self, 'camconf'):
+            hdr['CAMCONF'] = (self.camconf, 'cameras.ini section used for the camera model')
 
         # Create primary HDU with no data and write
         primary_hdu = fits.PrimaryHDU(header=hdr)
@@ -352,6 +354,9 @@ class zpnfit(termfit.termfit):
                 set_value('ASTQUAL', self.astqual[img_idx])    # OK / PARTIAL / BAD
                 set_value('ASTCOVER', self.astcover[img_idx])  # chip fraction covered by fitted stars
                 set_value('ASTQREAS', self.astreason[img_idx]) # failed checks, empty when OK
+
+            if hasattr(self, 'camconf'):
+                set_value('CAMCONF', self.camconf)  # cameras.ini section used for the camera model
 
             # Write fixed and fitted terms
             for term, value in zip(self.fixterms + self.fitterms,
