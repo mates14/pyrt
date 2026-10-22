@@ -8,7 +8,7 @@ import re
 import numpy as np
 import concurrent.futures
 from copy import deepcopy
-from scipy import stats as scipy_stats
+from scipy.special import fdtrc   # F-distribution survival function, = scipy.stats.f.sf
 
 from pyrt.core import termfit
 
@@ -521,7 +521,7 @@ def ftest_pvalue(wssr_restricted, wssr_full, ndf_full, delta_k=1):
     if delta_wssr <= 0 or ndf_full <= 0:
         return 1.0
     F = (delta_wssr / delta_k) / (wssr_full / ndf_full)
-    return float(scipy_stats.f.sf(F, delta_k, ndf_full))
+    return float(fdtrc(delta_k, ndf_full, F))
 
 def ftest_accept(wssr_restricted, wssr_full, ndf_full, delta_k=1, alpha=0.05):
     """Partial F-test: True if the full model is significantly better at alpha"""

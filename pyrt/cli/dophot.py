@@ -36,7 +36,6 @@ from pyrt.core.data_handling import PhotometryData, make_pairs_to_fit, compute_z
 from pyrt.core.match_stars import process_image_with_dynamic_limits
 from pyrt.core.stepwise_regression import perform_stepwise_regression, parse_terms, expand_pseudo_term
 
-from pyrt.utils.plotting import create_residual_plots, create_correction_volume_plots, plot_astrometric_arrows
 from pyrt.utils.filter_matching import determine_filter
 
 if sys.version_info[0]*1000+sys.version_info[1]<3008:
@@ -1079,6 +1078,8 @@ def main():
         logging.info(f"Saving the stars file took {time.time()-start:.3f}s")
 
     if options.plot:
+        # matplotlib takes ~0.3 s to import: only when plotting
+        from pyrt.utils.plotting import create_residual_plots, plot_astrometric_arrows
         start = time.time()
         base_filename = os.path.splitext(det.meta['detf'])[0]
         create_residual_plots(data, base_filename, ffit, zpntest)

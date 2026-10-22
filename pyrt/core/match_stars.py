@@ -18,7 +18,7 @@ import warnings
 from astropy.wcs import FITSFixedWarning
 warnings.simplefilter('ignore', category=FITSFixedWarning)
 
-from sklearn.neighbors import KDTree
+from scipy.spatial import cKDTree
 
 from pyrt.core import zpnfit
 from pyrt.core import fotfit
@@ -32,9 +32,23 @@ from pyrt.utils.dophot_config import parse_arguments
 #from config import load_config
 from pyrt.core.data_handling import PhotometryData, make_pairs_to_fit, compute_initial_zeropoints
 
+def _query_radius(points, queries, r):
+    """For each query point the indices of points within r, closest first,
+    and their distances: object arrays of int and float arrays, as
+    sklearn's KDTree.query_radius gave them (sorted here by distance)."""
+    lists = cKDTree(points).query_ball_point(queries, r)
+    ind = np.empty(len(queries), dtype=object)
+    dist = np.empty(len(queries), dtype=object)
+    for i, found in enumerate(lists):
+        found = np.asarray(found, dtype=np.intp)
+        d = np.hypot(*(points[found] - queries[i]).T) if len(found) else np.empty(0)
+        order = np.argsort(d)
+        ind[i], dist[i] = found[order], d[order]
+    return ind, dist
+
 def match_stars(det, cat, imgwcs, idlimit=2.0):
     """
-    Match detected stars with catalog stars using KDTree.
+    Match detected stars with catalog stars using a KD-tree.
 
     Args:
         det: Detection table with X_IMAGE, Y_IMAGE
@@ -99,22 +113,7 @@ def match_stars(det, cat, imgwcs, idlimit=2.0):
     det_coords = np.array([det['X_IMAGE'], det['Y_IMAGE']]).T
     cat_coords = np.array([cat_x, cat_y]).T
 
-    # Build and query KDTree
-    tree = KDTree(cat_coords)
-    nearest_ind, nearest_dist = tree.query_radius(
-        det_coords,
-        r=idlimit,
-        return_distance=True,
-        count_only=False
-    )
-
-    # Sort each star's match list by distance so inds[0] is always the closest.
-    # query_radius returns results in KDTree traversal order, not by distance.
-    for i in range(len(nearest_ind)):
-        if len(nearest_ind[i]) > 1:
-            order = np.argsort(nearest_dist[i])
-            nearest_ind[i] = nearest_ind[i][order]
-
+    nearest_ind, _ = _query_radius(cat_coords, det_coords, idlimit)
     return nearest_ind
 
 def find_target(det, imgwcs, idlimit=2.0):
@@ -154,14 +153,7 @@ def find_target(det, imgwcs, idlimit=2.0):
         target_coords = np.array([[target_x[0], target_y[0]]])
         det_coords = np.array([det['X_IMAGE'], det['Y_IMAGE']]).T
 
-        # Build and query KDTree
-        tree = KDTree(det_coords)
-        object_ind, object_dist = tree.query_radius(
-            target_coords,
-            r=idlimit,
-            return_distance=True,
-            count_only=False
-        )
+        object_ind, object_dist = _query_radius(det_coords, target_coords, idlimit)
 
         # Find closest match if any
         if len(object_ind[0]) > 0:

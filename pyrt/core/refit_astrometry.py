@@ -8,9 +8,6 @@ import astropy.wcs
 from pyrt.core import zpnfit
 from pyrt.core.stepwise_regression import ftest_accept, ftest_pvalue
 import logging
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 from copy import deepcopy
 
 def plot_astrometric_residuals(zpntest, data, filename="astrometric_residuals.png", arrow_scale=2.5):
@@ -23,6 +20,10 @@ def plot_astrometric_residuals(zpntest, data, filename="astrometric_residuals.pn
         filename: Output plot filename
         arrow_scale: Arrow scaling factor for visibility
     """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
     try:
         # Get data arrays using current mask
         ad = data.get_fitdata('image_x', 'image_y', 'ra', 'dec', 'image_dxy')
