@@ -20,6 +20,7 @@ from astropy.time import Time
 import astropy.units as u
 from pyrt.utils.file_utils import try_sex, try_ecsv, try_img, write_ecsv
 from pyrt.cli.field_solve import check_wcs_needs_solving, solve_wcs_return_header
+from pyrt.utils.chip_id import get_camera_id
 
 from typing import Optional, Tuple
 
@@ -414,8 +415,8 @@ def process_detections(det: astropy.table.Table,
         if "." in i: continue
         det.meta[i] = j
 
-    # FIXME: this has been improved somewhere else
-    det.meta['CHIP_ID'] = load_chip_id(c)
+    det.meta['CHIP_ID'] = load_chip_id(c)    # raw serial, kept for existing users
+    det.meta['CAMERA_ID'] = get_camera_id(c)  # short registry ID (pyrt.utils.chip_id)
 
     fix_latlon(det.meta, verbose=verbose)
     check_target_coords(det.meta)
