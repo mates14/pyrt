@@ -41,69 +41,54 @@ def calculate_fit_weights(pixels, crpix, naxis1, naxis2):
     return weights
 
 def fit_sip_in_pixel_space(zpn_wcs, tan_wcs, pixels, order=4):
-    """Fit SIP coefficients in pixel space, treating x and y independently.
-    
+    """Fit the SIP polynomial that takes the TAN solution onto the ZPN one.
+
+    zpnfit keeps its SIP in the sky -> pixel direction (FITS AP_/BP_): the
+    pixel offset from CRPIX is ideal + sip(ideal), ideal being CD^-1 of the
+    TAN intermediate coordinates; zpnfit.sip_header() inverts it to A_/B_.
+
     Args:
         zpn_wcs: Original ZPN WCS
         tan_wcs: TAN WCS (already fitted)
-        pixels: Nx2 array of pixel coordinates
+        pixels: Nx2 array of 1-based (FITS) pixel coordinates
         order: Maximum SIP order to fit
-    
-    Returns:
-        a_coeffs, b_coeffs: SIP coefficient matrices
-    """
-    # Get coordinates in both systems
-    sky = zpn_wcs.all_pix2world(pixels, 0)
-    tan_pixels = tan_wcs.all_world2pix(sky, 0, quiet=True)
 
-    # Drop any points where the inverse transform diverged
+    Returns:
+        a_coeffs, b_coeffs, span: AP_/BP_ coefficient matrices and the largest
+        ideal offset the fit covered
+    """
+    sky = zpn_wcs.all_pix2world(pixels, 1)
+    tan_pixels = tan_wcs.wcs_world2pix(sky, 1)
+
     valid = np.all(np.isfinite(tan_pixels), axis=1)
     if not np.any(valid):
-        raise RuntimeError("all_world2pix diverged for all mesh points during SIP fitting")
-    sky = sky[valid]
+        raise RuntimeError("TAN world2pix failed for all mesh points during SIP fitting")
     pixels = pixels[valid]
     tan_pixels = tan_pixels[valid]
-    
-    # Work in CRPIX-relative coordinates
+
+    # ideal offsets from CRPIX, and what the SIP has to add to them
     crpix = tan_wcs.wcs.crpix
-    x = pixels[:,0] - crpix[0]
-    y = pixels[:,1] - crpix[1]
-    
-    # Target: differences between TAN and ZPN in pixel space
-    dx = tan_pixels[:,0] - pixels[:,0]
-    dy = tan_pixels[:,1] - pixels[:,1]
-    
-    # Build polynomial terms matrix
-    n_terms = sum(1 for i in range(order + 1) 
-                   for j in range(order + 1 - i) if i + j > 0)
-    A = np.zeros((len(pixels), n_terms))
-    
-    # Fill the matrix with polynomial terms
-    idx = 0
-    for p in range(order + 1):
-        for q in range(order + 1 - p):
-            if p + q > 0:  # Skip constant term
-                A[:, idx] = (x**p) * (y**q)
-                idx += 1
-    
-    # Fit x and y distortions separately
-    a_coeffs = np.zeros((order + 1, order + 1))
-    b_coeffs = np.zeros((order + 1, order + 1))
-    
-    # Use numpy's least squares solver
+    u = tan_pixels[:,0] - crpix[0]
+    v = tan_pixels[:,1] - crpix[1]
+    dx = pixels[:,0] - tan_pixels[:,0]
+    dy = pixels[:,1] - tan_pixels[:,1]
+
+    # scaled powers keep the design matrix well conditioned
+    span = float(max(np.max(np.abs(u)), np.max(np.abs(v))))
+    terms = [(p, q) for p in range(order + 1)
+             for q in range(order + 1 - p) if p + q > 0]
+    A = np.column_stack([(u/span)**p * (v/span)**q for p, q in terms])
+
     x_solution = np.linalg.lstsq(A, dx, rcond=None)[0]
     y_solution = np.linalg.lstsq(A, dy, rcond=None)[0]
-    
-    # Unpack solutions into coefficient matrices
-    idx = 0
-    for p in range(order + 1):
-        for q in range(order + 1 - p):
-            if p + q > 0:
-                a_coeffs[p,q] = x_solution[idx]
-                b_coeffs[p,q] = y_solution[idx]
-                idx += 1
-                
-    return a_coeffs, b_coeffs
+
+    a_coeffs = np.zeros((order + 1, order + 1))
+    b_coeffs = np.zeros((order + 1, order + 1))
+    for (p, q), a, b in zip(terms, x_solution, y_solution):
+        a_coeffs[p,q] = a / span**(p + q)
+        b_coeffs[p,q] = b / span**(p + q)
+
+    return a_coeffs, b_coeffs, span
 
 def zpn_to_tan_mesh(header, ngrid=100, sip_order=4):
     """Convert ZPN to TAN using mesh fitting approach"""
@@ -116,14 +101,14 @@ def zpn_to_tan_mesh(header, ngrid=100, sip_order=4):
     naxis2 = header['NAXIS2']
     crpix = [header['CRPIX1'], header['CRPIX2']]
     
-    # Create grid points
-    pixels = create_grid_points(naxis1, naxis2, ngrid)
+    # Create grid points, 1-based like CRPIX
+    pixels = create_grid_points(naxis1, naxis2, ngrid) + 1
     
     # Calculate weights
     weights = calculate_fit_weights(pixels, crpix, naxis1, naxis2)
     
     # Project points through ZPN
-    sky = w_zpn.all_pix2world(pixels, 0)
+    sky = w_zpn.all_pix2world(pixels, 1)
     
     # Initialize TAN fitter
     fitter = zpnfit.zpnfit(proj="TAN")
@@ -169,17 +154,18 @@ def zpn_to_tan_mesh(header, ngrid=100, sip_order=4):
     fitter.add_sip_terms(sip_order)
    
     #print(f"\nFitting SIP terms (order {sip_order}):")
-    a_coeffs, b_coeffs = fit_sip_in_pixel_space(w_zpn, w_tan, pixels, sip_order)
-    
-    # Update fitter with new SIP coefficients
+    a_coeffs, b_coeffs, span = fit_sip_in_pixel_space(w_zpn, w_tan, pixels, sip_order)
+
+    # Update fitter with new SIP coefficients (AP_/BP_ direction)
     fitter.sip_a = a_coeffs
     fitter.sip_b = b_coeffs
     fitter.sip_order = sip_order
+    fitter.sip_span = span
  
     w_new = WCS(fitter.wcs())
     
     # For validation, compute RMS in pixels (quiet=True returns NaN for diverging points)
-    pixels_back = w_new.all_world2pix(sky, 0, quiet=True)
+    pixels_back = w_new.all_world2pix(sky, 1, quiet=True)
     valid = np.all(np.isfinite(pixels_back), axis=1)
     diff = pixels[valid] - pixels_back[valid]
     rms = np.sqrt(np.mean(weights[valid] * (diff[:,0]**2 + diff[:,1]**2)))
@@ -227,7 +213,7 @@ def main():
     # Try different SIP orders
 #    for order in [3]:
 #        print(f"\n=== Testing SIP order {order} ===")
-    fitter, rms = zpn_to_tan_mesh(header, ngrid=200, sip_order=3)
+    fitter, rms = zpn_to_tan_mesh(header, ngrid=200, sip_order=5)
     print(f"\nRMS residual: {rms:.3f} pixels")
     #print(f"Final RMS: {rms:.3f} pixels")
 

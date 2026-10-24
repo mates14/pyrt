@@ -129,7 +129,7 @@ def parse_args():
     parser.add_argument('-i', '--altin', help='Alternate input header')
 
     # our argument to tweak with the sip order
-    parser.add_argument('-n', '--sip-order', help='SIP order for non-PP projections fitting', default=3, type=int)
+    parser.add_argument('-n', '--sip-order', help='SIP order for non-PP projections fitting', default=5, type=int)
     
     return parser.parse_args()
 

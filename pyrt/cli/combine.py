@@ -1297,7 +1297,7 @@ def _convert_skeleton_if_needed(skel_path):
     try:
         header = read_template_header(skel_path)
         if check_projection_handling(header) == 'convert':
-            fitter, rms = zpn_to_tan_mesh(header, ngrid=200, sip_order=3)
+            fitter, rms = zpn_to_tan_mesh(header, ngrid=200, sip_order=5)
             write_template_hdr(fitter, header['NAXIS1'], header['NAXIS2'], skel_path)
             print(f"Skeleton: converted {header.get('CTYPE1','?')[5:]} → TAN+SIP (RMS {rms:.3f} px)")
     except Exception as e:

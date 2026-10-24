@@ -291,8 +291,8 @@ class zpnfit(termfit.termfit):
         ]
 
         # Add SIP coefficient terms
-        for i in range(5):  # Typical max order is 4
-            for j in range(5-i):
+        for i in range(10):  # SIP order up to 9
+            for j in range(10-i):
                 wcs_terms.extend([f'A_{i}_{j}', f'B_{i}_{j}', f'AP_{i}_{j}', f'BP_{i}_{j}'])
 
         # Function to write WCS keywords to either a FITS file or dictionary
