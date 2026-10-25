@@ -795,6 +795,7 @@ def refit_astrometry_multi(alldet, data, options):
         Fitted model with per-image CRVAL/CD terms and global CRPIX/PV2_* terms.
     """
     det0 = alldet[0]
+    options = _gentle_if_combined(options, det0.meta)
     cam = CameraParams.from_header(det0.meta)
     n_images = len(alldet)
     from_camera = _from_camera(options, cam)
@@ -906,6 +907,7 @@ def refit_astrometry(det, data, options):
         Boolean array indicating which stars were used in the final fit
     """
 
+    options = _gentle_if_combined(options, det.meta)
     cam = CameraParams.from_header(det.meta)
     logging.info(f"camera parameters: {cam}")
     from_camera = _from_camera(options, cam)
@@ -1101,6 +1103,23 @@ def _camera_projection(cam):
     if proj == 'ZPN':
         zpntest.fixterm(["PV2_1"], [1])
     return zpntest
+
+def _gentle_if_combined(options, meta):
+    """A combined image (NCOMBINE > 1) was resampled onto the grid of its own
+    header, which the camera model of cameras.ini does not describe: -z and
+    --zpn-from-camera give way to the gentle refit of the header WCS."""
+    try:
+        ncombine = int(meta.get('NCOMBINE', 1))
+    except (TypeError, ValueError):
+        ncombine = 1
+    if ncombine <= 1 or not (options.refit_zpn or getattr(options, 'zpn_from_camera', False)):
+        return options
+    msg = f"Combined image (NCOMBINE={ncombine}): camera model not applied, gentle refit of the header WCS"
+    logging.info(msg); print(msg)
+    options = deepcopy(options)
+    options.refit_zpn = False
+    options.zpn_from_camera = False
+    return options
 
 def _from_camera(options, cam):
     """--zpn-from-camera: use the camera model of cameras.ini instead of the header WCS
