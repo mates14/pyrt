@@ -19,6 +19,7 @@ def read_options(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
     parser.add_argument("-a", "--aperture", help="Override an automated aperture choice", type=float)
     parser.add_argument("-f", "--fwhm", help="Override automatic FWHM estimation for convolution matrix (useful for pathological images)", type=float)
+    parser.add_argument("--back-size", help="SExtractor background mesh in pixels (default 256; smaller follows structured background such as lit clouds)", type=int, default=256)
     parser.add_argument("-g", "--gain", help="Override detector gain (epadu, e-/ADU) instead of trusting the FITS GAIN keyword", type=float)
     parser.add_argument("-I", "--noiraf", help="Do not use IRAF", action='store_true')
     parser.add_argument("-b", "--background", help="Save the background check image", action='store_true')
@@ -76,7 +77,7 @@ def do_matrix(file, fwhm):
 #    os.system(f"cat {file}")
 
 
-def call_sextractor(file, fwhm, bg=False):
+def call_sextractor(file, fwhm, bg=False, back_size=256):
     """send sextractor to a file
     for a completely unknown file, this may better be a two pass process:
     first to find the FWHM, second to have proper sky and convolution settings for that FWHM"""
@@ -87,7 +88,7 @@ def call_sextractor(file, fwhm, bg=False):
     some_file.write( "DETECT_THRESH 1\n")
     some_file.write( "ANALYSIS_THRESH 1\n")
 #    some_file.write(f"BACK_SIZE  {int(fwhm*1.5)+1}\n")
-    some_file.write(f"BACK_SIZE 256\n") 
+    some_file.write(f"BACK_SIZE {back_size}\n")
 #   some_file.write(f"BACK_FILTERSIZE  3\n")
     some_file.write(f"BACK_FILTERSIZE  5\n")
     some_file.write(f"PARAMETERS_NAME  {base}.param\n")
@@ -281,19 +282,20 @@ def process_photometry(file: str,
                       target_photometry: bool = True,
                       fwhm_override: Optional[float] = None,
                       gain_override: Optional[float] = None,
+                      back_size: int = 256,
                       verbose: bool = False) -> astropy.table.Table:
     """Main photometry processing function that can be called programmatically"""
 
     # Use override FWHM if provided, otherwise estimate it
     if fwhm_override is not None:
         print(f"Using command-line FWHM override: {fwhm_override:.2f}")
-        det = call_sextractor(file, fwhm_override, bg=background or background_subtract)
+        det = call_sextractor(file, fwhm_override, bg=background or background_subtract, back_size=back_size)
         new_fwhm = fwhm_override
     else:
-        det = call_sextractor(file, 2.0)
+        det = call_sextractor(file, 2.0, back_size=back_size)
         new_fwhm = get_fwhm_from_detections(det)
         if not np.isnan(new_fwhm):
-            det = call_sextractor(file, new_fwhm, bg=background or background_subtract)
+            det = call_sextractor(file, new_fwhm, bg=background or background_subtract, back_size=back_size)
 
     print("W/H:",det.meta['IMAGEW'],det.meta['IMAGEH'])
 
@@ -412,6 +414,7 @@ def main():
                                target_photometry=options.target_photometry,
                                fwhm_override=options.fwhm,
                                gain_override=options.gain,
+                               back_size=options.back_size,
                                verbose=True)
 
         write_ecsv(tbl, base+".cat")
