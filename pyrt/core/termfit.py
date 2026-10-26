@@ -219,7 +219,12 @@ class termfit:
                                  f"clamped to {new}")
         self.fitvalues = list(clamped)
         lin, non = self._split_linear(bounds)
-        if SOLVER == 'linear' and lin and not non:
+        if not self.fitterms:
+            # Nothing free (e.g. -S0 tries a SIP of order 0 on a fixed model):
+            # only the statistics of the model as it is.  scipy < 1.13
+            # least_squares fails on an empty x0 (zero-size array, max)
+            values, jac = [], None
+        elif SOLVER == 'linear' and lin and not non:
             values, jac = self._fit_linear(data, lin)
         elif SOLVER == 'linear' and lin and self.varpro:
             values, jac = self._fit_varpro(data, lin, non, lower, upper)
@@ -247,6 +252,10 @@ class termfit:
 
         # Improved covariance matrix calculation with diagnostics
         self.fitcov = None   # full covariance where available (zero_val propagates it)
+        if jac is None:
+            self.fitcov = np.zeros((0, 0))
+            self.fiterrors = np.array([])
+            return
         try:
             # Columns scaled to unit norm before inverting, the covariance
             # unscaled after: terms can differ by many orders of magnitude in
