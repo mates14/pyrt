@@ -77,7 +77,7 @@ def do_matrix(file, fwhm):
 #    os.system(f"cat {file}")
 
 
-def call_sextractor(file, fwhm, bg=False, back_size=256):
+def call_sextractor(file, fwhm, bg=False, back_size=256, aperture=None):
     """send sextractor to a file
     for a completely unknown file, this may better be a two pass process:
     first to find the FWHM, second to have proper sky and convolution settings for that FWHM"""
@@ -96,6 +96,13 @@ def call_sextractor(file, fwhm, bg=False, back_size=256):
     some_file.write(f"CATALOG_NAME     {base}.cat\n")
     some_file.write(f"SATUR_LEVEL      {get_saturation(file):.0f}\n")
     # place this under some cmd-line option...
+    if aperture:
+        # fixed-aperture photometry instead of IRAF phot: the sky from a local
+        # annulus (as IRAF's, 2-3.5 apertures out) rather than the background
+        # map, which a lit cloud does not follow within a 32 px mesh
+        some_file.write(f"PHOT_APERTURES   {2*aperture:.2f}\n")
+        some_file.write( "BACKPHOTO_TYPE   LOCAL\n")
+        some_file.write(f"BACKPHOTO_THICK  {3*aperture:.1f}\n")
     if bg:
         some_file.write(f"checkimage_name  {base}-bg.fits\n")
         some_file.write( "checkimage_type  background\n")
@@ -116,6 +123,9 @@ def call_sextractor(file, fwhm, bg=False, back_size=256):
     some_file.write("FWHM_IMAGE\n")
     some_file.write("ELLIPTICITY\n")
     some_file.write("FLAGS\n")
+    if aperture:
+        some_file.write("MAG_APER\n")
+        some_file.write("MAGERR_APER\n")
     some_file.close()
 
     do_matrix(base+".conv", fwhm)
@@ -289,13 +299,15 @@ def process_photometry(file: str,
     # Use override FWHM if provided, otherwise estimate it
     if fwhm_override is not None:
         print(f"Using command-line FWHM override: {fwhm_override:.2f}")
-        det = call_sextractor(file, fwhm_override, bg=background or background_subtract, back_size=back_size)
+        det = call_sextractor(file, fwhm_override, bg=background or background_subtract, back_size=back_size,
+                              aperture=aperture if noiraf else None)
         new_fwhm = fwhm_override
     else:
         det = call_sextractor(file, 2.0, back_size=back_size)
         new_fwhm = get_fwhm_from_detections(det)
         if not np.isnan(new_fwhm):
-            det = call_sextractor(file, new_fwhm, bg=background or background_subtract, back_size=back_size)
+            det = call_sextractor(file, new_fwhm, bg=background or background_subtract, back_size=back_size,
+                                  aperture=aperture if noiraf else None)
 
     print("W/H:",det.meta['IMAGEW'],det.meta['IMAGEH'])
 
@@ -356,7 +368,15 @@ def process_photometry(file: str,
         # Compute aperture for metadata (same formula used in IRAF path)
         ape = aperture or np.sqrt(fwhm*fwhm+1.5*1.5)
         det.meta['APERTURE'] = ape
-        tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
+        if 'MAG_APER' in det.colnames:
+            # the fixed aperture stands for IRAF's magnitudes, as in the IRAF branch;
+            # like there, neighbours (FLAGS 1, 2) are measured, saturated or cut ones not
+            det.rename_columns(['MAG_AUTO', 'MAGERR_AUTO'], ['MAG_SEX', 'MAGERR_SEX'])
+            det.rename_columns(['MAG_APER', 'MAGERR_APER'], ['MAG_AUTO', 'MAGERR_AUTO'])
+            tbl = det[np.all([(det['FLAGS'] & ~3) == 0, det['MAG_AUTO'] < 99,
+                              det['MAGERR_AUTO'] < 1.091/2], axis=0)]
+        else:
+            tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
     else:
         mag, ape = call_iraf(file, det, fwhm, aperture=aperture, gain_override=gain_override)
         det.meta['APERTURE'] = ape
