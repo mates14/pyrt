@@ -263,6 +263,40 @@ WCS_KEY_RE = re.compile(r'^(WCSAXES|CTYPE\d|CUNIT\d|CRPIX\d|CRVAL\d|CDELT\d|CROT
                         r'AP_\d+_\d+|BP_\d+_\d+|A_DMAX|B_DMAX)$')
 
 
+def anchor_camera_model(fits_file, corr_file, verbose=True):
+    """Replace the astrometry.net TAN in fits_file by the camera model of
+    cameras.ini (CRPIX, PV2_n fixed) with CRVAL/CD fitted to the stars
+    astrometry.net matched (corr_file).  Returns True when the header was
+    rewritten; without a camera model or with too few pairs the TAN stays."""
+    from pyrt.utils.camera_config import CameraParams
+    from pyrt.core.refit_astrometry import camera_wcs_from_pairs
+    try:
+        corr = astropy.table.Table.read(corr_file)
+    except Exception as e:
+        print(f"Camera model not anchored: cannot read {corr_file}: {e}")
+        return False
+    with pyfits.open(fits_file, mode='update') as hdul:
+        header = hdul[0].header
+        cam = CameraParams.from_header(header)
+        res = camera_wcs_from_pairs(cam, header, corr['field_x'], corr['field_y'],
+                                    corr['index_ra'], corr['index_dec'])
+        if res is None:
+            print(f"Camera model not anchored ({cam.label}: no ZPN model with CRPIX "
+                  f"or fewer than 6 of {len(corr)} pairs), astrometry.net TAN kept")
+            return False
+        keys, rms, n = res
+        for key in [k for k in header if WCS_KEY_RE.match(k) and k not in ('RADESYS', 'EQUINOX')]:
+            del header[key]
+        for key, value in keys.items():
+            header[key] = value
+        header['CAMCONF'] = (cam.label, 'camera model anchored by pyrt-field-solve')
+        hdul.flush()
+    if verbose:
+        print(f"Camera model {cam.label} anchored to {n}/{len(corr)} astrometry.net stars: "
+              f"rms {rms:.2f} px, CRPIX=({keys['CRPIX1']:.1f}, {keys['CRPIX2']:.1f})")
+    return True
+
+
 def read_hints(header, scale=None, verbose=False):
     """Get (ra, dec, scale) hints from a FITS header or ecsv meta dictionary"""
     ra_hint = None
@@ -651,7 +685,7 @@ class AstrometryScript:
         self.time = time
         self.odir = odir
 
-    def run(self, fits_file, scale=None, ra=None, dec=None, replace=False, naxis1=None, naxis2=None, zoom=None, cat_file=None, return_wcs=False):
+    def run(self, fits_file, scale=None, ra=None, dec=None, replace=False, naxis1=None, naxis2=None, zoom=None, cat_file=None, return_wcs=False, camera_model=False):
         """Run the field recognition pipeline
 
         Args:
@@ -731,6 +765,13 @@ class AstrometryScript:
             solve_field.append('-y')
             solve_field.append('--uniformize')
             solve_field.append('10')
+            # Without --no-verify, solve-field first verifies the WCS already in the
+            # header and, if it passes, returns it unchanged as "the solution" - the
+            # rough telescope WCS (SBT: ~7 px off, reference pixel at the chip edge)
+            # survived field-solve that way.  --crpix-center puts the reference
+            # pixel at the chip centre instead of wherever the matched quad was.
+            solve_field.append('--no-verify')
+            solve_field.append('--crpix-center')
 
             # Pass the FITS image if we have one
             if infpath is not None:
@@ -796,6 +837,8 @@ class AstrometryScript:
                             print(f"Error: Could not update {fits_file}: {e}")
                             print("Solve succeeded but the original file was not updated.")
                             return None
+                        if camera_model:
+                            anchor_camera_model(fits_file, os.path.join(odir, 'input.corr'))
 
             # Temporary directory cleanup happens automatically via context manager
 
@@ -839,6 +882,10 @@ Examples:
                         help='Pixel scale hint in arcsec/pixel (helps solve-field)')
     parser.add_argument('--time', type=int, default=15, metavar='SEC',
                         help='Time limit for solve-field in seconds (default: 15)')
+    parser.add_argument('-K', '--zpn-from-camera', action='store_true',
+                        help='Write the camera model of cameras.ini (CRPIX, PV2_n) with CRVAL/CD '
+                             'fitted to the stars astrometry.net matched, instead of its TAN '
+                             '(start for pyrt-dophot -K); cameras without a model keep the TAN')
 
     args = parser.parse_args()
 
@@ -876,7 +923,8 @@ Examples:
     if ra_hint is not None and dec_hint is not None:
         print("Pass 1: trying with RA/DEC hints...")
         ret = a.run(args.fits_file, scale=scale, ra=ra_hint, dec=dec_hint,
-                    zoom=2, replace=True, cat_file=args.cat_file)
+                    zoom=2, replace=True, cat_file=args.cat_file,
+                    camera_model=args.zpn_from_camera)
         if ret is not None:
             print(f"Field solved with hints: RA={ret[0]:.6f} Dec={ret[1]:.6f}")
 
@@ -885,7 +933,8 @@ Examples:
         if ra_hint is not None:
             print("Pass 2: hints failed or unavailable, trying without RA/DEC hints...")
         for zoom in ast_scales:
-            ret = a.run(args.fits_file, scale=scale, zoom=zoom, replace=True, cat_file=args.cat_file)
+            ret = a.run(args.fits_file, scale=scale, zoom=zoom, replace=True, cat_file=args.cat_file,
+                        camera_model=args.zpn_from_camera)
             if ret is not None:
                 print(f"Field solved at zoom level {zoom}: RA={ret[0]:.6f} Dec={ret[1]:.6f}")
                 break

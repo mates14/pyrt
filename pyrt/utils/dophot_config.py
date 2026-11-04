@@ -160,9 +160,11 @@ def parse_arguments(args=None):
     parser.add_argument("-z", "--refit-zpn", action='store_true', help="Refit the ZPN radial terms")
     parser.add_argument("--save-wcs", nargs='?', const=True, default=False, metavar='FILE',
                         help="Write WCS solution to .wcs file (astrometry.net format). Without FILE argument, uses input filename with .wcs extension")
-    parser.add_argument("--zpn-from-camera", action='store_true',
-                        help="Use the hardcoded camera ZPN model instead of the header WCS: with -z as the start "
-                             "(even if the header holds a ZPN solution), without -z held fixed (only CD and CRVAL fitted)")
+    parser.add_argument("-K", "--zpn-from-camera", action='store_true',
+                        help="Use the camera ZPN model of cameras.ini instead of the header WCS: with -z as the start "
+                             "(even if the header holds a ZPN solution), without -z held fixed (only CD and CRVAL fitted). "
+                             "Matching uses the header WCS, so start from pyrt-field-solve -K, which anchors the model to "
+                             "the astrometry.net stars")
     parser.add_argument("--keep-bad-wcs", action='store_true',
                         help="Write the astrometric solution even when judged ASTQUAL=BAD (for debugging)")
     parser.add_argument("-Z", "--single-zeropoint", action='store_true', help="Use single common zeropoint instead of per-image zeropoints (enables all-sky fitting)")

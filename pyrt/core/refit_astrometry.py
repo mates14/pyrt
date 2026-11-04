@@ -1183,6 +1183,77 @@ def _crpix_for_crop(crpix1, crpix2, meta):
     return (crpix1 - ltv1) / ltm11, (crpix2 - ltv2) / ltm22
 
 
+def camera_wcs_from_pairs(cam, meta, x, y, ra, dec, clip=3.0, min_pairs=6):
+    """Camera model anchored to matched stars (e.g. astrometry.net's .corr).
+
+    CRPIX and PV2_n come from cameras.ini and stay fixed; only CRVAL and CD
+    are fitted to the pairs (x, y: 1-based pixels; ra, dec: deg).  Fitting
+    the model to the stars, not to a TAN solution, matters: on a wide
+    distorted chip TAN differs from the real mapping by several px, and a
+    camera model fitted to the TAN inherits that.
+
+    Returns (header keyword dict, rms px, pairs used), or None when the camera
+    has no ZPN model with CRPIX or there are too few pairs."""
+    if cam.get('proj', 'ZPN', type=str) != 'ZPN' or 'CRPIX1' not in cam or 'CRPIX2' not in cam:
+        return None
+    pv = {int(k[4:]): cam.get(k) for k in cam.values if re.fullmatch(r'PV2_\d+', k)}
+    pv.pop(1, None)
+    crpix = _crpix_for_crop(cam.get('CRPIX1'), cam.get('CRPIX2'), meta)
+    x, y, ra, dec = (np.asarray(v, dtype=float) for v in (x, y, ra, dec))
+    use = np.ones(len(x), dtype=bool)
+
+    def model(crval, cd):
+        w = astropy.wcs.WCS(naxis=2)
+        w.wcs.ctype = ['RA---ZPN', 'DEC--ZPN']
+        w.wcs.crval = [float(crval[0]), float(crval[1])]
+        w.wcs.crpix = [float(crpix[0]), float(crpix[1])]
+        w.wcs.cd = cd
+        w.wcs.set_pv([(2, 1, 1.0)] + [(2, k, v) for k, v in sorted(pv.items())])
+        return w
+
+    for _ in range(2):                       # fit, clip outlying pairs, refit
+        if use.sum() < min_pairs:
+            return None
+        crval = (float(np.mean(ra[use])), float(np.mean(dec[use])))
+        for _ in range(8):
+            # intermediate world coordinates (deg) of the stars about crval:
+            # a unit-CD model with CRPIX 0 maps them to "pixels" equal to them
+            iw = model(crval, np.eye(2))
+            iw.wcs.crpix = [0.0, 0.0]
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                xi, eta = iw.all_world2pix(ra[use], dec[use], 1)
+            A = np.c_[x[use] - crpix[0], y[use] - crpix[1], np.ones(use.sum())]
+            c1 = np.linalg.lstsq(A, xi, rcond=None)[0]
+            c2 = np.linalg.lstsq(A, eta, rcond=None)[0]
+            cd = np.array([[c1[0], c1[1]], [c2[0], c2[1]]])
+            # the constant terms are the offset of crpix from crval: move crval there
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                crval = tuple(float(v) for v in iw.all_pix2world(c1[2], c2[2], 1))
+            if np.hypot(c1[2], c2[2]) < 1e-9:
+                break
+        w = model(crval, cd)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            px, py = w.all_world2pix(ra, dec, 1)
+        d = np.hypot(px - x, py - y)
+        rms = float(np.sqrt(np.mean(d[use]**2)))
+        new_use = d < max(clip * rms, 1.0)
+        if np.array_equal(new_use, use):
+            break
+        use = new_use
+
+    keys = {'CTYPE1': 'RA---ZPN', 'CTYPE2': 'DEC--ZPN',
+            'CRVAL1': crval[0], 'CRVAL2': crval[1],
+            'CRPIX1': float(crpix[0]), 'CRPIX2': float(crpix[1]),
+            'CD1_1': float(cd[0, 0]), 'CD1_2': float(cd[0, 1]),
+            'CD2_1': float(cd[1, 0]), 'CD2_2': float(cd[1, 1]),
+            'PV2_1': 1.0}
+    keys.update({f'PV2_{k}': float(v) for k, v in sorted(pv.items())})
+    return keys, rms, int(use.sum())
+
+
 def setup_camera_params(zpntest, cam, refit_zpn, meta=None):
     """Camera model (PV2_n, CRPIX) of cameras.ini: fitted with -z or always_fit, fixed otherwise.
 
