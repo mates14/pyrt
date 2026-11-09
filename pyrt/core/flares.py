@@ -20,7 +20,19 @@ mean frames (110 s) and SBT 12 s frames alike:
   Z_ex     = a/sqrt((k*sigma_a)^2 + colour margin^2), k the field normalisation of a/sigma_a,
            sigma_a includes the frame floor (catalogue/model error, does not average down).
 
-  S = (Z_ex+ + Z_fade+)/sqrt(2)   (Stouffer, only the flare-like signs count; one frame: S = Z_ex)
+  decay    the physical model: in flux relative to the catalogue quiescent level
+              F = 10^(0.4 e) = k_f + B_f exp(-(t - t_first)/tau)
+           (one k, B >= 0 per filter, a common tau on a grid 1 min .. 6 h), i.e. an
+           exponential decay to a steady state, which is the catalogue (k = 1 within
+           the calibration uncertainty incl. the colour margin).  For a time span << tau
+           it is the linear trend again (first image), for long sequences it follows the
+           curve instead of a straight line.  Two likelihood ratios:
+             S       = sqrt(chi2(F = k = 1+-sys) - chi2(decay, same k prior)):
+                       brighter than the catalogue *and* decaying, one test
+                       (one frame: the excess significance)
+             Z_DECAY = sqrt(chi2(F = k free) - chi2(decay, k free)): the decay shape alone,
+                       independent of the catalogue
+           and the flare part now and in 30 min, 2.5 log(1 + B/k exp(-t/tau)), for planning.
 
   Both normalisations use the field stars within the same magnitude range (the
   noise of faint stars has heavier tails).  Only stars expected well above the
@@ -32,9 +44,9 @@ Priors P (added to S): in the trigger error box +1, red (colour beyond the calib
 range) +0.5, and if red also a dwarf by reduced proper motion H = m + 5 log(pm["/yr]) + 5
 > 13 +1 (M giants of the same colour have H ~ 10; bluer dwarfs are not EP flarers).
 
-Classes: FLARE  Z_ex>=1.5 and Z_fade>=2 and S+P >= flare_sig
+Classes: FLARE  Z_ex>=1.5 and Z_decay>=2 and S+P >= flare_sig
          FLARE? Z_ex>=1.5 and not brightening (Z_fade > -2) and S+P >= 3,
-                and the star red, or S >= 5 and Z_fade >= 2 on its own (the error box alone holds
+                and the star red, or S >= 5 and Z_decay >= 2 on its own (the error box alone holds
                 tens of stars, and many EP triggers are GRBs with no flare star at all)
 (a constant excess without fading is not a flare: transients.py lists it as BRIGHT).
 Both: stars admitted only by depth_prior need Z_ex >= 3 and S >= 3; the last point must not
@@ -43,6 +55,7 @@ be more than 2 sigma below the catalogue (a flare decays to quiescence, not belo
 
 import numpy as np
 import astropy.table
+from scipy.optimize import nnls
 from sklearn.neighbors import KDTree
 
 from pyrt.utils.grbinfo import errorbox_distance
@@ -53,6 +66,55 @@ MIN_FIELD = 10       # stars needed for the field normalisation
 NEIGHBOURS = 40      # stars of similar magnitude for the local normalisation
 PRIOR_INBOX, PRIOR_DWARF, PRIOR_RED = 1.0, 1.0, 0.5
 NOPRIOR_S = 5.0      # S needed for a candidate that is neither red nor a dwarf
+TAUS = np.logspace(np.log10(1/60.0), np.log10(6.0), 36)  # decay times [h], 1 min .. 6 h
+MIN_SYS = 0.01       # [mag] smallest calibration uncertainty of the quiescent level
+PREDICT = 0.5        # [h] flare part predicted this long after the last frame
+LN = 0.4*np.log(10)
+
+
+def _decay_fit(t, e, s, grp, sig_c):
+    """Exponential decay to a steady state, in flux relative to the catalogue:
+    F = 10^(0.4 e) = k_g + B_g exp(-t/tau), k_g, B_g >= 0 per group (filter), common tau.
+    sig_c: uncertainty [mag] of the catalogue quiescent level (prior k = 1 +- LN*sig_c).
+    Returns dict: S (decay vs constant at the catalogue), Z_DECAY (decay vs constant at a
+    free level), TAU [h], and for the group of the last point K, B (flux units)."""
+    F = 10**(0.4*e)
+    sF = LN*F*s
+    groups = list(dict.fromkeys(grp))  # in order of appearance
+    G = np.array([[g == x for x in groups] for g in grp], dtype=np.float64)
+    ng = len(groups)
+    sk = LN*max(sig_c, MIN_SYS)
+
+    def solve(cols, prior):
+        A = cols/sF[:, None]
+        y = F/sF
+        if prior:
+            P = np.zeros((ng, cols.shape[1]))
+            P[:, :ng] = np.eye(ng)/sk
+            A = np.vstack([A, P])
+            y = np.concatenate([y, np.ones(ng)/sk])
+        x, rnorm = nnls(A, y)
+        return x, rnorm**2
+
+    out = {}
+    for prior in (True, False):
+        _, chi0 = solve(G, prior)
+        best = (chi0, np.nan, None)
+        for tau in TAUS:
+            x, chi = solve(np.hstack([G, G*np.exp(-t/tau)[:, None]]), prior)
+            if chi < best[0] - 1e-9:
+                best = (chi, tau, x)
+        out[prior] = (chi0,) + best
+    chi0, chi1, tau, x = out[True]
+    # a star scattering more than its errors (bright undersampled stars, blends) fits no
+    # decay well: the likelihood ratios are deflated by its own residual chi2/dof
+    dof = len(t) - 2*ng - 1
+    scale = max(out[False][1]/dof, 1.0) if dof > 0 else 1.0
+    gl = groups.index(grp[-1])
+    k, b = (x[gl], x[ng + gl]) if x is not None else (1.0, 0.0)
+    return {'S': np.sqrt(max(chi0 - chi1, 0.0)/scale),
+            'Z_DECAY': np.sqrt(max(out[False][0] - out[False][1], 0.0)/scale),
+            'TAU': tau, 'K': k, 'B': b, 'RCHI': scale}
 
 
 def _local_scale(z, mag, normal):
@@ -71,6 +133,19 @@ def _local_scale(z, mag, normal):
         w = _mad_sigma(z[near])
         k[j] = max(w, 1.0) if np.isfinite(w) else 1.0
     return c, k
+
+
+def _local_width(x, mag, normal):
+    """Robust width of x [its units] among the NEIGHBOURS 'normal' stars closest in magnitude."""
+    w = np.full(len(x), np.nan)
+    ref = np.where(normal & np.isfinite(x))[0]
+    if len(ref) < MIN_FIELD:
+        return w
+    nn = min(NEIGHBOURS, len(ref))
+    for j in range(len(x)):
+        near = ref[np.argsort(np.abs(mag[ref] - mag[j]))[:nn+1]]
+        w[j] = _mad_sigma(x[near[near != j][:nn]])
+    return w
 
 
 def _mad_sigma(x):
@@ -115,18 +190,26 @@ def _star_ids(ra, dec, radius_arcsec=1.0):
     return ids
 
 
-def _linfit(t, y, s):
-    """Weighted y = a + b t. Returns a, b, sa, sb, chi2_quad/ndf (residual of a quadratic)."""
+def _linfit(t, y, s, grp=None):
+    """Weighted y = a_g + b t, one intercept per group (filter), a common slope.
+    Returns a, b, sa, sb, chi2_quad/ndf (residual of a quadratic): a, sa of the group whose
+    intercept is the most significant (a flare is strongest in the bluest filter)."""
     w = 1.0/s**2
-    A = np.vstack([np.ones_like(t), t]).T
-    cov = np.linalg.inv(A.T @ (A*w[:, None]))
-    a, b = cov @ A.T @ (w*y)
-    sa, sb = np.sqrt(cov[0, 0]), np.sqrt(cov[1, 1])
+    groups = list(dict.fromkeys(grp)) if grp is not None else [None]
+    G = np.array([[g == x for x in groups] for g in grp], dtype=np.float64) if grp is not None \
+        else np.ones((len(t), 1))
+    ng = G.shape[1]
+    A = np.hstack([G, t[:, None]])
+    cov = np.linalg.pinv(A.T @ (A*w[:, None]))
+    p = cov @ A.T @ (w*y)
+    sp = np.sqrt(np.maximum(np.diag(cov), 0))
+    best = int(np.argmax(p[:ng]/np.where(sp[:ng] > 0, sp[:ng], np.inf)))
+    a, sa, b, sb = p[best], sp[best], p[ng], sp[ng]
     rchi = 1.0
-    if len(t) >= 5:
-        Q = np.vstack([np.ones_like(t), t, t**2]).T
-        p = np.linalg.lstsq(Q*np.sqrt(w)[:, None], y*np.sqrt(w), rcond=None)[0]
-        rchi = np.sum(w*(y - Q @ p)**2)/(len(t) - 3)
+    if len(t) >= ng + 4:
+        Q = np.hstack([G, t[:, None], t[:, None]**2])
+        q = np.linalg.lstsq(Q*np.sqrt(w)[:, None], y*np.sqrt(w), rcond=None)[0]
+        rchi = np.sum(w*(y - Q @ q)**2)/(len(t) - ng - 2)
     return a, b, sa, sb, rchi
 
 
@@ -204,6 +287,7 @@ def flare_search(rec, trigger=None, red_margin=0.05, flare_sig=5.0, window=None,
 
     # --- per star ---
     rows = []
+    series = []  # (t, e, s, filter groups, floor) for the decay fit after the field normalisation
     for sid in np.unique(rec['STAR']):
         o = rec[rec['STAR'] == sid]
         o = o[np.argsort(o['T'])]
@@ -214,8 +298,10 @@ def flare_search(rec, trigger=None, red_margin=0.05, flare_sig=5.0, window=None,
         s = np.array(o['SIG'], dtype=np.float64)
         n = len(o)
         sfloor = np.median([floors[f] for f in o['FRAME']])
-        if n >= 3 and np.ptp(t) > 0:
-            a, b, sa, sb, rchi = _linfit(t, e, s)
+        grp = [str(f) for f in o['FILT']] if 'FILT' in o.colnames else ['']*n
+        ngrp = len(set(grp))
+        if n >= ngrp + 2 and np.ptp(t) > 0:
+            a, b, sa, sb, rchi = _linfit(t, e, s, grp)
             scale = np.sqrt(max(rchi, 1.0))
             sa *= scale; sb *= scale
         else:
@@ -232,6 +318,7 @@ def flare_search(rec, trigger=None, red_margin=0.05, flare_sig=5.0, window=None,
         dist, rbox = errorbox_distance(trigger, float(np.median(o['CATRA'])), float(np.median(o['CATDEC'])))
         # admitted only thanks to depth_prior (red, within `depth` of the limit): noisier
         nearlim = bool('LIM' in o.colnames and np.median(o['EXPECT']) >= np.median(o['LIM']) - depth)
+        series.append((t, e, s, grp, sfloor))
         rows.append((sid, n, float(np.median(o['CATRA'])), float(np.median(o['CATDEC'])),
                      float(np.median(o['MAG'])), catmag, a, np.sqrt(sa**2 + sfloor**2), scol,
                      b, sb, float(np.max(e)), float(e[-1]), float(np.hypot(s[-1], scol)), nearlim, colx, colr,
@@ -262,6 +349,24 @@ def flare_search(rec, trigger=None, red_margin=0.05, flare_sig=5.0, window=None,
     res['EXCESS_ERR'] = np.sqrt((k_ex*res['EXCESS_ERR'])**2 + res['COLOR_ERR']**2)
     res['Z_EX'] = res['EXCESS']/res['EXCESS_ERR']
     res['Z_FADE'] = zf/k_f
+    # --- the decay model, on the same corrected data and field-normalised errors; the quiescent
+    # level is known as well as the catalogue predicts the neighbours (spread of their excess) ---
+    w_e = _local_width(np.array(res['EXCESS'], dtype=np.float64), mag, normal)
+    dec = []
+    for j, (t, e, s, grp, sfloor) in enumerate(series):
+        ec = e - c_e[j] - c_t[j]*t           # magnitude-dependent systematics as above
+        sc = s*k_f[j]                       # point errors as wide as the field says
+        sig_c = np.hypot(w_e[j] if np.isfinite(w_e[j]) else k_ex[j]*sfloor, res['COLOR_ERR'][j])
+        d = _decay_fit(t, ec, sc, grp, sig_c)
+        T = t[-1]
+        if np.isfinite(d['TAU']) and d['K'] > 0:
+            now = 2.5*np.log10(1 + d['B']/d['K']*np.exp(-T/d['TAU']))
+            later = 2.5*np.log10(1 + d['B']/d['K']*np.exp(-(T + PREDICT)/d['TAU']))
+        else:
+            now = later = 0.0
+        dec.append((d['S'], d['Z_DECAY'], d['TAU']*60 if np.isfinite(d['TAU']) else np.nan, now, later))
+    dec = np.array(dec, dtype=np.float64).reshape(-1, 5)
+    res['S_DECAY'], res['Z_DECAY'], res['TAU'], res['FLARE_NOW'], res['FLARE_NEXT'] = dec.T
     res.meta['K_EX'] = float(np.median(k_ex))
     res.meta['K_FADE'] = float(np.median(k_f))
     res.meta['FLOOR'] = float(np.median(list(floors.values()))) if floors else 0.0
@@ -269,10 +374,7 @@ def flare_search(rec, trigger=None, red_margin=0.05, flare_sig=5.0, window=None,
         print("flares: %d stars, %d frames, field normalisation excess x%.2f, trend x%.2f, median floor %.3f mag"
               % (len(res), len(floors), res.meta['K_EX'], res.meta['K_FADE'], res.meta['FLOOR']))
 
-    zp_ex = np.maximum(np.nan_to_num(res['Z_EX']), 0)
-    zp_f = np.maximum(np.nan_to_num(res['Z_FADE']), 0)
-    has_trend = np.isfinite(res['Z_FADE'])
-    res['S'] = np.where(has_trend, (zp_ex + zp_f)/np.sqrt(2), zp_ex)
+    res['S'] = res['S_DECAY']
     res['RED'] = res['COLR'] > RED_X  # odd blue/inconsistent catalogue colours only widen the margin
     res['DWARF'] = res['HRPM'] > DWARF_H
     inbox = res['DIST_BOX'] <= 1.0
@@ -280,10 +382,11 @@ def flare_search(rec, trigger=None, red_margin=0.05, flare_sig=5.0, window=None,
     # a dwarf by proper motion is only a flare-star prior when red (G/K dwarfs are not EP flarers)
     res['PRIOR'] = PRIOR_INBOX*res['INBOX'] + PRIOR_DWARF*(res['DWARF'] & res['RED']) + PRIOR_RED*res['RED']
     sp = res['S'] + res['PRIOR']
-    zf0 = np.nan_to_num(res['Z_FADE'])
+    zf0 = np.nan_to_num(res['Z_FADE'])   # linear: only "not brightening"
+    zd = np.nan_to_num(res['Z_DECAY'])   # the decay itself
     cls = np.full(len(res), '', dtype='U6')
     # without the red prior it has to fade: a constant excess is a catalogue/model problem (BRIGHT)
-    stellar = res['RED'] | ((res['S'] >= NOPRIOR_S) & (zf0 >= 2))
+    stellar = res['RED'] | ((res['S'] >= NOPRIOR_S) & (zd >= 2))
     # near the limit (admitted by depth_prior only): the excess itself has to be clear
     solid = ~res['NEARLIM'] | ((res['Z_EX'] >= 3) & (res['S'] >= 3))
     # a flare decays back to quiescence, not below it (that is a variable / eclipsing star):
@@ -296,7 +399,7 @@ def flare_search(rec, trigger=None, red_margin=0.05, flare_sig=5.0, window=None,
     sane = ~(res['EXCESS_LAST'] < -2*res['LAST_ERR']) & ~(end < -2*end_err)
     base = (res['Z_EX'] >= 1.5) & solid & sane
     cls[base & (zf0 > -2) & (sp >= 3) & stellar] = 'FLARE?'
-    cls[base & (zf0 >= 2) & (sp >= flare_sig) & stellar] = 'FLARE'
+    cls[base & (zd >= 2) & (sp >= flare_sig) & stellar] = 'FLARE'
     res['CLASS'] = cls
     # most interesting first: class, inside the error box, then significance with the priors
     key = [-(cls == 'FLARE').astype(int), -(cls != '').astype(int), -res['INBOX'].astype(int), -sp]
@@ -311,8 +414,10 @@ def format_row(r, color_names=('C0', 'C1', 'C2')):
     box = ("%.1f' = %.2f box" % (r['DIST'], r['DIST_BOX'])) if np.isfinite(r['DIST_BOX']) else "no trigger"
     cols = " ".join("%s=%.2f" % (n, r[c]) for n, c in zip(color_names, ('C0', 'C1', 'C2')) if np.isfinite(r[c]))
     flags = ",".join(f for f, v in (('red', r['RED']), ('dwarf', r['DWARF']), ('inbox', r['INBOX'])) if v)
-    return ("%-6s %.5f %+.5f mag %.2f excess %+.3f±%.3f (%.1fσ, max %+.3f, now %+.3f) fading %s S=%.1f+%.1f | "
+    decay = ("decay %.1fσ tau %.0f min, flare %+.2f now, %+.2f in %.0f min" % (r['Z_DECAY'], r['TAU'], r['FLARE_NOW'],
+             r['FLARE_NEXT'], PREDICT*60) if np.isfinite(r['TAU']) else "no decay")
+    return ("%-6s %.5f %+.5f mag %.2f excess %+.3f±%.3f (%.1fσ, max %+.3f, now %+.3f) fading %s %s S=%.1f+%.1f | "
             "%s colx %.2f pm %.0f mas/y H=%.1f | %s [%s] n=%d/%.1f min"
             % (r['CLASS'] or '-', r['ALPHA_J2000'], r['DELTA_J2000'], r['MAG_CALIB'], r['EXCESS'], r['EXCESS_ERR'],
-               r['Z_EX'], r['EXCESS_MAX'], r['EXCESS_LAST'], trend, r['S'], r['PRIOR'], cols, r['COLX'], r['PM'], r['HRPM'],
-               box, flags, r['NUM'], r['SPAN']))
+               r['Z_EX'], r['EXCESS_MAX'], r['EXCESS_LAST'], trend, decay, r['S'], r['PRIOR'], cols, r['COLX'], r['PM'],
+               r['HRPM'], box, flags, r['NUM'], r['SPAN']))

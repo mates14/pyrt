@@ -216,6 +216,7 @@ def readOptions(args=sys.argv[1:]):
   parser.add_argument("--red-margin", type=float, default=0.05, help="Extra excess uncertainty [mag] per mag of catalog colour outside the field's 5-95%% colour range (default 0.05)")
   parser.add_argument("--flare-sig", type=float, default=5.0, help="Combined (excess+fading) significance for FLARE (default 5)")
   parser.add_argument("--flare-depth", type=float, default=1.5, help="Flare search uses stars expected this many mag above the frame limit (default 1.5)")
+  parser.add_argument("--flare-rec", help="Save the per-frame star records of the flare search to this ECSV (for re-analysis)")
   parser.add_argument("--flare-window", type=float, help="Use only this many minutes from the first frame of each star for the flare search (default all)")
   parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
   opts = parser.parse_args(args)
@@ -447,7 +448,11 @@ def flare_report(flare_rec, flare_frames, meta, options):
         print("Flare search: no catalogued stars measured")
         return None
     rec = astropy.table.Table(rows=flare_rec, names=['FRAME', 'JD', 'CATRA', 'CATDEC', 'MAG', 'ERR', 'EXPECT', 'CATMAG',
-                                                    'C0', 'C1', 'C2', 'C3', 'PM', 'X', 'Y', 'LIM'])
+                                                    'C0', 'C1', 'C2', 'C3', 'PM', 'X', 'Y', 'LIM', 'FILT'])
+    if options.flare_rec:
+        rec.meta['TRIGGER_TARGET'] = meta.get('TARGET')
+        rec.meta['TRIGGER_SITE'] = grbinfo.site_key(meta)
+        rec.write(options.flare_rec, format='ascii.ecsv', overwrite=True)
     trigger = grbinfo.get_trigger(meta.get('TARGET'), meta=meta)
     if trigger is not None and trigger['t0'] is None:
         trigger = None
@@ -840,7 +845,7 @@ def main():
                         flare_rec.append((len(flare_frames), det.meta['JD'] + det.meta['EXPTIME']/2.0/86400.0,
                             cat['radeg'][ci], cat['decdeg'][ci], magdet, errscale*errdet, expect[own][0], catmag[ci],
                             catcolors[0][ci], catcolors[1][ci], catcolors[2][ci], catcolors[3][ci],
-                            cat_pm[ci], d['X_IMAGE'], d['Y_IMAGE'], imglim))
+                            cat_pm[ci], d['X_IMAGE'], d['Y_IMAGE'], imglim, str(det.meta.get('FILTER', ''))))
 
             error_for_comparison = np.sqrt((errscale*errdet)**2 + 0.01*0.01)
             best = compare_to_catalog(magdet, error_for_comparison, expect, expect_dist,
