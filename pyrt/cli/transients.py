@@ -29,6 +29,8 @@ from pyrt.core import fotfit
 from pyrt.catalog.catalog import Catalog, extended_source_mask
 from pyrt.core.match_stars import apply_catalog_astrometric_corrections, compute_effective_idlimit
 from pyrt.utils.dophot_config import load_config
+from pyrt.utils import grbinfo
+from pyrt.core.flares import flare_search, format_row
 
 # TRAJECTORY-BASED MOVING OBJECT TRACKING
 class MovingObjectTrail:
@@ -145,31 +147,19 @@ class MovingObjectTrail:
 
         return astropy.table.Table(table_data)
 
-def try_grbt0(target):
-    """tries to run a command that gets T0 of a GRB from the stars DB"""
+def try_grbt0(target, telescope=None, meta=None):
+    """JD of the trigger of TARGET (0 if unknown), see pyrt.utils.grbinfo"""
     try:
-            some_file = "tmp%d.grb0"%(os.getppid())
-        #    try:
-            os.system("grbt0 %d > %s"%(target, some_file))
-            f = open(some_file, "r")
-            t0=np.float64(f.read())
-            f.close()
-            return t0
-    except:
+        return grbinfo.trigger_t0(target, telescope, meta)
+    except Exception:
         return 0
 
-def try_tarname(target):
-    """tries to run a command that gets TARGET name from the stars DB"""
+def try_tarname(target, telescope=None, meta=None):
+    """name of the trigger of TARGET ("-" if unknown), see pyrt.utils.grbinfo"""
     try:
-            some_file = "tmp%d.tmp"%(os.getppid())
-        #    try:
-            os.system("tarname %d > %s"%(target, some_file))
-            f = open(some_file, "r")
-            name=f.read()
-            f.close()
-            return name.strip()
-    except:
-            return "-"
+        return grbinfo.trigger_name(target, telescope, meta)
+    except Exception:
+        return "-"
 
 def isnumber(a):
     try:
@@ -184,6 +174,7 @@ def readOptions(args=sys.argv[1:]):
   parser.add_argument("-E", "--early", help="Limit transients to t-t0 < 0.5 d", action='store_true')
   parser.add_argument("-f", "--frame", help="Image frame width to be ignored in pixels (default=32)", type=float, default=32)
   parser.add_argument("-g", "--regs", action='store_true', help="Save per image regs")
+  parser.add_argument("-p", "--plot", action='store_true', help="Save per image <file>-circles.png: catalog stars and candidates circled on the image")
   parser.add_argument("-w", "--web-output", help="Save web-friendly JSON output to specified file", type=str)
   parser.add_argument("-s", "--siglim", help="Sigma limit for detections to be taken into account (default=5).", type=float, default=5)
   parser.add_argument("-S", "--devsig", help="Sigma limit for a catalogued star to be considered brighter/fainter than the catalog (default=5).", type=float, default=5)
@@ -221,6 +212,11 @@ def readOptions(args=sys.argv[1:]):
   #parser.add_argument("-y", "--fit-xy", help="Fit xy tilt for each image separately (i.e. terms PX/PY)", action='store_true')
   #parser.add_argument("-z", "--refit-zpn", action='store_true', help="Refit the ZPN radial terms.")
 # files
+  parser.add_argument("--no-flares", action='store_true', help="Skip the flare-star search")
+  parser.add_argument("--red-margin", type=float, default=0.05, help="Extra excess uncertainty [mag] per mag of catalog colour outside the field's 5-95%% colour range (default 0.05)")
+  parser.add_argument("--flare-sig", type=float, default=5.0, help="Combined (excess+fading) significance for FLARE (default 5)")
+  parser.add_argument("--flare-depth", type=float, default=1.5, help="Flare search uses stars expected this many mag above the frame limit (default 1.5)")
+  parser.add_argument("--flare-window", type=float, help="Use only this many minutes from the first frame of each star for the flare search (default all)")
   parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
   opts = parser.parse_args(args)
   return opts
@@ -445,6 +441,50 @@ def compare_to_catalog(magdet, errdet, expect, dist, single, extended, blend_r, 
             best = (sigma, exp, k, n, r, gal)
     return best
 
+def flare_report(flare_rec, flare_frames, meta, options):
+    """Flare-star search over all frames (pyrt.core.flares), writes flares.ecsv and flares.reg."""
+    if len(flare_rec) == 0 or meta is None:
+        print("Flare search: no catalogued stars measured")
+        return None
+    rec = astropy.table.Table(rows=flare_rec, names=['FRAME', 'JD', 'CATRA', 'CATDEC', 'MAG', 'ERR', 'EXPECT', 'CATMAG',
+                                                    'C0', 'C1', 'C2', 'C3', 'PM', 'X', 'Y', 'LIM'])
+    trigger = grbinfo.get_trigger(meta.get('TARGET'), meta=meta)
+    if trigger is not None and trigger['t0'] is None:
+        trigger = None
+    window = options.flare_window/60.0 if options.flare_window else None
+    res = flare_search(rec, trigger=trigger, red_margin=options.red_margin, flare_sig=options.flare_sig,
+                       window=window, depth=options.flare_depth, verbose=True)
+    if res is None:
+        return None
+    t_first = min(f[1] for f in flare_frames)
+    print("*** FLARES START ***")
+    if trigger is not None:
+        print("Trigger %s: T0 %s, %.5f %+.5f, error box %.2f', first frame at T0+%.1f min"
+              % (trigger['name'], trigger['t0'], trigger['ra'], trigger['dec'], trigger['errorbox']*60,
+                 (t_first - trigger['jd0'])*1440))
+    else:
+        print("No trigger information for target %s at %s (error-box prior not used)" % (meta.get('TARGET'), grbinfo.site_key(meta)))
+    print("%d frames, %d stars; excess/trend normalised by the field x%.2f/x%.2f, frame floor %.3f mag, red margin %.3f mag/mag"
+          % (len(flare_frames), len(res), res.meta['K_EX'], res.meta['K_FADE'], res.meta['FLOOR'], options.red_margin))
+    shown = res[res['CLASS'] != '']
+    for r in shown:
+        print(format_row(r, meta['COLOR_NAMES']))
+    if len(shown) == 0:
+        print("no flare candidates")
+    print("*** FLARES END ***")
+    res.meta = {k: v for k, v in res.meta.items()}
+    res.write("flares.ecsv", format='ascii.ecsv', overwrite=True)
+    regrad = 3*meta['FWHM']*meta['PIXEL']
+    with open("flares.reg", "w") as f:
+        f.write("# Region file format: DS9 version 4.1\nglobal color=green font=\"helvetica 10 normal roman\"\nfk5\n")
+        if trigger is not None:
+            f.write('circle(%.6f,%.6f,%.2f") # color=cyan dash=1 text={%s}\n' % (trigger['ra'], trigger['dec'],
+                    trigger['errorbox']*3600, trigger['name']))
+        for r in res[res['CLASS'] != '']:
+            f.write('circle(%.7f,%.7f,%.3f") # color=%s text={%s S=%.1f ex=%+.2f}\n' % (r['ALPHA_J2000'], r['DELTA_J2000'],
+                    regrad, 'magenta' if r['CLASS'] == 'FLARE' else 'pink', r['CLASS'], r['S'], r['EXCESS']))
+    return res
+
 # ******** main() **********
 
 def main():
@@ -512,6 +552,9 @@ def main():
     old = []
     mags = []
     imgno = 0
+    flare_rec = []    # every well-measured, isolated catalogued star of every frame (flare search)
+    flare_frames = []  # [file, JD mid, filter]
+    flare_meta = None
 
     # Initialize trajectory tracking for moving objects
     object_trails = []
@@ -535,6 +578,7 @@ def main():
         candplx=[]  # catalog parallax [mas]
         candflt=[]  # filter of the frame
         candrad=[]  # identification radius [px], also used for the USNO check
+        plot_marks=[]  # [x, y, kind, index to cand* lists or None] for --plot
 
         det = open_ecsv_file(arg, verbose=options.verbose)
         if det is None:
@@ -564,7 +608,7 @@ def main():
         else: enlarge=1
 
         if options.early:
-            t0 = try_grbt0(det.meta['TARGET'])
+            t0 = try_grbt0(det.meta['TARGET'], meta=det.meta)
             if det.meta['JD']+det.meta['EXPTIME']/2.0/86400.0-t0 > 0.5:
                 continue
 
@@ -603,6 +647,10 @@ def main():
         catcolors = [catmags[k%len(schema)] - catmags[(k+1)%len(schema)] for k in range(4)]
         catmag = catmags[schema.index(phfilter)] if phfilter in schema else np.array(cat[phfilter], dtype=np.float64)
         ffit = response_model(det.meta, schema)
+        if 'pmra' in cat.colnames and 'pmdec' in cat.colnames:  # [deg/yr] -> [mas/yr]
+            cat_pm = np.hypot(np.array(cat['pmra'], dtype=np.float64), np.array(cat['pmdec'], dtype=np.float64))*3.6e6
+        else:
+            cat_pm = np.full(len(cat), np.nan)
         extended = extended_source_mask(cat)
 
         # with zero colors the model must give back MAG_CALIB, otherwise the file was
@@ -778,6 +826,22 @@ def main():
             expect_dist = pair_dist[pair_start:pair_start+len(bi)]
             pair_start += len(bi)
 
+            # flare search: one identified catalogued star, no neighbour light worth >0.03 mag
+            if not options.no_flares and len(i) == 1 and errdet < 1.091/options.siglim \
+                    and not (d['X_IMAGE'] < options.frame or d['Y_IMAGE'] < options.frame
+                             or d['X_IMAGE'] > d.meta['IMGAXIS1']-options.frame or d['Y_IMAGE'] > d.meta['IMGAXIS2']-options.frame):
+                ci = int(i[0])
+                own = expect_cat == ci
+                if np.any(own) and not extended[ci] and np.isfinite(catmag[ci]) and np.isfinite(expect[own][0]):
+                    others = expect[~own]
+                    others = others[np.isfinite(others)]
+                    contam = 2.5*np.log10(1 + np.sum(10**(-0.4*(others - expect[own][0])))) if len(others) else 0.0
+                    if contam < 0.03:
+                        flare_rec.append((len(flare_frames), det.meta['JD'] + det.meta['EXPTIME']/2.0/86400.0,
+                            cat['radeg'][ci], cat['decdeg'][ci], magdet, errscale*errdet, expect[own][0], catmag[ci],
+                            catcolors[0][ci], catcolors[1][ci], catcolors[2][ci], catcolors[3][ci],
+                            cat_pm[ci], d['X_IMAGE'], d['Y_IMAGE'], imglim))
+
             error_for_comparison = np.sqrt((errscale*errdet)**2 + 0.01*0.01)
             best = compare_to_catalog(magdet, error_for_comparison, expect, expect_dist,
                 np.isin(expect_cat, i), extended[expect_cat], blend_r,
@@ -844,12 +908,16 @@ def main():
                 candplx.append(np.nan)
                 candflt.append(str(det.meta.get('FILTER', '')))
                 candrad.append(obj_radius[j])
+                fwhm_ratio = d["FWHM_IMAGE"] / det.meta['FWHM']
+                plot_marks.append([d["X_IMAGE"], d["Y_IMAGE"],
+                    'new' if 1/1.5 < fwhm_ratio < 1.5 else 'new_fwhm', len(candx)-1])
                 continue
 
             # 3. objekt je jasnejsi nez v katalogu (= kandidat)
             if match is not None and match > options.devsig and errdet<1.091/options.siglim and mdiff>0.05:
     #            print("+",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet,mdiff)
                 in_frame = not (d['X_IMAGE'] < options.frame or d['Y_IMAGE']<options.frame or d['X_IMAGE'] > d.meta['IMGAXIS1']-options.frame or d['Y_IMAGE']>d.meta['IMGAXIS2']-options.frame)
+                plot_marks.append([d["X_IMAGE"], d["Y_IMAGE"], 'brighter' if in_frame else 'brighter_edge', None])
                 if options.regs:  # dashed = brighter, but in the frame margin, not taken further
                     some_file.write("circle(%.7f,%.7f,%.3f\") # color=yellow%s\n"%(d["X_IMAGE"], d["Y_IMAGE"],regrad, "" if in_frame else " dash=1"))
 
@@ -890,6 +958,7 @@ def main():
             # 4. objekt je slabsi nez v katalogu (= zajimavost)
             if match is not None and match < -options.devsig and errdet<1.091/options.siglim and mdiff>0.05:
     #            print("-",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet,mdiff)
+                plot_marks.append([d["X_IMAGE"], d["Y_IMAGE"], 'fainter', None])
                 if options.regs:
                     some_file.write("circle(%.7f,%.7f,%.3f\") # color=blue\n"%(d["X_IMAGE"], d["Y_IMAGE"],regrad))
 
@@ -938,6 +1007,11 @@ def main():
         #        print("o",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet)
 
         print('Comparison to %s produced %d candidates (%d of them brightened catalogued stars)'%(catname, len(candx), np.sum(np.isfinite(candcat))))
+        if not options.no_flares:
+            flare_frames.append([arg, det.meta['JD'] + det.meta['EXPTIME']/2.0/86400.0, str(det.meta.get('FILTER', ''))])
+            if flare_meta is None:
+                flare_meta = dict(det.meta)
+                flare_meta['COLOR_NAMES'] = ["%s-%s"%(schema[k%len(schema)], schema[(k+1)%len(schema)]) for k in range(3)]
 
         if options.usno and len(candy)>0:
             usno = get_usno(det.meta['CTRRA'], det.meta['CTRDEC'],
@@ -979,6 +1053,9 @@ def main():
                 hits = tree_u.query_radius(Y, r=urad, count_only=True)
                 kill = alive & (hits > 0) & ~catalogued
                 killed_candidates.update(np.where(kill)[0])
+                for m in plot_marks:
+                    if m[3] is not None and kill[m[3]]:
+                        m[2] = 'killed'
                 alive &= ~kill
                 print(f'USNO {uphase} left {np.sum(alive)} candidates, killed {np.sum(kill)}')
 
@@ -1008,6 +1085,32 @@ def main():
 
         if options.regs:
             some_file.close()
+
+        if options.plot:
+            from pyrt.utils.plotting import plot_catalog_circles
+            start = time.time()
+            image_shape = (det.meta['IMGAXIS2'], det.meta['IMGAXIS1'])
+            fitsfile = os.path.join(os.path.dirname(arg), os.path.basename(det.meta.get('FITSFILE', '')))
+            if not os.path.isfile(fitsfile):
+                fitsfile = os.path.splitext(arg)[0] + ".fits"
+            try:
+                image_data = astropy.io.fits.getdata(fitsfile)
+            except Exception as e:
+                print("Cannot read image %s (%s), white background in the plot"%(fitsfile, e))
+                image_data = None
+            # catalog stars on the image (a little outside too, a circle may reach in)
+            crad = max(2.0*det.meta['FWHM'], 4.0)  # catalog circle radius [px]
+            inimg = np.all(np.isfinite(X), axis=1) & (X[:,0] > -crad) & (X[:,1] > -crad) \
+                & (X[:,0] < image_shape[1]+crad) & (X[:,1] < image_shape[0]+crad)
+            detected = np.zeros(len(X), dtype=bool)
+            matched = [ii for ii in nearest_ind if len(ii) > 0]
+            if len(matched) > 0:
+                detected[np.concatenate(matched).astype(int)] = True
+            out = plot_catalog_circles(image_data, os.path.splitext(arg)[0], image_shape,
+                X[inimg], detected[inimg], [(m[0], m[1], m[2]) for m in plot_marks],
+                radius=crad, catalog_name=catname,
+                title="%s: %s (r<%.1f), limit %.2f"%(os.path.basename(arg), catname, options.maglim, imglim))
+            print("Plot %s took %.3fs"%(out, time.time()-start))
 
         # Write web JSON output for this image
         if options.web_output and web_objects is not None:
@@ -1151,6 +1254,9 @@ def main():
                 print(f"  Image {imgno}: Matched {n_matched} objects, created {n_new} new trails. Total trails: {len(object_trails)}")
 
         imgno+=1
+
+    if not options.no_flares:
+        flare_report(flare_rec, flare_frames, flare_meta, options)
 
     if len(old) < 1:
             print("No transients found (no object trails created)")
@@ -1481,13 +1587,13 @@ def main():
 
     # MATPLOTLIB LIGHTCURVE
     try:
-        t0 = try_grbt0(d.meta['TARGET'])
+        t0 = try_grbt0(d.meta['TARGET'], meta=d.meta)
     except:
         t0 = 0
 
     # Get target name for plot title
     try:
-        title = try_tarname(d.meta['TARGET'])
+        title = try_tarname(d.meta['TARGET'], meta=d.meta)
     except:
         title = "Transients"
 

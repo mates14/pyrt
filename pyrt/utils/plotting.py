@@ -623,3 +623,94 @@ def plot_astrometric_arrows(image_data, data, afit, output_base, scale=1.0, imag
     plt.close()
 
     return output_filename
+
+
+def plot_catalog_circles(image_data, output_base, image_shape, catalog_xy, catalog_detected,
+                         marks, radius, catalog_name='catalog', title=None):
+    """
+    Circles around catalog stars and interesting detections on the image,
+    in the style of plot_astrometric_arrows() (inverted log-scaled image).
+
+    Lets one see by eye which catalog stars were detected and which detections
+    have no catalog counterpart without overplotting an external catalog (e.g. in DS9/CDS).
+
+    Args:
+        image_data: 2D numpy array (the FITS image), or None for white background
+        output_base: Base filename for output (without extension)
+        image_shape: (height, width) of the image
+        catalog_xy: (N, 2) array of catalog star positions [FITS pixels, 1-based]
+        catalog_detected: (N,) bool, catalog star identified with a detection
+        marks: list of (x, y, kind) of interesting detections [FITS pixels, 1-based];
+            kind one of 'new', 'new_fwhm', 'brighter', 'brighter_edge', 'fainter', 'killed'
+        radius: Circle radius for catalog stars [pixels] (marks get 1.6x larger)
+        catalog_name: Catalog name for the legend
+        title: Plot title
+
+    Returns:
+        Output filename
+    """
+    from matplotlib.collections import EllipseCollection
+    from matplotlib.lines import Line2D
+
+    if image_data is not None:
+        scaled_image = _log_scale_image(image_data)
+        img_shape = image_data.shape
+    else:
+        img_shape = image_shape
+        scaled_image = np.zeros(img_shape, dtype=np.uint8)
+
+    fig, ax = plt.subplots(figsize=(12, 12))
+    ax.imshow(255 - scaled_image, origin='lower', cmap='gray')
+
+    def circles(xy, r, color, lw, ls='solid', alpha=1.0):
+        xy = np.asarray(xy, dtype=float).reshape(-1, 2)
+        if len(xy) == 0:
+            return
+        d = np.full(len(xy), 2.0 * r)
+        ax.add_collection(EllipseCollection(d, d, np.zeros(len(xy)), units='xy',
+            offsets=xy - 1.0,  # FITS 1-based -> imshow 0-based pixel centers
+            offset_transform=ax.transData, facecolors='none', edgecolors=color,
+            linewidths=lw, linestyles=ls, alpha=alpha))
+
+    catalog_xy = np.asarray(catalog_xy, dtype=float).reshape(-1, 2)
+    catalog_detected = np.asarray(catalog_detected, dtype=bool)
+    circles(catalog_xy[~catalog_detected], radius, '#1f77b4', 0.6, alpha=0.6)
+    circles(catalog_xy[catalog_detected], radius, '#2ca02c', 0.8)
+
+    # (label, color, linestyle) for interesting detections, colors as in the -tr.reg file
+    # (yellow -> orange, cyan/green would be lost on the white background)
+    styles = {
+        'new':           ('new (not in catalog)',            '#e00000', 'solid'),
+        'new_fwhm':      ('new, odd FWHM',                   '#d000d0', 'solid'),
+        'brighter':      ('brighter than catalog',           '#ff8c00', 'solid'),
+        'brighter_edge': ('brighter, in frame margin',       '#ff8c00', 'dashed'),
+        'fainter':       ('fainter than catalog',            '#0000e0', 'solid'),
+        'killed':        ('new, but in USNO (removed)',      '#808080', 'dashed'),
+    }
+    handles = [
+        Line2D([], [], ls='none', marker='o', mfc='none', mec='#2ca02c', ms=9,
+               label=f'{catalog_name}, detected ({np.sum(catalog_detected)})'),
+        Line2D([], [], ls='none', marker='o', mfc='none', mec='#1f77b4', ms=9, alpha=0.6,
+               label=f'{catalog_name}, not detected ({np.sum(~catalog_detected)})'),
+    ]
+    for kind, (label, color, ls) in styles.items():
+        xy = [(x, y) for x, y, k in marks if k == kind]
+        if len(xy) == 0:
+            continue
+        circles(xy, 1.6 * radius, color, 1.8, ls=ls)
+        handles.append(Line2D([], [], ls='none', marker='o', mfc='none', mec=color, mew=1.8,
+                              ms=12, label=f'{label} ({len(xy)})'))
+
+    ax.legend(handles=handles, loc='upper right', fontsize=9, framealpha=0.85)
+    ax.set_xlim(-0.5, img_shape[1] - 0.5)
+    ax.set_ylim(-0.5, img_shape[0] - 0.5)
+    ax.set_title(title or 'Catalog stars and transient candidates')
+    ax.set_xlabel('X [pixels]')
+    ax.set_ylabel('Y [pixels]')
+    plt.tight_layout()
+
+    output_filename = f"{output_base}-circles.png"
+    plt.savefig(output_filename, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    return output_filename
