@@ -26,6 +26,9 @@ def read_options(args=sys.argv[1:]):
     parser.add_argument("-B", "--background-subtract", help="Save background, subtract it from image, and remove background file", action='store_true')
     parser.add_argument("--target-photometry", action='store_true', default=True,
                         help="Enable direct photometry of RTS2 target coordinates (default: True)")
+    parser.add_argument("-D", "--detect", help="Forced photometry: detect (and get the FWHM) on this deeper image of the same "
+                        "pixel grid (e.g. the sum of a kinetic series), measure the frames at those positions; "
+                        "faint measurements are kept down to S/N 1", type=str)
     parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
     opts = parser.parse_args(args)
     return opts
@@ -77,10 +80,11 @@ def do_matrix(file, fwhm):
 #    os.system(f"cat {file}")
 
 
-def call_sextractor(file, fwhm, bg=False, back_size=256, aperture=None):
+def call_sextractor(file, fwhm, bg=False, back_size=256, aperture=None, detect=None):
     """send sextractor to a file
     for a completely unknown file, this may better be a two pass process:
-    first to find the FWHM, second to have proper sky and convolution settings for that FWHM"""
+    first to find the FWHM, second to have proper sky and convolution settings for that FWHM
+    detect: SExtractor dual-image mode, objects found on this image, measured on file"""
     base = os.path.splitext(file)[0]
     some_file = open(base+".sex", "w+")
     some_file.write( "CATALOG_TYPE     ASCII_HEAD\n")
@@ -133,7 +137,7 @@ def call_sextractor(file, fwhm, bg=False, back_size=256, aperture=None):
     sex_binary = get_sextractor_binary()
     if sex_binary is None:
         raise RuntimeError("No SExtractor binary found. Please install sex, sextractor, or source-extractor")
-    os.system(f"{sex_binary} -c {base}.sex {file}")
+    os.system(f"{sex_binary} -c {base}.sex {detect + ',' if detect else ''}{file}")
     det = astropy.io.ascii.read(base+".cat", format='sextractor')
     os.system(f'rm {base}.cat {base}.conv {base}.sex {base}.param')
 
@@ -293,21 +297,30 @@ def process_photometry(file: str,
                       fwhm_override: Optional[float] = None,
                       gain_override: Optional[float] = None,
                       back_size: int = 256,
+                      detect: Optional[str] = None,
                       verbose: bool = False) -> astropy.table.Table:
-    """Main photometry processing function that can be called programmatically"""
+    """Main photometry processing function that can be called programmatically
+    detect: forced photometry, objects (and the FWHM) from this deeper image of the same pixel grid"""
+    if detect is not None:
+        shape = [astropy.io.fits.getval(f, k) for f in (detect, file) for k in ('NAXIS1', 'NAXIS2')]
+        if shape[:2] != shape[2:]:
+            raise ValueError(f"--detect {detect} is {shape[0]}x{shape[1]}, {file} is {shape[2]}x{shape[3]}")
+    sex_ape = aperture if noiraf else None
 
     # Use override FWHM if provided, otherwise estimate it
     if fwhm_override is not None:
         print(f"Using command-line FWHM override: {fwhm_override:.2f}")
         det = call_sextractor(file, fwhm_override, bg=background or background_subtract, back_size=back_size,
-                              aperture=aperture if noiraf else None)
+                              aperture=sex_ape, detect=detect)
         new_fwhm = fwhm_override
     else:
-        det = call_sextractor(file, 2.0, back_size=back_size)
+        # (dual mode: the shapes, hence the FWHM, are measured on the detection image)
+        det = call_sextractor(file, 2.0, back_size=back_size, detect=detect)
         new_fwhm = get_fwhm_from_detections(det)
-        if not np.isnan(new_fwhm):
-            det = call_sextractor(file, new_fwhm, bg=background or background_subtract, back_size=back_size,
-                                  aperture=aperture if noiraf else None)
+        if not np.isnan(new_fwhm) or detect is not None:
+            det = call_sextractor(file, new_fwhm if not np.isnan(new_fwhm) else 2.0,
+                                  bg=background or background_subtract, back_size=back_size,
+                                  aperture=sex_ape, detect=detect)
 
     print("W/H:",det.meta['IMAGEW'],det.meta['IMAGEH'])
 
@@ -363,6 +376,11 @@ def process_photometry(file: str,
     print(f'FWHM={fwhm}')
 
     det.meta['FWHM'] = fwhm
+    # forced photometry: the objects are real (found on the deep image), keep their
+    # faint measurements (S/N >= 1) so that a light curve does not lose its faint end
+    maxerr = 1.091 if detect is not None else 1.091/2
+    if detect is not None:
+        det.meta['DETIMAGE'] = os.path.basename(detect)
 
     if noiraf:
         # Compute aperture for metadata (same formula used in IRAF path)
@@ -374,9 +392,9 @@ def process_photometry(file: str,
             det.rename_columns(['MAG_AUTO', 'MAGERR_AUTO'], ['MAG_SEX', 'MAGERR_SEX'])
             det.rename_columns(['MAG_APER', 'MAGERR_APER'], ['MAG_AUTO', 'MAGERR_AUTO'])
             tbl = det[np.all([(det['FLAGS'] & ~3) == 0, det['MAG_AUTO'] < 99,
-                              det['MAGERR_AUTO'] < 1.091/2], axis=0)]
+                              det['MAGERR_AUTO'] < maxerr], axis=0)]
         else:
-            tbl = det[np.all([det['FLAGS'] == 0, det['MAGERR_AUTO']<1.091/2],axis=0)]
+            tbl = det[np.all([det['FLAGS'] == 0, det['MAG_AUTO'] < 99, det['MAGERR_AUTO'] < maxerr], axis=0)]
     else:
         mag, ape = call_iraf(file, det, fwhm, aperture=aperture, gain_override=gain_override)
         det.meta['APERTURE'] = ape
@@ -405,7 +423,7 @@ def process_photometry(file: str,
 
         # Print statistics about the cuts
         print("\nQuality cuts statistics:")
-        cuts = [tbl['PIER'] == 0, tbl['FLUX'] > 0, tbl['MAGERR_AUTO'] < 1.091/2]
+        cuts = [tbl['PIER'] == 0, tbl['FLUX'] > 0, tbl['MAGERR_AUTO'] < maxerr]
         for i, cut in enumerate(cuts):
             print(f"Cut {i+1}: {np.sum(cut)} objects pass")
 
@@ -435,6 +453,7 @@ def main():
                                fwhm_override=options.fwhm,
                                gain_override=options.gain,
                                back_size=options.back_size,
+                               detect=options.detect,
                                verbose=True)
 
         write_ecsv(tbl, base+".cat")
