@@ -240,7 +240,12 @@ def flare_search(rec, trigger=None, red_margin=0.05, flare_sig=5.0, window=None,
     for fr in np.unique(rec['FRAME']):
         m = rec['FRAME'] == fr
         e = np.array(rec['E'][m]); err = np.array(rec['ERR'][m], dtype=np.float64)
-        ok = (err < 0.05) & np.isfinite(e)
+        # the frame's reference stars: well measured - 0.05 mag, or the better fifth of the
+        # frame where the errors are scaled up as a whole (SBT: WSSRNDF ~25, the catalogue
+        # model, not the photon noise; a fixed cut would leave no star at all)
+        fin = np.isfinite(e) & np.isfinite(err)
+        cut = max(0.05, float(np.percentile(err[fin], 20))) if np.any(fin) else 0.05
+        ok = (err < cut) & fin
         if np.sum(ok) >= 3:
             e = e - np.median(e[ok])
         s = _floor(e, err, ok)
