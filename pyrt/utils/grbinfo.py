@@ -32,7 +32,8 @@ TELESCOP).  Built in:
 
     KEY host [db=stars] [telescop="..."] [site=lat,lon]
 
-e.g.  'BOOTES-1 none telescop="BOOTES-1"' (host none: cache only, add triggers by hand).
+e.g.  'BOOTES-1 none telescop="BOOTES-1"' (host none: cache only, add triggers by hand),
+      'D50 local' on the D50 machine itself (psql without ssh).
 """
 
 import os
@@ -178,8 +179,11 @@ def _from_database(telescope, target):
     sql = ("select to_char(g.grb_date,'YYYY-MM-DD\"T\"HH24:MI:SS.MS'), g.grb_ra, g.grb_dec, g.grb_errorbox, "
            "g.grb_type, t.tar_name from grb g join targets t on t.tar_id=g.tar_id "
            "where g.tar_id=%d order by g.grb_last_update desc limit 1" % int(target))
-    cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=%d' % SSH_TIMEOUT, host,
-           'psql -X -At -F "|" %s -c "%s"' % (db, sql.replace('"', '\\"'))]
+    if host == 'local':  # on the telescope machine itself
+        cmd = ['psql', '-X', '-At', '-F', '|', db, '-c', sql]
+    else:
+        cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=%d' % SSH_TIMEOUT, host,
+               'psql -X -At -F "|" %s -c "%s"' % (db, sql.replace('"', '\\"'))]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=3*SSH_TIMEOUT)
     except (subprocess.TimeoutExpired, OSError) as e:
