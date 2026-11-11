@@ -39,6 +39,7 @@ Z_VAR = 3.0        # variation significance for "varies"
 MIN_FRAC = 0.75    # present in at least this fraction of the frames
 MAX_MOTION = 3.0   # motion significance above this: a mover, not ours
 EXTRAP = (5.0, 15.0, 60.0)  # [min] after the last point
+ALPHA_FLOOR = 0.5  # the least uncertainty of the decay index in an extrapolation
 
 
 def frame_stats(rec):
@@ -130,8 +131,17 @@ def assess(t_jd, m, s, t0_jd=None):
             mr, mall = float(a_ @ pr), float(a_ @ p)
             # the error: the recent fit's own, and the disagreement with the whole curve's
             # (one law for the whole curve is a model, flaring breaks it)
+            err = np.hypot(np.sqrt(a_ @ covr @ a_), mr - mall)
+            if np.isfinite(r['CURV_Z']) and abs(r['CURV_Z']) >= 3:
+                # a curved light curve (a flare's decline, a rise turning over) is about to
+                # change its character: a flattening is as likely as the trend going on
+                # (GRB 180325A: the steep decline after the flare ran into a plateau)
+                err = np.hypot(err, mr - m[-1])
+            # and alpha is not known better than ALPHA_FLOOR a few minutes after a trigger:
+            # breaks happen (GRB 250702F steepened after 9 min, unforeseeable before)
+            err = np.hypot(err, 2.5 * ALPHA_FLOOR * (np.log10(age + dt) - x[-1]))
             r['MAG_%d' % dt] = mr
-            r['MAG_%d_ERR' % dt] = float(np.hypot(np.sqrt(a_ @ covr @ a_), mr - mall))
+            r['MAG_%d_ERR' % dt] = float(err)
     else:
         # no trigger time: a straight line, and not further than the span it was fitted on
         p, cov, _ = _wfit(th, m, s, 1)
