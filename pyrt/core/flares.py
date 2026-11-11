@@ -47,7 +47,8 @@ range) +0.5, and if red also a dwarf by reduced proper motion H = m + 5 log(pm["
 Classes: FLARE  Z_ex>=1.5 and Z_decay>=2 and S+P >= flare_sig
          FLARE? Z_ex>=1.5 and not brightening (Z_fade > -2) and S+P >= 3,
                 and the star red, or S >= 5 and Z_decay >= 2 on its own (the error box alone holds
-                tens of stars, and many EP triggers are GRBs with no flare star at all)
+                tens of stars, and many EP triggers are GRBs with no flare star at all),
+                and within NEAR_BOX error-box radii of the trigger (anywhere without one)
 (a constant excess without fading is not a flare: transients.py lists it as BRIGHT).
 Both: stars admitted only by depth_prior need Z_ex >= 3 and S >= 3; the last point must not
 be more than 2 sigma below the catalogue (a flare decays to quiescence, not below).
@@ -66,6 +67,7 @@ MIN_FIELD = 10       # stars needed for the field normalisation
 NEIGHBOURS = 40      # stars of similar magnitude for the local normalisation
 PRIOR_INBOX, PRIOR_DWARF, PRIOR_RED = 1.0, 1.0, 0.5
 NOPRIOR_S = 5.0      # S needed for a candidate that is neither red nor a dwarf
+NEAR_BOX = 2.0       # [error-box radii] FLARE? (no decay yet) only this close to the trigger
 TAUS = np.logspace(np.log10(1/60.0), np.log10(6.0), 36)  # decay times [h], 1 min .. 6 h
 MIN_SYS = 0.01       # [mag] smallest calibration uncertainty of the quiescent level
 PREDICT = 0.5        # [h] flare part predicted this long after the last frame
@@ -403,7 +405,12 @@ def flare_search(rec, trigger=None, red_margin=0.05, flare_sig=5.0, window=None,
     res['EXCESS_END'] = end
     sane = ~(res['EXCESS_LAST'] < -2*res['LAST_ERR']) & ~(end < -2*end_err)
     base = (res['Z_EX'] >= 1.5) & solid & sane
-    cls[base & (zf0 > -2) & (sp >= 3) & stellar] = 'FLARE?'
+    # a constant excess (no decay yet) only near the trigger: it may be the X-ray source;
+    # elsewhere in the field a flare has to show its decay (FLARE).  Without a trigger
+    # position, everywhere.  (GRB 230818A: faint red stars far from a 0.06' Swift box.)
+    db = np.array(res['DIST_BOX'], dtype=np.float64)
+    near = ~np.isfinite(db) | (db <= NEAR_BOX)
+    cls[base & (zf0 > -2) & (sp >= 3) & stellar & near] = 'FLARE?'
     cls[base & (zd >= 2) & (sp >= flare_sig) & stellar] = 'FLARE'
     res['CLASS'] = cls
     # most interesting first: class, inside the error box, then significance with the priors
