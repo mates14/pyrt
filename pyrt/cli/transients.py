@@ -242,8 +242,15 @@ def get_usno(rasc, decl, width=0.25, height=0.25, mlim=17):
 #    command = '/data/catalogs/usno-b1.0/bin/ubcone' + ' -P %f'%(rasc/15.0) + ' -p %f'%(decl) + ' -S %f -s %f'%(2*width, hx) + ' -i' + ' %.2f'%(mlim) + " -O" + usno_ecsv_tmp + ">/dev/null 2>&1"
 #    print(command)
     os.system(command)
-    cat = astropy.io.ascii.read(usno_ecsv_tmp, format='ecsv')
-    os.system("rm " + usno_ecsv_tmp)
+    try:
+        cat = astropy.io.ascii.read(usno_ecsv_tmp, format='ecsv')
+    except (OSError, ValueError) as e:
+        # no ubcone/USNO-B on this machine (lascaux): no USNO check, the rest goes on
+        print("WARNING: USNO catalog not available (%s), candidates not checked against it" % e)
+        return None
+    finally:
+        if os.path.exists(usno_ecsv_tmp):
+            os.remove(usno_ecsv_tmp)
 
     return cat
 
@@ -1018,11 +1025,13 @@ def main():
                 flare_meta = dict(det.meta)
                 flare_meta['COLOR_NAMES'] = ["%s-%s"%(schema[k%len(schema)], schema[(k+1)%len(schema)]) for k in range(3)]
 
+        usno = None
         if options.usno and len(candy)>0:
             usno = get_usno(det.meta['CTRRA'], det.meta['CTRDEC'],
                            width=enlarge*det.meta['FIELD'],
                            height=enlarge*det.meta['FIELD'],
                            mlim=options.maglim)
+        if usno is not None:
 
             # Store original candidates
             orig_candidates = list(zip(candx, candy, candra, canddec, candtime,
