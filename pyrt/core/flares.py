@@ -50,7 +50,9 @@ Classes: FLARE  Z_ex>=1.5 and Z_decay>=2 and S+P >= flare_sig
                 tens of stars, and many EP triggers are GRBs with no flare star at all),
                 and within NEAR_BOX error-box radii of the trigger (anywhere without one)
 (a constant excess without fading is not a flare: transients.py lists it as BRIGHT).
-Both: stars admitted only by depth_prior need Z_ex >= 3 and S >= 3; the last point must not
+Both: at least MIN_HIGH points individually 2 sigma above quiescence (one bright bin is a
+cosmic ray or a satellite, not a flare); stars admitted only by depth_prior need Z_ex >= 3 and
+S >= 3; the last point must not
 be more than 2 sigma below the catalogue (a flare decays to quiescence, not below).
 """
 
@@ -68,6 +70,7 @@ NEIGHBOURS = 40      # stars of similar magnitude for the local normalisation
 PRIOR_INBOX, PRIOR_DWARF, PRIOR_RED = 1.0, 1.0, 0.5
 NOPRIOR_S = 5.0      # S needed for a candidate that is neither red nor a dwarf
 NEAR_BOX = 2.0       # [error-box radii] FLARE? (no decay yet) only this close to the trigger
+MIN_HIGH = 2         # points individually 2 sigma above quiescence for any class (not one bright bin)
 TAUS = np.logspace(np.log10(1/60.0), np.log10(6.0), 36)  # decay times [h], 1 min .. 6 h
 MIN_SYS = 0.01       # [mag] smallest calibration uncertainty of the quiescent level
 PREDICT = 0.5        # [h] flare part predicted this long after the last frame
@@ -325,15 +328,18 @@ def flare_search(rec, trigger=None, red_margin=0.05, flare_sig=5.0, window=None,
         dist, rbox = errorbox_distance(trigger, float(np.median(o['CATRA'])), float(np.median(o['CATDEC'])))
         # admitted only thanks to depth_prior (red, within `depth` of the limit): noisier
         nearlim = bool('LIM' in o.colnames and np.median(o['EXPECT']) >= np.median(o['LIM']) - depth)
+        # points individually above quiescence (2 sigma): a flare lasts, one bright bin is a
+        # cosmic ray or a satellite (GRB 250702F: one bin 1.7 mag up, 'decaying' in 1 min)
+        nhigh = int(np.sum(e > 2*np.hypot(np.hypot(s, sfloor), scol)))
         series.append((t, e, s, grp, sfloor))
         rows.append((sid, n, float(np.median(o['CATRA'])), float(np.median(o['CATDEC'])),
                      float(np.median(o['MAG'])), catmag, a, np.sqrt(sa**2 + sfloor**2), scol,
                      b, sb, float(np.max(e)), float(e[-1]), float(np.hypot(s[-1], scol)), nearlim, colx, colr,
                      float(np.median(o['C0'])), float(np.median(o['C1'])), float(np.median(o['C2'])),
-                     pm, H, dist*60 if np.isfinite(dist) else np.nan, rbox, float(np.ptp(o['T'])*60)))
+                     pm, H, dist*60 if np.isfinite(dist) else np.nan, rbox, float(np.ptp(o['T'])*60), nhigh))
     res = astropy.table.Table(rows=rows, names=['STAR', 'NUM', 'ALPHA_J2000', 'DELTA_J2000', 'MAG_CALIB', 'CATMAG',
         'EXCESS', 'EXCESS_ERR', 'COLOR_ERR', 'TREND', 'TREND_ERR', 'EXCESS_MAX', 'EXCESS_LAST', 'LAST_ERR', 'NEARLIM', 'COLX', 'COLR',
-        'C0', 'C1', 'C2', 'PM', 'HRPM', 'DIST', 'DIST_BOX', 'SPAN'])
+        'C0', 'C1', 'C2', 'PM', 'HRPM', 'DIST', 'DIST_BOX', 'SPAN', 'NHIGH'])
 
     # --- field normalisation (the field's stars are mostly constant) ---
     # the floor is mostly catalogue/model error, constant for a star: it does not average down with
@@ -404,7 +410,7 @@ def flare_search(rec, trigger=None, red_margin=0.05, flare_sig=5.0, window=None,
     end_err = np.sqrt(res['EXCESS_ERR']**2 + (np.nan_to_num(res['TREND_ERR'])*span)**2)
     res['EXCESS_END'] = end
     sane = ~(res['EXCESS_LAST'] < -2*res['LAST_ERR']) & ~(end < -2*end_err)
-    base = (res['Z_EX'] >= 1.5) & solid & sane
+    base = (res['Z_EX'] >= 1.5) & solid & sane & (res['NHIGH'] >= MIN_HIGH)
     # a constant excess (no decay yet) only near the trigger: it may be the X-ray source;
     # elsewhere in the field a flare has to show its decay (FLARE).  Without a trigger
     # position, everywhere.  (GRB 230818A: faint red stars far from a 0.06' Swift box.)
