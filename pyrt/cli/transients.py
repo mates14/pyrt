@@ -217,6 +217,7 @@ def readOptions(args=sys.argv[1:]):
   parser.add_argument("--flare-sig", type=float, default=5.0, help="Combined (excess+fading) significance for FLARE (default 5)")
   parser.add_argument("--flare-depth", type=float, default=1.5, help="Flare search uses stars expected this many mag above the frame limit (default 1.5)")
   parser.add_argument("--no-afterglow", action='store_true', help="Skip the afterglow assessment of new sources")
+  parser.add_argument("--deep", help="Deep image catalogue (kinstep/framestep *-deep*.ecsv): its uncatalogued objects are afterglow candidates too")
   parser.add_argument("--flare-rec", help="Save the per-frame star records of the flare search to this ECSV (for re-analysis)")
   parser.add_argument("--flare-window", type=float, help="Use only this many minutes from the first frame of each star for the flare search (default all)")
   parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
@@ -454,20 +455,84 @@ def flare_table(flare_rec):
     return astropy.table.Table(rows=flare_rec, names=['FRAME', 'JD', 'CATRA', 'CATDEC', 'MAG', 'ERR', 'EXPECT', 'CATMAG',
                                                      'C0', 'C1', 'C2', 'C3', 'PM', 'X', 'Y', 'LIM', 'FILT'])
 
-def afterglow_report(trans, mags, flare_rec, nframes, meta, options):
-    """New stationary sources judged as afterglow candidates (pyrt.core.afterglow), writes afterglow.ecsv."""
+def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
+    """New stationary sources judged as afterglow candidates (pyrt.core.afterglow), writes afterglow.ecsv.
+
+    Candidates: transients' own (uncatalogued trails), and with --deep the objects of the deep
+    image (kinstep/framestep: the sum of all the frames) that have no catalogue star nearby.
+    Either way the light curve is read from every input frame at the candidate's position,
+    whatever its S/N: forced photometry measures a faint source in every bin, while a trail
+    keeps only the points above --siglim."""
     from pyrt.core import afterglow
     frames = afterglow.frame_stats(flare_table(flare_rec)) if len(flare_rec) else {}
     trigger = grbinfo.get_trigger(meta.get('TARGET'), meta=meta) if meta is not None else None
     if trigger is not None and trigger['t0'] is None:
         trigger = None
+    # the frames, light: positions, magnitudes, times
+    fr = []
+    for arg in options.files:
+        try:
+            t = astropy.table.Table.read(arg, format='ascii.ecsv')
+        except Exception:
+            continue
+        if 'JD' not in t.meta or len(t) == 0:
+            continue
+        ok = np.isfinite(np.ma.filled(t['MAGERR_CALIB'], np.nan)) & np.isfinite(np.ma.filled(t['MAG_CALIB'], np.nan))
+        t = t[ok]
+        rlc = max(1.0, 0.7*float(t.meta.get('FWHM', 2.0))*float(t.meta.get('PIXEL', 1.0)))
+        # the errors scaled as the candidates' are (MAGERR_CALIB vs the scatter dophot found)
+        w = t.meta.get('WSSRNDF')
+        esc = np.sqrt(w) if w is not None and np.isfinite(w) and w > 0 else 1.0
+        fr.append(dict(jd=t.meta['JD'] + t.meta.get('EXPTIME', 0)/2.0/86400.0, rlc=rlc,
+                       ra=np.asarray(t['ALPHA_J2000'], float), dec=np.asarray(t['DELTA_J2000'], float),
+                       mag=np.asarray(t['MAG_CALIB'], float), err=esc*np.asarray(t['MAGERR_CALIB'], float)))
+    def lightcurve(ra, dec):
+        jd, m, e = [], [], []
+        for f in fr:
+            d = np.hypot((f['ra'] - ra)*np.cos(np.radians(dec)), f['dec'] - dec)*3600
+            if len(d) and np.min(d) < f['rlc']:
+                i = np.argmin(d)
+                jd.append(f['jd']); m.append(f['mag'][i]); e.append(f['err'][i])
+        return np.array(jd), np.array(m), np.array(e)
     cands = []
     for oo in trans:
         lc = mags[oo['INDEX']]
         move = float(np.hypot(oo['ALPHA_MOV']*np.cos(np.radians(oo['DELTA_J2000'])), oo['DELTA_MOV']))  # [arcsec/h]
-        cands.append(dict(RA=np.asarray(lc['ALPHA_J2000']), DEC=np.asarray(lc['DELTA_J2000']), MOTION=float(oo['DPOS']), MOVE=move,
-                          JD=np.asarray(lc['JD']) + np.asarray(lc['EXPTIME'])/2.0/86400.0,
-                          MAG=np.asarray(lc['MAG_CALIB']), ERR=np.asarray(lc['MAGERR_CALIB']), CATMAG=np.asarray(lc['CATMAG'])))
+        ra, dec = float(np.mean(lc['ALPHA_J2000'])), float(np.mean(lc['DELTA_J2000']))
+        jd, m, e = lightcurve(ra, dec) if fr else (np.asarray(lc['JD']) + np.asarray(lc['EXPTIME'])/2.0/86400.0,
+                                                    np.asarray(lc['MAG_CALIB']), np.asarray(lc['MAGERR_CALIB']))
+        catmag = np.full(len(m), np.nanmedian(np.asarray(lc['CATMAG'], float)) if np.sum(np.isfinite(np.asarray(lc['CATMAG'], float))) > len(lc)/2 else np.nan)
+        cands.append(dict(RA=np.array([ra]), DEC=np.array([dec]), MOTION=float(oo['DPOS']), MOVE=move,
+                          JD=jd, MAG=m, ERR=e, CATMAG=catmag))
+    if options.deep and fr:
+        deep = astropy.table.Table.read(options.deep, format='ascii.ecsv')
+        rnew = max(2.0, 1.5*float(deep.meta.get('FWHM', 2.0))*float(deep.meta.get('PIXEL', 1.0)))
+        cra = np.asarray(cat['radeg'], float) if cat is not None else np.array([])
+        cdec = np.asarray(cat['decdeg'], float) if cat is not None else np.array([])
+        cm = np.asarray(cat[meta.get('PHFILTER', 'Sloan_r')] if cat is not None and meta.get('PHFILTER') in cat.colnames else [], float)
+        catlim = float(np.nanpercentile(cm[cm > 0], 90)) if np.sum(cm > 0) > 20 else np.inf
+        have = [(c['RA'][0], c['DEC'][0]) for c in cands]
+        n0 = len(cands)
+        for o in deep:
+            ra, dec = float(o['ALPHA_J2000']), float(o['DELTA_J2000'])
+            if len(cra) and np.min(np.hypot((cra - ra)*np.cos(np.radians(dec)), cdec - dec))*3600 < rnew:
+                continue   # a catalogued star (a flare is the flare search's)
+            if any(np.hypot((h[0] - ra)*np.cos(np.radians(dec)), h[1] - dec)*3600 < rnew for h in have):
+                continue
+            # an afterglow is a point source on its own: not deblended from a neighbour (its
+            # photometry follows the seeing), not extended
+            if 'FLAGS' in deep.colnames and int(o['FLAGS']) & 2:
+                continue
+            if 'FWHM_IMAGE' in deep.colnames and 'FWHM' in deep.meta and \
+                    not 0.7 <= float(o['FWHM_IMAGE'])/float(deep.meta['FWHM']) <= 1.4:
+                continue
+            jd, m, e = lightcurve(ra, dec)
+            cands.append(dict(RA=np.array([ra]), DEC=np.array([dec]), MOTION=0.0, MOVE=0.0, JD=jd, MAG=m, ERR=e,
+                              CATMAG=np.full(len(m), np.nan),
+                              # fainter than the catalogue reaches, "not catalogued" means nothing: it has to vary
+                              FAINT=bool(float(o['MAG_CALIB']) > catlim)))
+        print("afterglow: %d deep objects without a catalogue star (catalogue complete to %.1f) from %s"
+              % (len(cands) - n0, catlim, options.deep))
     res = afterglow.afterglow_search(cands, frames, nframes, trigger=trigger, verbose=True)
     print("*** AFTERGLOW START ***")
     if res is None:
@@ -868,7 +933,7 @@ def main():
             pair_start += len(bi)
 
             # flare search: one identified catalogued star, no neighbour light worth >0.03 mag
-            if not options.no_flares and len(i) == 1 and errdet < 1.091/options.siglim \
+            if not (options.no_flares and options.no_afterglow) and len(i) == 1 and errdet < 1.091/options.siglim \
                     and not (d['X_IMAGE'] < options.frame or d['Y_IMAGE'] < options.frame
                              or d['X_IMAGE'] > d.meta['IMGAXIS1']-options.frame or d['Y_IMAGE'] > d.meta['IMGAXIS2']-options.frame):
                 ci = int(i[0])
@@ -1048,7 +1113,7 @@ def main():
         #        print("o",bestmag,cm,magdet,errdet,np.abs(bestmag-magdet)/errdet)
 
         print('Comparison to %s produced %d candidates (%d of them brightened catalogued stars)'%(catname, len(candx), np.sum(np.isfinite(candcat))))
-        if not options.no_flares:
+        if not (options.no_flares and options.no_afterglow):   # (the afterglow part takes its frame floors from these too)
             flare_frames.append([arg, det.meta['JD'] + det.meta['EXPTIME']/2.0/86400.0, str(det.meta.get('FILTER', ''))])
             if flare_meta is None:
                 flare_meta = dict(det.meta)
@@ -1572,7 +1637,7 @@ def main():
     print(trans)
     print("*** TRANS END ***")
     if not options.no_afterglow:
-        afterglow_report(trans, mags, flare_rec, len(imgtimes), flare_meta if flare_meta is not None else dict(d.meta), options)
+        afterglow_report(trans, mags, flare_rec, len(imgtimes), flare_meta if flare_meta is not None else dict(d.meta), options, cat=cat)
 
 
     print("In total",len(old),"positions considered.")

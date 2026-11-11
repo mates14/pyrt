@@ -126,6 +126,10 @@ def assess(t_jd, m, s, t0_jd=None):
             rec = np.arange(n) >= n - min(n, 4)
         pr, covr, _ = _wfit(x[rec], m[rec], s[rec], 1)
         r['ALPHA_RECENT'], r['ALPHA_RECENT_ERR'] = float(pr[0] / 2.5), float(np.sqrt(covr[0, 0]) / 2.5)
+        if abs(pr[0]) < 2 * np.sqrt(covr[0, 0]):
+            # the recent half says nothing (a faint source's noisy tail): the whole curve's law
+            # (GRB 210312B at ~20.5 mag: the tail's -0.4+-0.8 had made a clear fade "RISING")
+            pr, covr = p, cov
         age = (t_jd[-1] - t0_jd) * 1440
         for dt in EXTRAP:
             # a rise is not extrapolated beyond the source's age (t_last - T0): held there
@@ -209,10 +213,16 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
         elif np.isfinite(r['CURV_Z']) and abs(r['CURV_Z']) >= 3:
             cls = 'TURNING'   # a rise into a decay (or back): the extrapolation is not to be trusted
         else:
-            slope, err = ((r['ALPHA_RECENT'], r['ALPHA_RECENT_ERR']) if np.isfinite(r['ALPHA_RECENT'])
-                          else (r['RATE'], r['RATE_ERR']))
+            if np.isfinite(r['ALPHA_RECENT']) and abs(r['ALPHA_RECENT']) >= 2 * r['ALPHA_RECENT_ERR']:
+                slope = r['ALPHA_RECENT']
+            elif np.isfinite(r['ALPHA']):
+                slope = r['ALPHA']
+            else:
+                slope = r['RATE']
             cls = 'FADING' if slope > 0 else 'RISING'
         r['CLASS'] = cls
+        if c.get('FAINT') and not varies:
+            continue                      # deep-only, below the catalogue's depth, steady: the field
         # score: how far above the limit (a faint source near it is often noise), error box,
         # persistence, order
         sc = np.clip(r['MARGIN'], 0, 5) if np.isfinite(r['MARGIN']) else 1.0
