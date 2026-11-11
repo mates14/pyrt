@@ -18,7 +18,10 @@ a catalogued star (those are the flare search's business):
   - a power law in time since the trigger, m = a + 2.5 alpha log10(t - T0) (alpha > 0
     fading), or a linear trend in mag/h without a trigger time; the curvature of a
     quadratic in log t tells a rise turning into a decay,
-  - extrapolated magnitude +5, +15, +60 min after the last point, with its error,
+  - extrapolated magnitude +5, +15, +60 min after the last point from the power law of the
+    recent half in log time (t - T0 >= (t_last - T0)/2; an afterglow is often caught rising or
+    flaring); the error adds the disagreement with the whole curve's power law; a rise is held
+    beyond the source's age; without a trigger time a straight line, at most one span ahead,
   - error-box distance (trigger from pyrt.utils.grbinfo), persistence (fraction of frames),
     margin above the detection limit.
 
@@ -103,23 +106,42 @@ def assess(t_jd, m, s, t0_jd=None):
     th = (t_jd - t_jd[0]) * 24
     p, cov, _ = _wfit(th, m, s, 1)
     r['RATE'], r['RATE_ERR'] = float(p[0]), float(np.sqrt(cov[0, 0]))
-    model = ('lin', p, cov, t_jd[0])
+    r['ALPHA_RECENT'] = r['ALPHA_RECENT_ERR'] = np.nan
+    span = (t_jd[-1] - t_jd[0]) * 1440
     if t0_jd is not None and np.all(t_jd > t0_jd):
         x = np.log10((t_jd - t0_jd) * 1440)
         p, cov, _ = _wfit(x, m, s, 1)
         r['ALPHA'], r['ALPHA_ERR'] = float(p[0] / 2.5), float(np.sqrt(cov[0, 0]) / 2.5)
-        model = ('pow', p, cov, t0_jd)
         if n >= 5 and np.ptp(x) > 0:
             q, qcov, _ = _wfit(x - x.mean(), m, s, 2)
             r['CURV_Z'] = float(q[0] / np.sqrt(qcov[0, 0])) if qcov[0, 0] > 0 else np.nan
-    # extrapolation from the fitted trend
-    for dt in EXTRAP:
-        tt = t_jd[-1] + dt / 1440
-        kind, p, cov, ref = model
-        xx = np.log10((tt - ref) * 1440) if kind == 'pow' else (tt - ref) * 24
-        a = np.array([xx, 1.0])
-        r['MAG_%d' % dt] = float(a @ p)
-        r['MAG_%d_ERR' % dt] = float(np.sqrt(a @ cov @ a))
+        # the recent half in log time (t - T0 >= half of the last): an afterglow is often
+        # caught rising or flaring, and the early points (bright, precise) would set the slope
+        rec = (t_jd - t0_jd) >= (t_jd[-1] - t0_jd) / 2
+        if np.sum(rec) < 4:
+            rec = np.arange(n) >= n - min(n, 4)
+        pr, covr, _ = _wfit(x[rec], m[rec], s[rec], 1)
+        r['ALPHA_RECENT'], r['ALPHA_RECENT_ERR'] = float(pr[0] / 2.5), float(np.sqrt(covr[0, 0]) / 2.5)
+        age = (t_jd[-1] - t0_jd) * 1440
+        for dt in EXTRAP:
+            # a rise is not extrapolated beyond the source's age (t_last - T0): held there
+            xx = np.log10(age + (dt if pr[0] >= 0 else min(dt, age)))
+            a_ = np.array([xx, 1.0])
+            mr, mall = float(a_ @ pr), float(a_ @ p)
+            # the error: the recent fit's own, and the disagreement with the whole curve's
+            # (one law for the whole curve is a model, flaring breaks it)
+            r['MAG_%d' % dt] = mr
+            r['MAG_%d_ERR' % dt] = float(np.hypot(np.sqrt(a_ @ covr @ a_), mr - mall))
+    else:
+        # no trigger time: a straight line, and not further than the span it was fitted on
+        p, cov, _ = _wfit(th, m, s, 1)
+        for dt in EXTRAP:
+            if dt > span:
+                r['MAG_%d' % dt] = r['MAG_%d_ERR' % dt] = np.nan
+                continue
+            a_ = np.array([(t_jd[-1] - t_jd[0]) * 24 + dt / 60, 1.0])
+            r['MAG_%d' % dt] = float(a_ @ p)
+            r['MAG_%d_ERR' % dt] = float(np.sqrt(a_ @ cov @ a_))
     return r
 
 
@@ -170,7 +192,8 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
         elif np.isfinite(r['CURV_Z']) and abs(r['CURV_Z']) >= 3:
             cls = 'TURNING'   # a rise into a decay (or back): the extrapolation is not to be trusted
         else:
-            slope, err = (r['ALPHA'], r['ALPHA_ERR']) if np.isfinite(r['ALPHA']) else (r['RATE'], r['RATE_ERR'])
+            slope, err = ((r['ALPHA_RECENT'], r['ALPHA_RECENT_ERR']) if np.isfinite(r['ALPHA_RECENT'])
+                          else (r['RATE'], r['RATE_ERR']))
             cls = 'FADING' if slope > 0 else 'RISING'
         r['CLASS'] = cls
         # score: how far above the limit (a faint source near it is often noise), error box,
@@ -195,8 +218,8 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
 def report_lines(res, trigger=None, n=10):
     out = []
     for r in res[:n]:
-        trend = ("alpha %+.2f±%.2f" % (r['ALPHA'], r['ALPHA_ERR']) if np.isfinite(r['ALPHA'])
-                 else "%+.2f±%.2f mag/h" % (r['RATE'], r['RATE_ERR']))
+        trend = ("alpha %+.2f±%.2f (recent %+.2f±%.2f)" % (r['ALPHA'], r['ALPHA_ERR'], r['ALPHA_RECENT'], r['ALPHA_RECENT_ERR'])
+                 if np.isfinite(r['ALPHA']) else "%+.2f±%.2f mag/h" % (r['RATE'], r['RATE_ERR']))
         box = (" %.1f' = %.2f box" % (r['DIST'], r['DIST_BOX'])) if np.isfinite(r['DIST']) else ""
         out.append("%-7s %.5f %+.5f mag %.2f (last %.2f, %.1f above limit) var %.1fσ cont %.2f %s "
                    "-> +5' %.2f±%.2f +15' %.2f±%.2f +60' %.2f±%.2f S=%.1f |%s n=%d/%.1f min"

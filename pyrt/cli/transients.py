@@ -1571,7 +1571,7 @@ def main():
     print(trans)
     print("*** TRANS END ***")
     if not options.no_afterglow:
-        afterglow_report(trans, mags, flare_rec, len(imgtimes), flare_meta, options)
+        afterglow_report(trans, mags, flare_rec, len(imgtimes), flare_meta if flare_meta is not None else dict(d.meta), options)
 
 
     print("In total",len(old),"positions considered.")
