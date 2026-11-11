@@ -216,6 +216,7 @@ def readOptions(args=sys.argv[1:]):
   parser.add_argument("--red-margin", type=float, default=0.05, help="Extra excess uncertainty [mag] per mag of catalog colour outside the field's 5-95%% colour range (default 0.05)")
   parser.add_argument("--flare-sig", type=float, default=5.0, help="Combined (excess+fading) significance for FLARE (default 5)")
   parser.add_argument("--flare-depth", type=float, default=1.5, help="Flare search uses stars expected this many mag above the frame limit (default 1.5)")
+  parser.add_argument("--no-afterglow", action='store_true', help="Skip the afterglow assessment of new sources")
   parser.add_argument("--flare-rec", help="Save the per-frame star records of the flare search to this ECSV (for re-analysis)")
   parser.add_argument("--flare-window", type=float, help="Use only this many minutes from the first frame of each star for the flare search (default all)")
   parser.add_argument("files", help="Frames to process", nargs='+', action='extend', type=str)
@@ -449,13 +450,40 @@ def compare_to_catalog(magdet, errdet, expect, dist, single, extended, blend_r, 
             best = (sigma, exp, k, n, r, gal)
     return best
 
+def flare_table(flare_rec):
+    return astropy.table.Table(rows=flare_rec, names=['FRAME', 'JD', 'CATRA', 'CATDEC', 'MAG', 'ERR', 'EXPECT', 'CATMAG',
+                                                     'C0', 'C1', 'C2', 'C3', 'PM', 'X', 'Y', 'LIM', 'FILT'])
+
+def afterglow_report(trans, mags, flare_rec, nframes, meta, options):
+    """New stationary sources judged as afterglow candidates (pyrt.core.afterglow), writes afterglow.ecsv."""
+    from pyrt.core import afterglow
+    frames = afterglow.frame_stats(flare_table(flare_rec)) if len(flare_rec) else {}
+    trigger = grbinfo.get_trigger(meta.get('TARGET'), meta=meta) if meta is not None else None
+    if trigger is not None and trigger['t0'] is None:
+        trigger = None
+    cands = []
+    for oo in trans:
+        lc = mags[oo['INDEX']]
+        cands.append(dict(RA=np.asarray(lc['ALPHA_J2000']), DEC=np.asarray(lc['DELTA_J2000']), MOTION=float(oo['DPOS']),
+                          JD=np.asarray(lc['JD']) + np.asarray(lc['EXPTIME'])/2.0/86400.0,
+                          MAG=np.asarray(lc['MAG_CALIB']), ERR=np.asarray(lc['MAGERR_CALIB']), CATMAG=np.asarray(lc['CATMAG'])))
+    res = afterglow.afterglow_search(cands, frames, nframes, trigger=trigger, verbose=True)
+    print("*** AFTERGLOW START ***")
+    if res is None:
+        print("no new stationary sources")
+    else:
+        res.write("afterglow.ecsv", format='ascii.ecsv', overwrite=True)
+        for line in afterglow.report_lines(res, trigger):
+            print(line)
+    print("*** AFTERGLOW END ***")
+    return res
+
 def flare_report(flare_rec, flare_frames, meta, options):
     """Flare-star search over all frames (pyrt.core.flares), writes flares.ecsv and flares.reg."""
     if len(flare_rec) == 0 or meta is None:
         print("Flare search: no catalogued stars measured")
         return None
-    rec = astropy.table.Table(rows=flare_rec, names=['FRAME', 'JD', 'CATRA', 'CATDEC', 'MAG', 'ERR', 'EXPECT', 'CATMAG',
-                                                    'C0', 'C1', 'C2', 'C3', 'PM', 'X', 'Y', 'LIM', 'FILT'])
+    rec = flare_table(flare_rec)
     if options.flare_rec:
         rec.meta['TRIGGER_TARGET'] = meta.get('TARGET')
         rec.meta['TRIGGER_SITE'] = grbinfo.site_key(meta)
@@ -1433,7 +1461,11 @@ def main():
                 mag_weights = 1.0 / (oo['MAGERR_CALIB']**2)  # Weight by photometric precision
                 mag0 = np.sum(oo['MAG_CALIB'] * mag_weights) / np.sum(mag_weights)
                 mag_residuals = oo['MAG_CALIB'] - mag0
-                magvar, chi2_red_mag = compute_weighted_variance(mag_residuals, mag_weights, n_params=1)
+                _, chi2_red_mag = compute_weighted_variance(mag_residuals, mag_weights, n_params=1)
+                # the scatter in units of the errors, as below: the thresholds (2, 3) and
+                # ot_ness = magvar/continuity are made for that (the RMS in magnitudes,
+                # ~0.1, left every object far below OT)
+                magvar = np.sqrt(chi2_red_mag)
                 print(f"magnitude variance={magvar} (weighted, chi2_red={chi2_red_mag:.2f})")
             else:
                 # Fallback to original calculation
@@ -1538,6 +1570,8 @@ def main():
     trans.write("transients.ecsv", format='ascii.ecsv', overwrite=True)
     print(trans)
     print("*** TRANS END ***")
+    if not options.no_afterglow:
+        afterglow_report(trans, mags, flare_rec, len(imgtimes), flare_meta, options)
 
 
     print("In total",len(old),"positions considered.")
