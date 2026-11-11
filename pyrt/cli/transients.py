@@ -464,7 +464,8 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options):
     cands = []
     for oo in trans:
         lc = mags[oo['INDEX']]
-        cands.append(dict(RA=np.asarray(lc['ALPHA_J2000']), DEC=np.asarray(lc['DELTA_J2000']), MOTION=float(oo['DPOS']),
+        move = float(np.hypot(oo['ALPHA_MOV']*np.cos(np.radians(oo['DELTA_J2000'])), oo['DELTA_MOV']))  # [arcsec/h]
+        cands.append(dict(RA=np.asarray(lc['ALPHA_J2000']), DEC=np.asarray(lc['DELTA_J2000']), MOTION=float(oo['DPOS']), MOVE=move,
                           JD=np.asarray(lc['JD']) + np.asarray(lc['EXPTIME'])/2.0/86400.0,
                           MAG=np.asarray(lc['MAG_CALIB']), ERR=np.asarray(lc['MAGERR_CALIB']), CATMAG=np.asarray(lc['CATMAG'])))
     res = afterglow.afterglow_search(cands, frames, nframes, trigger=trigger, verbose=True)

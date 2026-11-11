@@ -37,7 +37,10 @@ import astropy.table
 ORDERED = 0.6      # normalised continuity below this: ordered (1% of pure noise, 12 points)
 Z_VAR = 3.0        # variation significance for "varies"
 MIN_FRAC = 0.75    # present in at least this fraction of the frames
-MAX_MOTION = 3.0   # motion significance above this: a mover, not ours
+MAX_MOTION = 3.0   # motion significance above this, and
+MIN_MOVE = 1.0     # [arcsec] a displacement over the span above this: a mover, not ours
+                   # (a bright source has centroid errors far below the frames' systematics,
+                   # saturation, blends: GRB 210619B at 12 mag "moved" 5.7 sigma = 0.45")
 EXTRAP = (5.0, 15.0, 60.0)  # [min] after the last point
 ALPHA_FLOOR = 0.5  # the least uncertainty of the decay index in an extrapolation
 
@@ -165,7 +168,10 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
     t0 = trigger['jd0'] if trigger is not None and np.isfinite(trigger.get('jd0', np.nan)) else None
     rows = []
     for c in cands:
-        if c['MOTION'] > MAX_MOTION:
+        jd_ = np.asarray(c['JD'], dtype=float)
+        move = float(c.get('MOVE', np.inf))  # [arcsec/h]
+        shift = move * (np.max(jd_) - np.min(jd_)) * 24 if len(jd_) else np.inf
+        if c['MOTION'] > MAX_MOTION and not shift < MIN_MOVE:
             continue
         catm = np.asarray(c['CATMAG'], dtype=float)
         if np.sum(np.isfinite(catm)) > len(catm) / 2:
@@ -185,6 +191,7 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
         r['RA'], r['DEC'] = float(np.mean(c['RA'])), float(np.mean(c['DEC']))
         r['FRAC'] = len(m) / nframes
         r['MOTION'] = float(c['MOTION'])
+        r['SHIFT'] = float(shift)
         r['MARGIN'] = float(lim_all - r['MAG_MEAN']) if np.isfinite(lim_all) else np.nan
         if trigger is not None and np.isfinite(trigger.get('ra', np.nan)):
             from pyrt.utils.grbinfo import errorbox_distance
