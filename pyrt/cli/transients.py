@@ -560,9 +560,24 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
                               CATMAG=np.full(len(m), np.nan),
                               # fainter than the catalogue reaches, "not catalogued" means nothing: it has to vary
                               FAINT=bool(float(o['MAG_CALIB']) > catlim)))
-        # the per-frame candidates too: uncatalogued but fainter than where the catalogue ends
+        # the per-frame candidates too: uncatalogued but fainter than where the catalogue ends,
+        # and not where the deep image shows an extended object (EP 261112.012 at FRAM-Auger:
+        # a three-star blend 2.5x the stellar FWHM 'rising' in the last bins)
+        keep = []
         for c in cands[:n0]:
             c['FAINT'] = bool(np.nanmedian(c['MAG']) > catlim) if len(c['MAG']) else True
+            d = np.hypot((dra - c['RA'][0])*np.cos(np.radians(c['DEC'][0])), ddec - c['DEC'][0])*3600
+            j = int(np.argmin(d)) if len(d) else -1
+            # (only the width: a real afterglow is often deblended from its host or a neighbour,
+            # GRB 230818A, 210619B, and may look sharper than the field, 180325A)
+            if j >= 0 and d[j] < rnew and 'FWHM_IMAGE' in deep.colnames and 'FWHM' in deep.meta and \
+                    float(deep['FWHM_IMAGE'][j]) > 1.5*float(deep.meta['FWHM']):
+                print("afterglow: %.5f %+.5f dropped: extended in the deep image (FWHM %.1f, stars %.1f px)"
+                      % (c['RA'][0], c['DEC'][0], float(deep['FWHM_IMAGE'][j]), float(deep.meta['FWHM'])))
+                continue
+            keep.append(c)
+        cands = keep + cands[n0:]
+        n0 = len(keep)
         print("afterglow: %d deep objects without a catalogue star (catalogue complete to %.1f) from %s"
               % (len(cands) - n0, catlim, options.deep))
         if len(cra):
@@ -571,6 +586,8 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
     print("*** AFTERGLOW START ***")
     if res is None:
         print("no new stationary sources")
+        if os.path.exists("afterglow.ecsv"):
+            os.remove("afterglow.ecsv")   # not a previous run's
     else:
         res.write("afterglow.ecsv", format='ascii.ecsv', overwrite=True)
         for line in afterglow.report_lines(res, trigger):
@@ -622,6 +639,8 @@ def flare_report(flare_rec, flare_frames, meta, options):
     res = flare_search(rec, trigger=trigger, red_margin=options.red_margin, flare_sig=options.flare_sig,
                        window=window, depth=options.flare_depth, verbose=True)
     if res is None:
+        if os.path.exists("flares.ecsv"):
+            os.remove("flares.ecsv")   # not a previous run's
         return None
     t_first = min(f[1] for f in flare_frames)
     deep_check(res, options)
