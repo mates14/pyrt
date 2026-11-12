@@ -578,6 +578,33 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
     print("*** AFTERGLOW END ***")
     return res
 
+def deep_check(res, options):
+    """The deep image (--deep, the sum of the bins) must show the brightening too: a star near
+    the bins' limit is measured too bright on average (noise and the selection of the
+    measurable bins) while its sum is not -- EP 53267, a 17.6 mag star at +0.7 mag in every
+    step, 17.58 in the deep image.  Such a candidate loses its class."""
+    if not options.deep or res is None or not len(res):
+        return
+    try:
+        deep = astropy.table.Table.read(options.deep, format='ascii.ecsv')
+    except Exception:
+        return
+    rnew = max(2.0, 1.5*float(deep.meta.get('FWHM', 2.0))*float(deep.meta.get('PIXEL', 1.0)))
+    dra, ddec = np.asarray(deep['ALPHA_J2000'], float), np.asarray(deep['DELTA_J2000'], float)
+    dmag = np.asarray(deep['MAG_CALIB'], float)
+    for i in np.where(np.isin(np.asarray(res['CLASS']).astype(str), ['FLARE', 'FLARE?']))[0]:
+        r = res[i]
+        d = np.hypot((dra - r['ALPHA_J2000'])*np.cos(np.radians(r['DELTA_J2000'])), ddec - r['DELTA_J2000'])*3600
+        j = int(np.argmin(d)) if len(d) else -1
+        if j < 0 or d[j] > rnew or not np.isfinite(dmag[j]):
+            continue
+        gap = dmag[j] - float(r['MAG_CALIB'])
+        if gap > max(0.3, 0.5*float(r['EXCESS'])):
+            print("flares: %.5f %+.5f %s dropped: the bins average %.2f, their sum (deep) %.2f -- a faint-end bias, not light"
+                  % (r['ALPHA_J2000'], r['DELTA_J2000'], r['CLASS'], r['MAG_CALIB'], dmag[j]))
+            res['CLASS'][i] = ''
+
+
 def flare_report(flare_rec, flare_frames, meta, options):
     """Flare-star search over all frames (pyrt.core.flares), writes flares.ecsv and flares.reg."""
     if len(flare_rec) == 0 or meta is None:
@@ -597,6 +624,7 @@ def flare_report(flare_rec, flare_frames, meta, options):
     if res is None:
         return None
     t_first = min(f[1] for f in flare_frames)
+    deep_check(res, options)
     print("*** FLARES START ***")
     if trigger is not None:
         print("Trigger %s: T0 %s, %.5f %+.5f, error box %.2f', first frame at T0+%.1f min"
