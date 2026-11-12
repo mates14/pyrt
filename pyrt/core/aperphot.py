@@ -21,7 +21,7 @@ import astropy.table
 
 MAXREJ = 50       # snreject
 KREJ = 3.0        # sloreject = shireject
-CHUNK = 20000     # objects processed at once (memory: CHUNK x box pixels)
+CHUNK = 5000     # objects processed at once (memory: CHUNK x box pixels)
 NSUB = 32         # x samples per pixel of the aperture overlap
 
 
