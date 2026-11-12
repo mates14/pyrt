@@ -21,7 +21,10 @@ def read_options(args=sys.argv[1:]):
     parser.add_argument("-f", "--fwhm", help="Override automatic FWHM estimation for convolution matrix (useful for pathological images)", type=float)
     parser.add_argument("--back-size", help="SExtractor background mesh in pixels (default 256; smaller follows structured background such as lit clouds)", type=int, default=256)
     parser.add_argument("-g", "--gain", help="Override detector gain (epadu, e-/ADU) instead of trusting the FITS GAIN keyword", type=float)
-    parser.add_argument("-I", "--noiraf", help="Do not use IRAF", action='store_true')
+    parser.add_argument("-I", "--noiraf", help="Do not use IRAF: SExtractor magnitudes (fixed aperture with -a)", action='store_true')
+    parser.add_argument("-E", "--engine", choices=('auto', 'iraf', 'numpy'), default='auto',
+                        help="Aperture photometry engine: IRAF phot, or its numpy reimplementation (the same sky "
+                        "algorithm and columns, much faster); auto = IRAF if installed (default)")
     parser.add_argument("-b", "--background", help="Save the background check image", action='store_true')
     parser.add_argument("-B", "--background-subtract", help="Save background, subtract it from image, and remove background file", action='store_true')
     parser.add_argument("--target-photometry", action='store_true', default=True,
@@ -185,18 +188,8 @@ def run_iraf(cmdfile: str) -> bool:
         print(f"Error output: {e.stderr}")
         return False
 
-def call_iraf(file, det, fwhm, aperture=None, gain_override=None):
-    """call iraf/digiphot/daophot/phot on a file"""
-    base = os.path.splitext(file)[0]
-
-    # Create coordinate file with sorted coordinates
-    coords = [(num, x, y) for num, x, y in zip(det['NUMBER'], det['X_IMAGE'], det['Y_IMAGE'])]
-    coords.sort()  # Sort by ID for consistency
-
-    with open(base + ".coo.1", "w+") as coord_file:
-        for id_num, x, y in coords:
-            coord_file.write(f"{x:.3f} {y:.3f} {id_num:4d}\n")
-
+def phot_params(file, fwhm, aperture=None, gain_override=None):
+    """Aperture, sky annulus, gain, read noise and saturation for the aperture photometry"""
     # now the FWHM is a good idea for large stars, but is should be enlarged
     # once the stars are too sharp, the sub-sqrt will make the transition
     # smooth so when comparing various images, there is no sharp edge between
@@ -221,6 +214,35 @@ def call_iraf(file, det, fwhm, aperture=None, gain_override=None):
     datamax = get_saturation(file)
     print(f"ape={ape} anu={anu} danu={danu} accnum={accnum} epadu={epadu} ({gain_src}) "
           f"rnoise={rnoise:.2f} ({rnoise_src}) datamax={datamax:.0f}")
+
+    return ape, anu, danu, epadu, rnoise, datamax
+
+def call_numpy(file, det, fwhm, aperture=None, gain_override=None):
+    """IRAF phot (salgorithm=mode) reimplemented in numpy: the same columns, no IRAF needed"""
+    from pyrt.core.aperphot import phot
+    ape, anu, danu, epadu, rnoise, datamax = phot_params(file, fwhm, aperture, gain_override)
+    order = np.argsort(np.asarray(det['NUMBER']))
+    img = astropy.io.fits.getdata(file, 0)
+    mag = phot(img, np.asarray(det['X_IMAGE'], float)[order], np.asarray(det['Y_IMAGE'], float)[order],
+               ape, anu, danu, epadu=epadu, datamax=datamax, ids=np.asarray(det['NUMBER'])[order])
+    return mag, ape
+
+def iraf_available():
+    return any(shutil.which(c) for c in ('cl', 'irafcl'))
+
+def call_iraf(file, det, fwhm, aperture=None, gain_override=None):
+    """call iraf/digiphot/daophot/phot on a file"""
+    base = os.path.splitext(file)[0]
+
+    # Create coordinate file with sorted coordinates
+    coords = [(num, x, y) for num, x, y in zip(det['NUMBER'], det['X_IMAGE'], det['Y_IMAGE'])]
+    coords.sort()  # Sort by ID for consistency
+
+    with open(base + ".coo.1", "w+") as coord_file:
+        for id_num, x, y in coords:
+            coord_file.write(f"{x:.3f} {y:.3f} {id_num:4d}\n")
+
+    ape, anu, danu, epadu, rnoise, datamax = phot_params(file, fwhm, aperture, gain_override)
 
     script = f"""noao
 digiphot
@@ -298,6 +320,7 @@ def process_photometry(file: str,
                       gain_override: Optional[float] = None,
                       back_size: int = 256,
                       detect: Optional[str] = None,
+                      engine: str = 'auto',
                       verbose: bool = False) -> astropy.table.Table:
     """Main photometry processing function that can be called programmatically
     detect: forced photometry, objects (and the FWHM) from this deeper image of the same pixel grid"""
@@ -396,22 +419,26 @@ def process_photometry(file: str,
         else:
             tbl = det[np.all([det['FLAGS'] == 0, det['MAG_AUTO'] < 99, det['MAGERR_AUTO'] < maxerr], axis=0)]
     else:
-        mag, ape = call_iraf(file, det, fwhm, aperture=aperture, gain_override=gain_override)
+        if engine == 'auto':
+            engine = 'iraf' if iraf_available() else 'numpy'
+        caller = call_iraf if engine == 'iraf' else call_numpy
+        mag, ape = caller(file, det, fwhm, aperture=aperture, gain_override=gain_override)
         det.meta['APERTURE'] = ape
+        det.meta['PHOTENG'] = engine
 
         # Verify alignment before joining
         print(f"Sextractor objects: {len(det)}")
-        print(f"IRAF measured objects: {len(mag)}")
+        print(f"{engine} measured objects: {len(mag)}")
 
         # Ensure NUMBER/ID columns are of the same type before joining
         det['NUMBER'] = det['NUMBER'].astype(np.int32)
         mag.rename_column('ID', 'NUMBER')
 
         # Remove unnecessary columns
-        mag.remove_columns(('XAIRMASS','IFILTER','XINIT','YINIT','IMAGE','COORDS','LID',
+        mag.remove_columns([c for c in ('XAIRMASS','IFILTER','XINIT','YINIT','IMAGE','COORDS','LID',
                 'XSHIFT','YSHIFT','CERROR','SERROR','ITIME','OTIME','PERROR',
                 'CIER','MSKY','STDEV','SSKEW','NSKY','NSREJ','SIER','SUM'
-                ))
+                ) if c in mag.colnames])
 
         # use iraf magnitudes as if they are sextractor's
         det.rename_columns( ['MAG_AUTO','MAGERR_AUTO'], ['MAG_SEX', 'MAGERR_SEX'])
@@ -454,6 +481,7 @@ def main():
                                gain_override=options.gain,
                                back_size=options.back_size,
                                detect=options.detect,
+                               engine=options.engine,
                                verbose=True)
 
         write_ecsv(tbl, base+".cat")
