@@ -64,6 +64,9 @@ def _jd(iso):
         return Time(iso, format='isot', scale='utc').jd
 
 
+FRESH_DAYS = 2.0   # triggers younger than this are re-read from the database (refined positions)
+
+
 def cache_path():
     return os.path.expanduser(os.environ.get('PYRT_TRIGGERS', '~/.config/pyrt/triggers.dat'))
 
@@ -170,7 +173,7 @@ def _to_cache(rec):
                     rec['ra'], rec['dec'], rec['errorbox'], rec['type'], rec['name']))
 
 
-def _from_database(telescope, target):
+def _from_database(telescope, target, cached=None):
     site = load_sites().get(telescope)
     if site is None or not site['host']:
         return None
@@ -205,7 +208,9 @@ def _from_database(telescope, target):
         rec['ra'], rec['dec'], rec['errorbox'] = [float(x) if x else np.nan for x in w[1:4]]
         rec['type'] = w[4]
         rec['name'] = ' '.join(w[5].split()) if len(w) > 5 else ''
-    _to_cache(rec)  # also "no trigger", so that we do not ask again
+    if cached is None or any(rec[k] != cached[k] for k in ('t0', 'type', 'name')) or \
+            any(not np.isclose(rec[k], cached[k], rtol=0, atol=1e-6) for k in ('ra', 'dec', 'errorbox')):
+        _to_cache(rec)  # also "no trigger", so that we do not ask again
     return rec
 
 
@@ -230,6 +235,12 @@ def get_trigger(target, telescope=None, meta=None):
         rec = _from_cache(telescope, target)
         if rec is None:
             rec = _from_database(telescope, target)
+        elif rec['t0'] is not None and np.isfinite(rec['jd0']) and Time.now().jd - rec['jd0'] < FRESH_DAYS:
+            # a fresh trigger: the position may have been refined since (BAT -> XRT, GBM
+            # re-localisations), so the database wins; _from_database appends to the cache
+            # only when something changed (the last matching line wins)
+            fresh = _from_database(telescope, target, cached=rec)
+            rec = fresh if fresh is not None and fresh['t0'] is not None else rec
         _memo[key] = rec
     return _memo[key]
 
