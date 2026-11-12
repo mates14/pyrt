@@ -623,6 +623,34 @@ def deep_check(res, options):
             res['CLASS'][i] = ''
 
 
+CATALOG_KINK = 0.3   # [mag] both colours around the band, opposite signs: the band's catalogue magnitude is wrong
+
+
+def catalog_check(res, meta):
+    """The excess is measured against the catalogue magnitude in the calibration band; when that
+    magnitude is off, every frame shows a steady "brightening".  A band fainter (or brighter) than
+    both its neighbours by more than CATALOG_KINK -- the colours across it of opposite signs -- is
+    a catalogue fault, no stellar spectrum does that (sbt-64517: ATLAS g 12.88, r 13.79, i 11.77
+    for a Gaia G = 12.09 star; measured r 12.06 -- a constant +0.44 mag "flare").  Such a
+    candidate loses its class."""
+    if res is None or not len(res) or meta is None:
+        return
+    names = list(meta.get('COLOR_NAMES') or [])
+    band = meta.get('PHFILTER')
+    # the colours ending and starting with the calibration band (a-band, band-b)
+    into = [k for k, n in enumerate(names[:3]) if n.endswith('-' + str(band))]
+    outof = [k for k, n in enumerate(names[:3]) if n.startswith(str(band) + '-')]
+    if not into or not outof:
+        return
+    ca, cb = 'C%d' % into[0], 'C%d' % outof[0]
+    for i in np.where(np.isin(np.asarray(res['CLASS']).astype(str), ['FLARE', 'FLARE?']))[0]:
+        a, b = float(res[ca][i]), float(res[cb][i])
+        if np.isfinite(a) and np.isfinite(b) and a*b < 0 and min(abs(a), abs(b)) > CATALOG_KINK:
+            print("flares: %.5f %+.5f %s dropped: catalogue %s inconsistent with its neighbours (%s=%.2f %s=%.2f)"
+                  % (res['ALPHA_J2000'][i], res['DELTA_J2000'][i], res['CLASS'][i], band, names[into[0]], a, names[outof[0]], b))
+            res['CLASS'][i] = ''
+
+
 def flare_report(flare_rec, flare_frames, meta, options):
     """Flare-star search over all frames (pyrt.core.flares), writes flares.ecsv and flares.reg."""
     if len(flare_rec) == 0 or meta is None:
@@ -645,6 +673,7 @@ def flare_report(flare_rec, flare_frames, meta, options):
         return None
     t_first = min(f[1] for f in flare_frames)
     deep_check(res, options)
+    catalog_check(res, meta)
     print("*** FLARES START ***")
     if trigger is not None:
         print("Trigger %s: T0 %s, %.5f %+.5f, error box %.2f', first frame at T0+%.1f min"
