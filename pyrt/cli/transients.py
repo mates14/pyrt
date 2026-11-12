@@ -530,8 +530,9 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
         incat = np.zeros(len(deep), bool)
         compstr = []
         if len(cra):
-            for i in range(len(deep)):
-                incat[i] = np.min(np.hypot((cra - dra[i])*np.cos(np.radians(ddec[i])), cdec - ddec[i]))*3600 < rnew
+            # nearest catalogue star of every deep object (a tree: a full field has >10k of each)
+            dist, _ = BallTree(np.radians(np.c_[cdec, cra]), metric='haversine').query(np.radians(np.c_[ddec, dra]), k=1)
+            incat = np.degrees(dist[:, 0])*3600 < rnew
             # where the catalogue really ends in this field: the faintest of the contiguous (from
             # the bright end) half-magnitude bins with >= 95% of the clean deep objects catalogued
             # (a percentile of the catalogue magnitudes says only how deep it was queried)
@@ -673,6 +674,19 @@ def flare_report(flare_rec, flare_frames, meta, options):
     return res
 
 # ******** main() **********
+
+catalog_cache = {}   # (catalogue, field) -> Catalog, for all the frames of one run
+_usno_cache = {}
+
+
+def cached_usno(rasc, decl, width=0.25, height=0.25, mlim=17):
+    """get_usno once per field and run (the frames of a series share it); a copy each time"""
+    key = (round(float(rasc), 4), round(float(decl), 4), round(float(width), 4), round(float(height), 4), mlim)
+    if key not in _usno_cache:
+        _usno_cache[key] = get_usno(rasc, decl, width=width, height=height, mlim=mlim)
+    u = _usno_cache[key]
+    return u.copy() if hasattr(u, 'copy') else u
+
 
 def main():
     """Find new objects, brightened catalogued stars (flares) and movers in dophot ECSVs."""
@@ -820,9 +834,15 @@ def main():
         color_name = "%s-%s"%(schema[0], schema[1])
 
         start = time.time()
-        cat = Catalog(ra=det.meta['CTRRA'], dec=det.meta['CTRDEC'],
-                      width=enlarge*det.meta['FIELD'], height=enlarge*det.meta['FIELD'],
-                      mlim=options.maglim, catalog=catname)
+        # the bins of a series share the field: one query per field, a copy per frame
+        # (the astrometric correction below changes the table in place)
+        ckey = (catname, round(float(det.meta['CTRRA']), 4), round(float(det.meta['CTRDEC']), 4),
+                round(float(enlarge*det.meta['FIELD']), 4), options.maglim)
+        if ckey not in catalog_cache:
+            catalog_cache[ckey] = Catalog(ra=det.meta['CTRRA'], dec=det.meta['CTRDEC'],
+                                          width=enlarge*det.meta['FIELD'], height=enlarge*det.meta['FIELD'],
+                                          mlim=options.maglim, catalog=catname)
+        cat = catalog_cache[ckey].copy()
         if len(cat) < 1:
             print("Catalog %s returned nothing for %s, skipping"%(catname, arg))
             continue
@@ -859,7 +879,7 @@ def main():
 
         print("Catalog %s returned %d results (filter %s, schema %s), %d extended, errors scaled by %.2f"%(catname, len(cat), phfilter, phschema, np.sum(extended), errscale))
         if options.usnox:
-            usno = get_usno(det.meta['CTRRA'], det.meta['CTRDEC'], width=enlarge*det.meta['FIELD'], height=enlarge*det.meta['FIELD'], mlim=options.maglim)
+            usno = cached_usno(det.meta['CTRRA'], det.meta['CTRDEC'], width=enlarge*det.meta['FIELD'], height=enlarge*det.meta['FIELD'], mlim=options.maglim)
         if options.verbose: print("Catalog search took %.3fs"%(time.time()-start))
 
         # OBJECT-SPECIFIC IDENTIFICATION RADII based on centroiding errors and astrometric quality
@@ -1202,7 +1222,7 @@ def main():
 
         usno = None
         if options.usno and len(candy)>0:
-            usno = get_usno(det.meta['CTRRA'], det.meta['CTRDEC'],
+            usno = cached_usno(det.meta['CTRRA'], det.meta['CTRDEC'],
                            width=enlarge*det.meta['FIELD'],
                            height=enlarge*det.meta['FIELD'],
                            mlim=options.maglim)
