@@ -36,7 +36,7 @@ for the statistics to stay the same from step to step.
 | unit of data | kinetic series, 96 × 1.25 s (KINFILE dump) | one 5 s (windowed) or 12 s (full) frame |
 | step k | the first k series → 12 bins of 8k sub-frames, k ∈ {1, 2, 3, 4, 6, 12} | the first 12k frames → 12 bins of k frames, k = n // 12, k ≤ 12 |
 | builder | `asarina.pipeline.kinstep` | `asarina.pipeline.framestep` |
-| step 1 is ready | after the first series (~2 min), done ~30 s later | after 12 frames (1–2.5 min), done 2.5–4 min later (full frames) |
+| step 1 is ready | after the first series (~2 min), done ~30 s later | after 12 frames (1–2.5 min), done ~1 min later, search +40 s (full frames, lascaux) |
 
 Each step does the following:
 
@@ -136,8 +136,12 @@ The trigger lookup is `SBT local`.
 | 3, 4 | box 1.5–4.8° | 60 s, 2×2 / 3×3 mosaic | **no**: one observation covers several fields |
 | 5 | trigger > 20 min old | 120 s | **no**: above `kinseries_max_exptime` |
 
-**Timing** (full 4096² frames, GRB 261024.682, numpy engine, 8 parallel bins): step 1 is
-done about 2.5 min after the 12th frame, and the search takes another minute.
+**Timing** (rehearsal on lascaux, 12 Nov 2026: GRB 261024.682, 4096² full frames, numpy
+engine, 8 parallel bins):
+- step 1 is done 58 s after the 12th frame, step 2 (24 frames) takes 84 s;
+- each search takes another ~40 s;
+- the runner reports a step's search while the next step is running, so the first
+  message does not wait for step 2.
 
 ---
 
