@@ -511,28 +511,62 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
         cdec = np.asarray(cat['decdeg'], float) if cat is not None else np.array([])
         cm = np.asarray(cat[meta.get('PHFILTER', 'Sloan_r')] if cat is not None and meta.get('PHFILTER') in cat.colnames else [], float)
         catlim = float(np.nanpercentile(cm[cm > 0], 90)) if np.sum(cm > 0) > 20 else np.inf
+        dra, ddec = np.asarray(deep['ALPHA_J2000'], float), np.asarray(deep['DELTA_J2000'], float)
+        dmag = np.asarray(deep['MAG_CALIB'], float)
+        # a clean deep object: a point source on its own (not deblended from a neighbour, as its
+        # photometry follows the seeing; not truncated or incomplete; not extended), away from the
+        # image edge (forced photometry there follows the bins' shifts and coverage)
+        clean = np.isfinite(dmag)
+        if 'FLAGS' in deep.colnames:
+            clean &= (np.asarray(deep['FLAGS'], int) & (2 | 8 | 16)) == 0
+        if 'FWHM_IMAGE' in deep.colnames and 'FWHM' in deep.meta:
+            fr_ = np.asarray(deep['FWHM_IMAGE'], float)/float(deep.meta['FWHM'])
+            clean &= (fr_ >= 0.7) & (fr_ <= 1.4)
+        nx, ny = deep.meta.get('IMGAXIS1'), deep.meta.get('IMGAXIS2')
+        if nx and ny:
+            edge = max(10.0, 3.0*float(deep.meta.get('FWHM', 2.0)))
+            dx, dy = np.asarray(deep['X_IMAGE'], float), np.asarray(deep['Y_IMAGE'], float)
+            clean &= (dx >= edge) & (dx <= nx - edge) & (dy >= edge) & (dy <= ny - edge)
+        incat = np.zeros(len(deep), bool)
+        compstr = []
+        if len(cra):
+            for i in range(len(deep)):
+                incat[i] = np.min(np.hypot((cra - dra[i])*np.cos(np.radians(ddec[i])), cdec - ddec[i]))*3600 < rnew
+            # where the catalogue really ends in this field: the faintest of the contiguous (from
+            # the bright end) half-magnitude bins with >= 95% of the clean deep objects catalogued
+            # (a percentile of the catalogue magnitudes says only how deep it was queried)
+            if np.sum(clean) > 20:
+                comp = -np.inf
+                start = np.floor(np.min(dmag[clean])*2)/2
+                for lo in np.arange(start, np.max(dmag[clean]) + 0.5, 0.5):
+                    sel = clean & (dmag >= start) & (dmag < lo + 0.5)
+                    if np.sum(sel) < 5:
+                        continue   # a sparse bin joins the next one
+                    compstr.append("%.1f-%.1f:%d/%d" % (start, lo + 0.5, np.sum(incat[sel]), np.sum(sel)))
+                    if np.mean(incat[sel]) < 0.95:
+                        break
+                    comp = start = lo + 0.5
+                catlim = min(catlim, comp)
         have = [(c['RA'][0], c['DEC'][0]) for c in cands]
         n0 = len(cands)
-        for o in deep:
+        for o, known, ok in zip(deep, incat, clean):
             ra, dec = float(o['ALPHA_J2000']), float(o['DELTA_J2000'])
-            if len(cra) and np.min(np.hypot((cra - ra)*np.cos(np.radians(dec)), cdec - dec))*3600 < rnew:
-                continue   # a catalogued star (a flare is the flare search's)
+            if known or not ok:
+                continue   # a catalogued star (a flare is the flare search's), or not a clean point source
             if any(np.hypot((h[0] - ra)*np.cos(np.radians(dec)), h[1] - dec)*3600 < rnew for h in have):
-                continue
-            # an afterglow is a point source on its own: not deblended from a neighbour (its
-            # photometry follows the seeing), not extended
-            if 'FLAGS' in deep.colnames and int(o['FLAGS']) & 2:
-                continue
-            if 'FWHM_IMAGE' in deep.colnames and 'FWHM' in deep.meta and \
-                    not 0.7 <= float(o['FWHM_IMAGE'])/float(deep.meta['FWHM']) <= 1.4:
                 continue
             jd, m, e = lightcurve(ra, dec)
             cands.append(dict(RA=np.array([ra]), DEC=np.array([dec]), MOTION=0.0, MOVE=0.0, JD=jd, MAG=m, ERR=e,
                               CATMAG=np.full(len(m), np.nan),
                               # fainter than the catalogue reaches, "not catalogued" means nothing: it has to vary
                               FAINT=bool(float(o['MAG_CALIB']) > catlim)))
+        # the per-frame candidates too: uncatalogued but fainter than where the catalogue ends
+        for c in cands[:n0]:
+            c['FAINT'] = bool(np.nanmedian(c['MAG']) > catlim) if len(c['MAG']) else True
         print("afterglow: %d deep objects without a catalogue star (catalogue complete to %.1f) from %s"
               % (len(cands) - n0, catlim, options.deep))
+        if len(cra):
+            print("afterglow: catalogued/deep per 0.5 mag: %s" % ' '.join(compstr))
     res = afterglow.afterglow_search(cands, frames, nframes, trigger=trigger, verbose=True)
     print("*** AFTERGLOW START ***")
     if res is None:

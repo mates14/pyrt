@@ -25,7 +25,8 @@ a catalogued star (those are the flare search's business):
   - error-box distance (trigger from pyrt.utils.grbinfo), persistence (fraction of frames),
     margin above the detection limit.
 
-Class: NEW (steady within the errors), FADING / RISING (significant variation, ordered,
+Class: SPIKE (all of the variation in one interior bin, kept only within the error box),
+NEW (steady within the errors), FADING / RISING (significant variation, ordered,
 the trend's sign), TURNING (ordered, curved: a rise into a decay or the reverse), ERRATIC
 (significant variation, not ordered: a bogus or a flaring source - not rejected, a GRB may
 flare).  S ranks them: margin above the limit, error box, persistence, order.
@@ -162,6 +163,27 @@ def assess(t_jd, m, s, t0_jd=None):
     return r
 
 
+def passer_by(m, s, z_var):
+    """True when all of the variation is a single interior bin brighter than both its neighbours
+    (by > 3 sigma of its own and > 0.5 mag) and the rest is flat: an asteroid or satellite crossing the (forced) aperture, not a light curve.
+    The first and last bins are exempt (an afterglow's earliest point is often its brightest)."""
+    if len(m) < 5 or not z_var >= Z_VAR:
+        return False
+    dev = (np.median(m) - m) / s
+    k = int(np.argmax(dev))
+    if k == 0 or k == len(m) - 1:
+        return False
+    step = max(3 * s[k], 0.5)            # the neighbours' own errors may be large: the spike's counts
+    if not (m[k - 1] - m[k] > step and m[k + 1] - m[k] > step):
+        return False
+    keep = np.arange(len(m)) != k
+    mk, sk = m[keep], s[keep]
+    w = 1 / sk**2
+    k_ = len(mk) - 1
+    chi2 = np.sum(w * (mk - np.sum(w * mk) / np.sum(w))**2) / k_
+    return (chi2 ** (1 / 3) - (1 - 2 / (9 * k_))) / np.sqrt(2 / (9 * k_)) < Z_VAR
+
+
 def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
     """cands: list of dicts with RA, DEC, MOTION (significance), JD (array, mid-exposure), MAG,
     ERR (arrays), CATMAG (array or nan); frames: frame_stats() output; nframes: frames in the
@@ -192,6 +214,8 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
         mc = m + cm                       # E = expect - mag: stars measured c too bright
         s = np.sqrt(np.maximum(e, 0.005)**2 + fl**2)
         r = assess(jd, mc, s, t0)
+        o_ = np.argsort(jd)
+        spike = passer_by(mc[o_], s[o_], r['Z_VAR'])
         r['RA'], r['DEC'] = float(np.mean(c['RA'])), float(np.mean(c['DEC']))
         r['FRAC'] = len(m) / nframes
         r['MOTION'] = float(c['MOTION'])
@@ -203,6 +227,14 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
             r['DIST'], r['DIST_BOX'] = float(d * 60), float(db)
         else:
             r['DIST'] = r['DIST_BOX'] = np.nan
+        # all of the variation in one interior bin: an asteroid or satellite crossing the (forced)
+        # aperture looks the same as a short early flare of an afterglow (210312B at T0+75 s);
+        # outside the error box it is taken for the crossing, inside it stays as SPIKE
+        if spike and not (np.isfinite(r['DIST_BOX']) and r['DIST_BOX'] <= 1) and np.isfinite(r['DIST_BOX']):
+            if verbose:
+                print("afterglow: %.5f %+.5f dropped: its variation is one bin (a moving object crossing it?), "
+                      "%.1f box radii out" % (r['RA'], r['DEC'], r['DIST_BOX']))
+            continue
         # class
         varies = r['Z_VAR'] >= Z_VAR
         ordered = np.isfinite(r['CONT']) and r['CONT'] < ORDERED
@@ -220,6 +252,8 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
             else:
                 slope = r['RATE']
             cls = 'FADING' if slope > 0 else 'RISING'
+        if spike:
+            cls = 'SPIKE'
         r['CLASS'] = cls
         if c.get('FAINT') and not varies:
             continue                      # deep-only, below the catalogue's depth, steady: the field
@@ -229,7 +263,7 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
         if np.isfinite(r['DIST_BOX']):
             sc += 2.5 if r['DIST_BOX'] <= 1 else (1.0 if r['DIST_BOX'] <= 2 else 0.0)
         sc += 2 * (r['FRAC'] - MIN_FRAC) / (1 - MIN_FRAC)
-        sc += 1.5 if cls in ('FADING', 'RISING', 'TURNING') else (-1.0 if cls == 'ERRATIC' else 0.0)
+        sc += 1.5 if cls in ('FADING', 'RISING', 'TURNING') else (-1.0 if cls in ('ERRATIC', 'SPIKE') else 0.0)
         r['S'] = float(sc)
         rows.append(r)
     if not rows:
