@@ -17,6 +17,8 @@ and the rest is checked in the frames the coadd was made of:
 
   - sharpness on the deep image: a pixel defect left by the dark stays on one sky position as
     long as the pointing does, and passes the frame check; it is much sharper than the PSF
+  - chip or sky: stacks of the frames registered on the sky and on the chip; a coadded bad
+    pixel stays on the chip as the field drifts
   - the difference against a template (Pan-STARRS, galaxy_phcat.prepare_and_subtract): an
     object present in the template is removed there
 
@@ -42,6 +44,9 @@ SHARP_RATIO = 1.5    # concentration (flux in 1 px / in the aperture) above this
 SHARP_SIG = 2.0      # ... and the core this many sigma above a star's of the same flux
 DIFF_SN = 5.0        # a NEW in the difference image at least at this S/N ...
 DIFF_KEEP = 0.5      # ... and with at least this fraction of its deep flux, else IN_TEMPLATE
+CHIP_Z = 3.0         # sky- minus chip-registered core flux below -CHIP_Z sigma: a DEFECT (stays on the chip)
+CHIP_DRIFT = 2.5     # [px] the frames' drift on the chip needed for that test
+CHIP_REL = 0.6       # frames at least this transparent are used for it
 NRAND = 400          # random apertures for the empirical noise of an image (correlated by resampling)
 
 
@@ -97,7 +102,9 @@ def known_sources(ra, dec, radius, cache=None, verbose=False):
         return None
     t = astropy.table.vstack(parts)
     t.meta.update(RA=float(ra), DEC=float(dec), RADIUS=float(radius), SOURCES=sorted(set(t['SRC'])))
-    if cache and not failed:      # a failed query is retried next time
+    if failed:
+        print(f"deepfield: the known objects are from {', '.join(t.meta['SOURCES'])} only")
+    if cache:                     # what was had; delete the file to query again
         t.write(cache, format='ascii.ecsv', overwrite=True)
     return t
 
@@ -170,6 +177,54 @@ def _aperture_noise(img, ape, seed=1):
     f = np.asarray(phot(img, x, y, ape, 3 * ape, 2 * ape, epadu=1e9)['FLUX'], float)
     f = f[np.isfinite(f)]
     return 1.4826 * float(np.median(np.abs(f - np.median(f)))) if len(f) > 20 else np.nan
+
+
+def chip_or_sky(frames, ra, dec, rel, h=7):
+    """Does a source follow the sky or stay on the chip?  The frames (transparency >= CHIP_REL)
+    stacked twice around each position: shifted so that the sky position is at the centre, and
+    cut at one fixed chip pixel.  A source on the sky is sharper in the first, a pixel defect
+    (left by the dark, coadded where the pointing stood) in the second; z = (core flux sky-
+    registered - chip-registered) / its noise.  Returns z per position and the drift [px] of the
+    field over the frames used (GRB 261113.604 at D50, r: 38 frames, 6.5 x 4.7 px drift, the
+    afterglow +6.5, warm pixels -5.5 to -13.7)."""
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    from scipy.ndimage import shift as nshift
+    use = [f for f, r in zip(frames, rel) if np.isfinite(r) and r >= CHIP_REL]
+    z = np.full(len(ra), np.nan)
+    if len(use) < 4 or not len(ra):
+        return z, 0.0
+    P, imgs = [], []
+    for f in use:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            P.append(WCS(fits.getheader(f)).all_world2pix(np.c_[ra, dec], 0))
+            imgs.append(fits.getdata(f).astype(float))
+    P = np.array(P)
+    drift = float(np.median(np.hypot(np.ptp(P[:, :, 0], axis=0), np.ptp(P[:, :, 1], axis=0))))
+    yy, xx = np.mgrid[-h:h + 1, -h:h + 1]
+    rr = np.hypot(xx, yy)
+    core, ring = rr <= 1.5, (rr > 4) & (rr <= h)
+    for k in range(len(ra)):
+        q = np.round(np.median(P[:, k], axis=0)).astype(int)
+        S, C = [], []
+        for i, img in enumerate(imgs):
+            x, y = P[i, k]
+            ix, iy = int(np.floor(x)), int(np.floor(y))
+            b = img[iy - h - 1:iy + h + 2, ix - h - 1:ix + h + 2]
+            cb = img[q[1] - h:q[1] + h + 1, q[0] - h:q[0] + h + 1]
+            if b.shape != (2 * h + 3, 2 * h + 3) or cb.shape != (2 * h + 1, 2 * h + 1) or min(iy - h - 1, ix - h - 1, q[0] - h, q[1] - h) < 0:
+                continue
+            sb = nshift(b, (-(y - iy), -(x - ix)), order=1)[1:-1, 1:-1]
+            S.append(sb - np.median(sb[ring]))
+            C.append(cb - np.median(cb[ring]))
+        if len(S) < 4:
+            continue
+        S, C = np.mean(S, axis=0), np.mean(C, axis=0)
+        bg = np.r_[S[ring], C[ring]]
+        e = np.sqrt(core.sum()) * 1.4826 * np.median(np.abs(bg - np.median(bg)))
+        z[k] = (S[core].sum() - C[core].sum()) / e if e > 0 else np.nan
+    return z, drift
 
 
 def image_checks(image, ra, dec, ref_ra, ref_dec, ape, diff=None):
@@ -247,8 +302,9 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
         out[k] = np.full(len(cand), np.nan)
     out['N_3SIG'] = np.zeros(len(cand), int)
     out['N_FRAMES'] = np.zeros(len(cand), int)
-    for k in ('CONC', 'CORE_SIG', 'DIFF_SN', 'DIFF_KEEP'):
+    for k in ('CONC', 'CORE_SIG', 'DIFF_SN', 'DIFF_KEEP', 'CHIP_Z'):
         out[k] = np.full(len(cand), np.nan)
+    chip_drift = 0.0
     ref = np.flatnonzero(isknown & (mag > REF_MAG[0]) & (mag < REF_MAG[1]) & ~extended & (np.asarray(deep['FLAGS']) == 0
                          if 'FLAGS' in deep.colnames else True))
     conc0 = np.nan
@@ -276,10 +332,19 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
         for k in range(len(cand)):
             for key, v in frame_stats(F[:, k], E[:, k]).items():
                 out[key][k] = v
+        notext = ~extended[cand]
+        z, drift = chip_or_sky(frames, ra[cand][notext], de[cand][notext], rel)
+        out['CHIP_Z'][notext] = z
+        chip_drift = drift
+        if verbose:
+            print(f"deepfield: chip-or-sky test: the field drifted {drift:.1f} px on the chip over the clear frames"
+                  + ("" if drift >= CHIP_DRIFT else f" (< {CHIP_DRIFT} px: not usable)"))
     cls = []
     for r, ext in zip(out, extended[cand]):
         if ext:
             cls.append('EXTENDED')
+        elif chip_drift >= CHIP_DRIFT and r['CHIP_Z'] < -CHIP_Z:
+            cls.append('DEFECT')
         elif np.isfinite(conc0) and r['CONC'] > SHARP_RATIO * conc0 and r['CORE_SIG'] > SHARP_SIG:
             cls.append('SHARP')
         elif not np.isfinite(r['SN_FRAMES']):
@@ -301,13 +366,14 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
         out['DIST'], out['DIST_BOX'] = d[:, 0] * 60, d[:, 1]
     else:
         out['DIST'] = out['DIST_BOX'] = np.full(len(out), np.nan)
-    rank = {'NEW': 0, 'VARIABLE': 1, 'UNCHECKED': 2, 'IN_TEMPLATE': 3, 'FAINT': 4, 'ONEFRAME': 5, 'SHARP': 6, 'EXTENDED': 7}
+    rank = {'NEW': 0, 'VARIABLE': 1, 'UNCHECKED': 2, 'IN_TEMPLATE': 3, 'FAINT': 4, 'ONEFRAME': 5, 'SHARP': 6, 'DEFECT': 7, 'EXTENDED': 8}
     inbox = np.where(np.isfinite(out['DIST_BOX']), out['DIST_BOX'] <= 1, False)
     key = np.lexsort((-np.nan_to_num(out['SN_FRAMES'], nan=0), np.nan_to_num(out['DIST_BOX'], nan=1e9),
                       [rank[c] for c in out['CLASS']], ~inbox))
     out = out[key]
     out.meta['FWHM_STARS'] = fwhm0
     out.meta['CONC_STARS'] = conc0
+    out.meta['CHIP_DRIFT'] = chip_drift
     out.meta['N_KNOWN'] = int(np.sum(isknown))
     out.meta['N_OBJECTS'] = len(deep)
     return out
@@ -317,13 +383,16 @@ NEAR_BOX = 2.0       # [box radii] a NEW this close to the trigger position is a
 
 REJECT = {'IN_TEMPLATE': 'in the Pan-STARRS template', 'FAINT': 'too faint in the frames',
           'ONEFRAME': 'from one frame only (satellite, aircraft, cosmic ray)',
-          'SHARP': 'sharper than a star (pixel defect, cosmic ray)', 'EXTENDED': 'extended (galaxies)',
+          'SHARP': 'sharper than a star (pixel defect, cosmic ray)',
+          'DEFECT': 'staying on the chip, not on the sky (coadded bad pixels)', 'EXTENDED': 'extended (galaxies)',
           'VARIABLE': 'variable in the frames', 'UNCHECKED': 'not checked in the frames'}
 
 
-def _why(r, conc0):
+def _why(r, conc0, drift=0.0):
     """Plain words for a NEW, with the tests it passed only narrowly."""
     words = []
+    if drift >= CHIP_DRIFT and np.isfinite(r['CHIP_Z']):
+        words.append(f"follows the sky, not the chip ({r['CHIP_Z']:+.1f} sigma over a {drift:.1f} px drift)")
     if np.isfinite(r['SN_FRAMES']):
         words.append(f"in the frames throughout (S/N {r['SN_FRAMES']:.1f}, at most {100*r['MAX_SHARE']:.0f}% from one)")
     if np.isfinite(r['DIFF_KEEP']):
@@ -331,6 +400,10 @@ def _why(r, conc0):
     elif np.isfinite(r['KNOWN_DIST']):
         words.append(f"no Pan-STARRS/Gaia object within {r['KNOWN_DIST']:.0f}\"")
     warn = []
+    if drift < CHIP_DRIFT:
+        warn.append(f"the field drifted only {drift:.1f} px on the chip: a coadded bad pixel cannot be excluded")
+    elif np.isfinite(r['CHIP_Z']) and r['CHIP_Z'] < 2:
+        warn.append(f"undecided whether on the sky or on the chip ({r['CHIP_Z']:+.1f} sigma)")
     if np.isfinite(conc0) and np.isfinite(r['CONC']) and r['CONC'] > 0.8 * SHARP_RATIO * conc0:
         warn.append(f"nearly as sharp as a pixel defect (C {r['CONC']:.2f}, stars {conc0:.2f}, cut {SHARP_RATIO*conc0:.2f})")
     if np.isfinite(r['DIFF_SN']) and r['DIFF_SN'] < DIFF_SN + 1.5:
@@ -364,7 +437,7 @@ def report(res, deep, trigger=None, top=10, verbose=False):
     else:
         lines.append(f"VERDICT: nothing new within {NEAR_BOX:.0f} error-box radii down to {band} = {lim:.2f}")
     for r in near:
-        why, warn = _why(r, conc0)
+        why, warn = _why(r, conc0, res.meta.get('CHIP_DRIFT', 0.0))
         lines.append(f"  CANDIDATE {r['RA']:.5f} {r['DEC']:+.5f}  {band} = {r['MAG']:.2f} ± {r['MAGERR']:.2f}"
                      f"  {r['DIST']:.2f}' from the trigger position ({r['DIST_BOX']:.1f} box radii)")
         lines.append(f"            {why}")
@@ -373,7 +446,7 @@ def report(res, deep, trigger=None, top=10, verbose=False):
     if len(far):
         lines.append("other new objects (further out, unlikely the afterglow):" if hasbox else "new objects:")
         for r in far[:top]:
-            _, warn = _why(r, conc0)
+            _, warn = _why(r, conc0, res.meta.get('CHIP_DRIFT', 0.0))
             lines.append(f"  {r['RA']:.5f} {r['DEC']:+.5f}  {band} = {r['MAG']:.2f}"
                          + (f"  {r['DIST']:.1f}' ({r['DIST_BOX']:.1f} box radii)" if hasbox else "")
                          + ("  [" + "; ".join(warn) + "]" if warn else ""))
