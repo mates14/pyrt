@@ -582,6 +582,11 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
                 # from an r=17.8 star): a catalogued star only within one FWHM
                 ok = True
                 known = cd < rcat_near
+                near_have = [h for h in have if np.hypot((h[0] - ra)*np.cos(np.radians(dec)), h[1] - dec)*3600 < rnew]
+                print("afterglow: near the trigger: deep %.5f %+.5f mag %.2f FWHM %.1f FLAGS %d, catalogue star at %.1f\" -> %s"
+                      % (ra, dec, float(o['MAG_CALIB']), float(o['FWHM_IMAGE']) if 'FWHM_IMAGE' in deep.colnames else np.nan,
+                         int(o['FLAGS']) if 'FLAGS' in deep.colnames else -1, cd,
+                         'catalogued' if known else ('per-frame candidate already' if near_have else 'candidate')))
             if known or not ok:
                 continue   # a catalogued star (a flare is the flare search's), or not a clean point source
             if any(np.hypot((h[0] - ra)*np.cos(np.radians(dec)), h[1] - dec)*3600 < rnew for h in have):
