@@ -593,7 +593,7 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
                 continue
             jd, m, e = lightcurve(ra, dec)
             cands.append(dict(RA=np.array([ra]), DEC=np.array([dec]), MOTION=0.0, MOVE=0.0, JD=jd, MAG=m, ERR=e,
-                              CATMAG=np.full(len(m), np.nan),
+                              CATMAG=np.full(len(m), np.nan), DEEPMAG=float(o['MAG_CALIB']),
                               # fainter than the catalogue reaches, "not catalogued" means nothing: it has to vary
                               FAINT=bool(float(o['MAG_CALIB']) > catlim)))
         # the per-frame candidates too: uncatalogued but fainter than where the catalogue ends,
@@ -604,6 +604,7 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
             c['FAINT'] = bool(np.nanmedian(c['MAG']) > catlim) if len(c['MAG']) else True
             d = np.hypot((dra - c['RA'][0])*np.cos(np.radians(c['DEC'][0])), ddec - c['DEC'][0])*3600
             j = int(np.argmin(d)) if len(d) else -1
+            c['DEEPMAG'] = float(deep['MAG_CALIB'][j]) if j >= 0 and d[j] < rnew else np.nan
             # (only the width: a real afterglow is often deblended from its host or a neighbour,
             # GRB 230818A, 210619B, and may look sharper than the field, 180325A)
             if j >= 0 and d[j] < rnew and 'FWHM_IMAGE' in deep.colnames and 'FWHM' in deep.meta and \

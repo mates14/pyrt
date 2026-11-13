@@ -27,6 +27,8 @@ a catalogued star (those are the flare search's business):
     slope 2.5 alpha, magnitude there, covariance in alpha and mag) and the extrapolation error's
     parts (MAG_n_ESTAT, _EDIFF, _ECURV, _ECAP, _EFLOOR, added in quadrature),
   - frames with the limit CLOUD_DROP above the median are left out,
+  - a source whose bins' mean flux is DEEP_EXCESS brighter than the deep image (their sum) shows
+    is dropped: not a source but the background (or the photometry) differing between the two,
   - error-box distance (trigger from pyrt.utils.grbinfo), persistence (fraction of frames),
     margin above the detection limit.
 
@@ -51,6 +53,7 @@ EXTRAP = (5.0, 15.0, 60.0)  # [min] after the last point
 ALPHA_FLOOR = 0.5  # the least uncertainty of the decay index in an extrapolation
 RISE_CAP = 1.0     # [mag] an extrapolated rise brightens at most this much beyond the fit now
 CLOUD_DROP = 1.0   # [mag] frames this much shallower than the sequence's median limit are left out
+DEEP_EXCESS = 1.0  # [mag] the bins' mean flux this much above the deep image's (their sum): not a source
 FAR_BOX = 3.0      # [box radii] a steady NEW source further out is ranked down (catalogue gaps)
 
 
@@ -261,6 +264,16 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
         if len(m) < MIN_FRAC * nframes_ok or len(m) < 2:
             continue
         mc = m + cm                       # E = expect - mag: stars measured c too bright
+        # the deep image is the sum of the bins: a real source, steady or not, has the bins' mean
+        # flux there; a background structure is not measured the same in both (EP 260213.832 at
+        # D50: a sky ridge at the frame edge, 1.5% of the sky, 17.2 mag in every bin, 19.3 deep)
+        dm = float(c.get('DEEPMAG', np.nan))
+        fm = float(-2.5 * np.log10(np.mean(10**(-0.4 * mc))))
+        if np.isfinite(dm) and fm < dm - DEEP_EXCESS:
+            if verbose:
+                print("afterglow: %.5f %+.5f dropped: the bins' mean %.2f is %.1f mag brighter than the deep image's %.2f"
+                      % (float(np.mean(c['RA'])), float(np.mean(c['DEC'])), fm, dm - fm, dm))
+            continue
         s = np.sqrt(np.maximum(e, 0.005)**2 + fl**2)
         r = assess(jd, mc, s, t0)
         o_ = np.argsort(jd)
