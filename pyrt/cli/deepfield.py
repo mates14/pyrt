@@ -21,6 +21,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Transient search in one deep image (a coadd)")
     ap.add_argument('deep', help="calibrated catalogue of the deep image (ECSV)")
     ap.add_argument('--frames', nargs='+', default=[], help="the frames the deep image was combined from")
+    ap.add_argument('--image', help="the deep FITS image (default: the catalogue's name with .fits)")
+    ap.add_argument('--diff', help="its difference against a template (FITS, the deep image's grid)")
+    ap.add_argument('--subtract', action='store_true',
+                    help="make the difference against the Pan-STARRS template (pyrt-galaxy-phcat's subtraction) -> *-diff.fits")
     ap.add_argument('--no-online', action='store_true', help="no Pan-STARRS/Gaia query: every object is a candidate")
     ap.add_argument('--known', help="known-objects cache (default deepfield-known.ecsv next to the catalogue)")
     ap.add_argument('-o', '--output', default='deepfield.ecsv')
@@ -49,10 +53,22 @@ def main(argv=None):
         known = deepfield.known_sources(ra0, de0, rad, cache=cache, verbose=o.verbose)
         if known is None:
             print("deepfield: WARNING no known-object catalogue: every object is a candidate")
-    res = deepfield.deep_search(deep, frames=o.frames, trigger=trig, known=known, verbose=o.verbose)
+    image = o.image or os.path.splitext(o.deep)[0] + '.fits'
+    if not os.path.exists(image):
+        print(f"deepfield: WARNING {image} not found: no sharpness test, no subtraction")
+        image = None
+    diff = o.diff
+    if o.subtract and image is not None and diff is None:
+        from pyrt.cli.galaxy_phcat import prepare_and_subtract
+        diff = os.path.splitext(image)[0] + '-diff.fits'
+        if not prepare_and_subtract(image, diff):
+            print("deepfield: WARNING the subtraction failed, no difference-image test")
+            diff = None
+    res = deepfield.deep_search(deep, frames=o.frames, trigger=trig, known=known, image=image, diff=diff,
+                                verbose=o.verbose)
     res.write(o.output, format='ascii.ecsv', overwrite=True)
     colour = {'NEW': 'green', 'VARIABLE': 'yellow', 'ONEFRAME': 'red', 'FAINT': 'white', 'EXTENDED': 'cyan',
-              'UNCHECKED': 'magenta'}
+              'UNCHECKED': 'magenta', 'SHARP': 'red', 'IN_TEMPLATE': 'blue'}
     with open(os.path.splitext(o.output)[0] + '.reg', 'w') as f:
         f.write("# Region file format: DS9 version 4.1\nfk5\n")
         if trig is not None and np.isfinite(trig.get('ra', np.nan)):
