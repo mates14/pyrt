@@ -367,8 +367,10 @@ def prepare_weighted_data(detections, astvar):
     """Prepare weighted data for improved motion analysis"""
     weights = []
     for detection in detections:
-        errx2 = detection.get('ERRX2_IMAGE', 0.01)  # Fallback if missing
-        erry2 = detection.get('ERRY2_IMAGE', 0.01)
+        # a table Row (astropy < 6 has no Row.get) or a dict
+        names = detection.colnames if hasattr(detection, 'colnames') else detection
+        errx2 = detection['ERRX2_IMAGE'] if 'ERRX2_IMAGE' in names else 0.01  # Fallback if missing
+        erry2 = detection['ERRY2_IMAGE'] if 'ERRY2_IMAGE' in names else 0.01
 
         # Object-specific uncertainty using precise positional information
         sigma_centroiding = np.sqrt(errx2 + erry2)
