@@ -419,6 +419,25 @@ def brightening_fit(oo):
         rate_err *= np.sqrt(max(chi2/ndf, 1.0))
     return dmag, rate, rate_err
 
+NEAR_TRIGGER_BOX = 3.0           # [box radii] within this ...
+NEAR_TRIGGER_MIN = 20.0          # [arcsec] ... or this, whichever is larger,
+NEAR_TRIGGER_MAXBOX = 1.0/60     # [deg] of a box not wider than this (XRT/UVOT/FXT/VT-class, not BAT/WXT/GBM)
+
+
+def near_trigger(trigger, ra, dec):
+    """Next to a precise trigger position, where the deep-image cleanliness rules (no
+    deblending, stellar width) are relaxed: an afterglow is often deblended from a host or a
+    neighbour and then looks extended (GRB 230818A at SBT: FWHM 3.4x the stars', 7" from the
+    early XRT position, 0.6" from UVOT's).  Wide (GBM) boxes keep the strict rules."""
+    if trigger is None or not np.isfinite(trigger.get('ra', np.nan)) or not np.isfinite(trigger.get('errorbox', np.nan)):
+        return False
+    box = float(trigger['errorbox'])
+    if box > NEAR_TRIGGER_MAXBOX:
+        return False
+    d = np.hypot((ra - trigger['ra'])*np.cos(np.radians(dec)), dec - trigger['dec'])*3600
+    return d <= max(NEAR_TRIGGER_BOX*box*3600, NEAR_TRIGGER_MIN)
+
+
 def compare_to_catalog(magdet, errdet, expect, dist, single, extended, blend_r, blend_margin, galaxy_margin):
     """Best catalog explanation of a detected magnitude `magdet` (error `errdet`).
 
@@ -530,11 +549,13 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
             dx, dy = np.asarray(deep['X_IMAGE'], float), np.asarray(deep['Y_IMAGE'], float)
             clean &= (dx >= edge) & (dx <= nx - edge) & (dy >= edge) & (dy <= ny - edge)
         incat = np.zeros(len(deep), bool)
+        catdist = np.full(len(deep), np.inf)   # [arcsec] to the nearest catalogue star
         compstr = []
         if len(cra):
             # nearest catalogue star of every deep object (a tree: a full field has >10k of each)
             dist, _ = BallTree(np.radians(np.c_[cdec, cra]), metric='haversine').query(np.radians(np.c_[ddec, dra]), k=1)
-            incat = np.degrees(dist[:, 0])*3600 < rnew
+            catdist = np.degrees(dist[:, 0])*3600
+            incat = catdist < rnew
             # where the catalogue really ends in this field: the faintest of the contiguous (from
             # the bright end) half-magnitude bins with >= 95% of the clean deep objects catalogued
             # (a percentile of the catalogue magnitudes says only how deep it was queried)
@@ -552,8 +573,15 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
                 catlim = min(catlim, comp)
         have = [(c['RA'][0], c['DEC'][0]) for c in cands]
         n0 = len(cands)
-        for o, known, ok in zip(deep, incat, clean):
+        rcat_near = max(2.0, float(deep.meta.get('FWHM', 2.0))*float(deep.meta.get('PIXEL', 1.0)))
+        for o, known, ok, cd in zip(deep, incat, clean, catdist):
             ra, dec = float(o['ALPHA_J2000']), float(o['DELTA_J2000'])
+            if near_trigger(trigger, ra, dec):
+                # next to a precise position a deblended or blended afterglow is the expected case,
+                # and its centroid is pulled towards the neighbour (230818A at SBT step 2: 9.2"
+                # from an r=17.8 star): a catalogued star only within one FWHM
+                ok = True
+                known = cd < rcat_near
             if known or not ok:
                 continue   # a catalogued star (a flare is the flare search's), or not a clean point source
             if any(np.hypot((h[0] - ra)*np.cos(np.radians(dec)), h[1] - dec)*3600 < rnew for h in have):
@@ -574,7 +602,8 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
             # (only the width: a real afterglow is often deblended from its host or a neighbour,
             # GRB 230818A, 210619B, and may look sharper than the field, 180325A)
             if j >= 0 and d[j] < rnew and 'FWHM_IMAGE' in deep.colnames and 'FWHM' in deep.meta and \
-                    float(deep['FWHM_IMAGE'][j]) > 1.5*float(deep.meta['FWHM']):
+                    float(deep['FWHM_IMAGE'][j]) > 1.5*float(deep.meta['FWHM']) and \
+                    not near_trigger(trigger, c['RA'][0], c['DEC'][0]):
                 print("afterglow: %.5f %+.5f dropped: extended in the deep image (FWHM %.1f, stars %.1f px)"
                       % (c['RA'][0], c['DEC'][0], float(deep['FWHM_IMAGE'][j]), float(deep.meta['FWHM'])))
                 continue
