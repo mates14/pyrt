@@ -1727,7 +1727,8 @@ def main():
     #            status[3]="F"
     #        if fwhm_mean < det.meta['FWHM']/1.5 or fwhm_mean > det.meta['FWHM']*1.5:
     #            status[3]="f"
-            variability = variability * num_found/(num_found-1) / magvar
+            # one detection (a single deep image): no variability to speak of, neutral
+            variability = variability * num_found/(num_found-1) / magvar if num_found > 1 and magvar > 0 and variability > 0 else 1.0
             print(f"variability={variability}")
             ot_ness /= variability #**2
 

@@ -19,7 +19,7 @@ def read_options(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
     parser.add_argument("-a", "--aperture", help="Override an automated aperture choice", type=float)
     parser.add_argument("-f", "--fwhm", help="Override automatic FWHM estimation for convolution matrix (useful for pathological images)", type=float)
-    parser.add_argument("--back-size", help="SExtractor background mesh in pixels (default 256; smaller follows structured background such as lit clouds)", type=int, default=256)
+    parser.add_argument("--back-size", help="SExtractor background mesh in pixels (default 64; it was 256, whose 4x4 meshes on a 1k frame took a sky gradient or a bright star's halo for noise: the 1-sigma threshold of a deep D50 stack 4.6x the true sky noise, a 20.4 mag afterglow at S/N 10 not detected)", type=int, default=64)
     parser.add_argument("-g", "--gain", help="Override detector gain (epadu, e-/ADU) instead of trusting the FITS GAIN keyword", type=float)
     parser.add_argument("-I", "--noiraf", help="Do not use IRAF: SExtractor magnitudes (fixed aperture with -a)", action='store_true')
     parser.add_argument("-E", "--engine", choices=('auto', 'iraf', 'numpy'), default='auto',
@@ -83,7 +83,7 @@ def do_matrix(file, fwhm):
 #    os.system(f"cat {file}")
 
 
-def call_sextractor(file, fwhm, bg=False, back_size=256, aperture=None, detect=None):
+def call_sextractor(file, fwhm, bg=False, back_size=64, aperture=None, detect=None):
     """send sextractor to a file
     for a completely unknown file, this may better be a two pass process:
     first to find the FWHM, second to have proper sky and convolution settings for that FWHM
@@ -318,7 +318,7 @@ def process_photometry(file: str,
                       target_photometry: bool = True,
                       fwhm_override: Optional[float] = None,
                       gain_override: Optional[float] = None,
-                      back_size: int = 256,
+                      back_size: int = 64,
                       detect: Optional[str] = None,
                       engine: str = 'auto',
                       verbose: bool = False) -> astropy.table.Table:
