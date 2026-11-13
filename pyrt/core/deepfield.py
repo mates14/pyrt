@@ -313,22 +313,80 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
     return out
 
 
-def report(res, deep, trigger=None, top=10):
-    """The text block for the log/notifications."""
+NEAR_BOX = 2.0       # [box radii] a NEW this close to the trigger position is an afterglow candidate
+
+REJECT = {'IN_TEMPLATE': 'in the Pan-STARRS template', 'FAINT': 'too faint in the frames',
+          'ONEFRAME': 'from one frame only (satellite, aircraft, cosmic ray)',
+          'SHARP': 'sharper than a star (pixel defect, cosmic ray)', 'EXTENDED': 'extended (galaxies)',
+          'VARIABLE': 'variable in the frames', 'UNCHECKED': 'not checked in the frames'}
+
+
+def _why(r, conc0):
+    """Plain words for a NEW, with the tests it passed only narrowly."""
+    words = []
+    if np.isfinite(r['SN_FRAMES']):
+        words.append(f"in the frames throughout (S/N {r['SN_FRAMES']:.1f}, at most {100*r['MAX_SHARE']:.0f}% from one)")
+    if np.isfinite(r['DIFF_KEEP']):
+        words.append(f"kept {100*r['DIFF_KEEP']:.0f}% after subtracting Pan-STARRS (S/N {r['DIFF_SN']:.1f})")
+    elif np.isfinite(r['KNOWN_DIST']):
+        words.append(f"no Pan-STARRS/Gaia object within {r['KNOWN_DIST']:.0f}\"")
+    warn = []
+    if np.isfinite(conc0) and np.isfinite(r['CONC']) and r['CONC'] > 0.8 * SHARP_RATIO * conc0:
+        warn.append(f"nearly as sharp as a pixel defect (C {r['CONC']:.2f}, stars {conc0:.2f}, cut {SHARP_RATIO*conc0:.2f})")
+    if np.isfinite(r['DIFF_SN']) and r['DIFF_SN'] < DIFF_SN + 1.5:
+        warn.append(f"only S/N {r['DIFF_SN']:.1f} in the difference image (cut {DIFF_SN:.0f})")
+    if np.isfinite(r['SN_FRAMES']) and r['SN_FRAMES'] < SN_FRAMES + 2:
+        warn.append(f"faint in the frames (S/N {r['SN_FRAMES']:.1f})")
+    return "; ".join(words), warn
+
+
+def report(res, deep, trigger=None, top=10, verbose=False):
+    """The text block for the log/notifications: the verdict, the NEW objects in words, what
+    was rejected and why; verbose: the whole table."""
     lim = deep.meta.get('MAGZERO', np.nan) + deep.meta.get('LIMFLX3', np.nan)
-    lines = ["*** DEEPFIELD START ***",
-             f"deep image: {res.meta['N_OBJECTS']} objects, {res.meta['N_KNOWN']} known, limit {lim:.2f}"
-             + (f", {trigger['name']} box {trigger['errorbox']*60:.2f}'" if trigger is not None and trigger.get('name') else "")]
-    counts = {c: int(np.sum(res['CLASS'] == c)) for c in ('NEW', 'VARIABLE', 'IN_TEMPLATE', 'ONEFRAME', 'SHARP', 'FAINT',
-                                                         'EXTENDED', 'UNCHECKED')}
-    lines.append("candidates: " + ", ".join(f"{v} {k}" for k, v in counts.items() if v))
-    for r in res[:top]:
-        lines.append("%-11s %.5f %+.5f mag %5.2f±%.2f  frames S/N %4.1f chi2 %5.2f max %3.0f%% w/o %4.1f"
-                     "  C %.2f diff S/N %4.1f keep %4.2f  | %5.2f' = %5.2f box%s"
-                     % (r['CLASS'], r['RA'], r['DEC'], r['MAG'], r['MAGERR'], r['SN_FRAMES'], r['CHI2_FRAMES'],
-                        100 * r['MAX_SHARE'] if np.isfinite(r['MAX_SHARE']) else np.nan, r['SN_WO_MAX'],
-                        r['CONC'], r['DIFF_SN'], r['DIFF_KEEP'],
-                        r['DIST'], r['DIST_BOX'],
-                        "" if not np.isfinite(r['KNOWN_DIST']) else "  (known obj. %.1f\")" % r['KNOWN_DIST']))
+    band = str(deep.meta.get('FILTER', '')).replace('Sloan_', '').replace('Sloan-', '') or 'mag'
+    nfr = int(np.max(res['N_FRAMES'])) if len(res) and np.max(res['N_FRAMES']) > 0 else None
+    conc0 = res.meta.get('CONC_STARS', np.nan)
+    lines = ["*** DEEPFIELD START ***"]
+    head = []
+    if trigger is not None and trigger.get('name'):
+        head.append(f"{trigger['name']}, error box {trigger['errorbox']*60:.2f}'")
+    head.append(f"deep {band} image" + (f" of {nfr} frames" if nfr else "") + f", limit {band} = {lim:.2f}")
+    lines.append("; ".join(head))
+    new = res[res['CLASS'] == 'NEW']
+    hasbox = len(res) and np.any(np.isfinite(res['DIST_BOX']))
+    near = new[np.nan_to_num(new['DIST_BOX'], nan=1e9) <= NEAR_BOX] if hasbox else new[:0]
+    far = new[~(np.nan_to_num(new['DIST_BOX'], nan=1e9) <= NEAR_BOX)] if hasbox else new
+    if not hasbox:
+        lines.append(f"VERDICT: {len(new)} new object(s), no trigger position to compare with")
+    elif len(near):
+        lines.append(f"VERDICT: {len(near)} AFTERGLOW CANDIDATE(S) within {NEAR_BOX:.0f} error-box radii")
+    else:
+        lines.append(f"VERDICT: nothing new within {NEAR_BOX:.0f} error-box radii down to {band} = {lim:.2f}")
+    for r in near:
+        why, warn = _why(r, conc0)
+        lines.append(f"  CANDIDATE {r['RA']:.5f} {r['DEC']:+.5f}  {band} = {r['MAG']:.2f} ± {r['MAGERR']:.2f}"
+                     f"  {r['DIST']:.2f}' from the trigger position ({r['DIST_BOX']:.1f} box radii)")
+        lines.append(f"            {why}")
+        for w in warn:
+            lines.append(f"            caution: {w}")
+    if len(far):
+        lines.append("other new objects (further out, unlikely the afterglow):" if hasbox else "new objects:")
+        for r in far[:top]:
+            _, warn = _why(r, conc0)
+            lines.append(f"  {r['RA']:.5f} {r['DEC']:+.5f}  {band} = {r['MAG']:.2f}"
+                         + (f"  {r['DIST']:.1f}' ({r['DIST_BOX']:.1f} box radii)" if hasbox else "")
+                         + ("  [" + "; ".join(warn) + "]" if warn else ""))
+    rej = [f"{res.meta['N_KNOWN']} known (Pan-STARRS/Gaia)"]
+    rej += [f"{int(np.sum(res['CLASS'] == c))} {w}" for c, w in REJECT.items() if np.sum(res['CLASS'] == c)]
+    lines.append("rejected: " + ", ".join(rej))
+    if verbose:
+        lines.append("all candidates (class, position, mag, frames S/N chi2 max-share S/N-without-max, concentration, "
+                     "difference S/N and flux kept, distance):")
+        for r in res:
+            lines.append("  %-11s %.5f %+.5f %5.2f±%.2f  fr %4.1f %5.2f %3.0f%% %4.1f  C %.2f  diff %4.1f %4.2f  %5.2f' %5.2f box"
+                         % (r['CLASS'], r['RA'], r['DEC'], r['MAG'], r['MAGERR'], r['SN_FRAMES'], r['CHI2_FRAMES'],
+                            100 * r['MAX_SHARE'] if np.isfinite(r['MAX_SHARE']) else np.nan, r['SN_WO_MAX'],
+                            r['CONC'], r['DIFF_SN'], r['DIFF_KEEP'], r['DIST'], r['DIST_BOX']))
     lines.append("*** DEEPFIELD END ***")
     return "\n".join(lines)

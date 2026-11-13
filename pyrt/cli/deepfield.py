@@ -77,7 +77,7 @@ def main(argv=None):
         for r in res:
             f.write('circle(%.6f,%.6f,4") # color=%s text={%s %.2f}\n' % (r['RA'], r['DEC'], colour[r['CLASS']],
                                                                        r['CLASS'], r['MAG']))
-    print(deepfield.report(res, deep, trig, top=o.top))
+    print(deepfield.report(res, deep, trig, top=o.top, verbose=o.verbose))
     return 0
 
 
