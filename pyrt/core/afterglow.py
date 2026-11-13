@@ -276,9 +276,16 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
     return res
 
 
+NEAR_LIST = 3.0   # [box radii] candidates this close to the trigger are listed first
+
+
 def report_lines(res, trigger=None, n=10):
+    """The n best candidates as text; those within NEAR_LIST box radii of the trigger come first
+    (230818A at SBT: the afterglow, S=4.4 at 2 box radii, was 11th behind steady catalogue gaps)."""
     out = []
-    for r in res[:n]:
+    near = [i for i in range(len(res)) if np.isfinite(res['DIST_BOX'][i]) and res['DIST_BOX'][i] <= NEAR_LIST]
+    order = near + [i for i in range(len(res)) if i not in near]
+    for r in (res[i] for i in order[:n]):
         trend = ("alpha %+.2f±%.2f (recent %+.2f±%.2f)" % (r['ALPHA'], r['ALPHA_ERR'], r['ALPHA_RECENT'], r['ALPHA_RECENT_ERR'])
                  if np.isfinite(r['ALPHA']) else "%+.2f±%.2f mag/h" % (r['RATE'], r['RATE_ERR']))
         box = (" %.1f' = %.2f box" % (r['DIST'], r['DIST_BOX'])) if np.isfinite(r['DIST']) else ""
