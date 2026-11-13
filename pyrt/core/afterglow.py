@@ -21,7 +21,12 @@ a catalogued star (those are the flare search's business):
   - extrapolated magnitude +5, +15, +60 min after the last point from the power law of the
     recent half in log time (t - T0 >= (t_last - T0)/2; an afterglow is often caught rising or
     flaring); the error adds the disagreement with the whole curve's power law; a rise is held
-    beyond the source's age; without a trigger time a straight line, at most one span ahead,
+    beyond the source's age and brightens at most RISE_CAP; a steady source (no significant
+    variation) is extrapolated as its mean; without a trigger time a straight line, at most one
+    span ahead.  Both fits are kept (about X_REF = log10 of the last point's minutes after T0:
+    slope 2.5 alpha, magnitude there, covariance in alpha and mag) and the extrapolation error's
+    parts (MAG_n_ESTAT, _EDIFF, _ECURV, _ECAP, _EFLOOR, added in quadrature),
+  - frames with the limit CLOUD_DROP above the median are left out,
   - error-box distance (trigger from pyrt.utils.grbinfo), persistence (fraction of frames),
     margin above the detection limit.
 
@@ -44,6 +49,9 @@ MIN_MOVE = 1.0     # [arcsec] a displacement over the span above this: a mover, 
                    # saturation, blends: GRB 210619B at 12 mag "moved" 5.7 sigma = 0.45")
 EXTRAP = (5.0, 15.0, 60.0)  # [min] after the last point
 ALPHA_FLOOR = 0.5  # the least uncertainty of the decay index in an extrapolation
+RISE_CAP = 1.0     # [mag] an extrapolated rise brightens at most this much beyond the fit now
+CLOUD_DROP = 1.0   # [mag] frames this much shallower than the sequence's median limit are left out
+FAR_BOX = 3.0      # [box radii] a steady NEW source further out is ranked down (catalogue gaps)
 
 
 def frame_stats(rec):
@@ -113,9 +121,16 @@ def assess(t_jd, m, s, t0_jd=None):
     r['RATE'], r['RATE_ERR'] = float(p[0]), float(np.sqrt(cov[0, 0]))
     r['ALPHA_RECENT'] = r['ALPHA_RECENT_ERR'] = np.nan
     span = (t_jd[-1] - t_jd[0]) * 1440
+    for k in ('X_REF', 'WHOLE_M', 'WHOLE_CAA', 'WHOLE_CAM', 'WHOLE_CMM',
+              'RECENT_M', 'RECENT_CAA', 'RECENT_CAM', 'RECENT_CMM'):
+        r[k] = np.nan
+    r['FIT_USED'] = ''
+    steady = not r['Z_VAR'] >= Z_VAR
     if t0_jd is not None and np.all(t_jd > t0_jd):
         x = np.log10((t_jd - t0_jd) * 1440)
-        p, cov, _ = _wfit(x, m, s, 1)
+        xl = x[-1]
+        # both fits about the last point: p = (2.5 alpha, magnitude at the last point's time)
+        p, cov, _ = _wfit(x - xl, m, s, 1)
         r['ALPHA'], r['ALPHA_ERR'] = float(p[0] / 2.5), float(np.sqrt(cov[0, 0]) / 2.5)
         if n >= 5 and np.ptp(x) > 0:
             q, qcov, _ = _wfit(x - x.mean(), m, s, 2)
@@ -125,41 +140,64 @@ def assess(t_jd, m, s, t0_jd=None):
         rec = (t_jd - t0_jd) >= (t_jd[-1] - t0_jd) / 2
         if np.sum(rec) < 4:
             rec = np.arange(n) >= n - min(n, 4)
-        pr, covr, _ = _wfit(x[rec], m[rec], s[rec], 1)
+        pr, covr, _ = _wfit(x[rec] - xl, m[rec], s[rec], 1)
         r['ALPHA_RECENT'], r['ALPHA_RECENT_ERR'] = float(pr[0] / 2.5), float(np.sqrt(covr[0, 0]) / 2.5)
+        r['X_REF'] = float(xl)
+        for k, (pp, cc) in (('WHOLE', (p, cov)), ('RECENT', (pr, covr))):
+            r[k + '_M'], r[k + '_CAA'] = float(pp[1]), float(cc[0, 0] / 6.25)
+            r[k + '_CAM'], r[k + '_CMM'] = float(cc[0, 1] / 2.5), float(cc[1, 1])
+        r['FIT_USED'] = 'recent'
         if abs(pr[0]) < 2 * np.sqrt(covr[0, 0]):
             # the recent half says nothing (a faint source's noisy tail): the whole curve's law
             # (GRB 210312B at ~20.5 mag: the tail's -0.4+-0.8 had made a clear fade "RISING")
             pr, covr = p, cov
+            r['FIT_USED'] = 'whole'
+        if steady:
+            r['FIT_USED'] = 'mean'
         age = (t_jd[-1] - t0_jd) * 1440
+        curved = np.isfinite(r['CURV_Z']) and abs(r['CURV_Z']) >= 3
         for dt in EXTRAP:
-            # a rise is not extrapolated beyond the source's age (t_last - T0): held there
-            xx = np.log10(age + (dt if pr[0] >= 0 else min(dt, age)))
-            a_ = np.array([xx, 1.0])
-            mr, mall = float(a_ @ pr), float(a_ @ p)
-            # the error: the recent fit's own, and the disagreement with the whole curve's
-            # (one law for the whole curve is a model, flaring breaks it)
-            err = np.hypot(np.sqrt(a_ @ covr @ a_), mr - mall)
-            if np.isfinite(r['CURV_Z']) and abs(r['CURV_Z']) >= 3:
-                # a curved light curve (a flare's decline, a rise turning over) is about to
-                # change its character: a flattening is as likely as the trend going on
-                # (GRB 180325A: the steep decline after the flare ran into a plateau)
-                err = np.hypot(err, mr - m[-1])
+            e_diff = e_curv = e_cap = 0.0
+            if steady:
+                # steady within the errors (NEW): no power law, the mean goes on
+                mr, e_stat = mean, float(np.sqrt(1 / np.sum(w)))
+            else:
+                # a rise is not extrapolated beyond the source's age (t_last - T0): held there
+                rising = pr[0] < 0
+                a_ = np.array([np.log10(age + (min(dt, age) if rising else dt)) - xl, 1.0])
+                mr, mall = float(a_ @ pr), float(a_ @ p)
+                # the recent fit's own error, and its disagreement with the whole curve's
+                # (one law for the whole curve is a model, flaring breaks it)
+                e_stat, e_diff = float(np.sqrt(a_ @ covr @ a_)), abs(mr - mall)
+                if curved:
+                    # a curved light curve (a flare's decline, a rise turning over) is about to
+                    # change its character: a flattening is as likely as the trend going on
+                    # (GRB 180325A: the steep decline after the flare ran into a plateau)
+                    e_curv = abs(mr - m[-1])
+                if rising and pr[1] - mr > RISE_CAP:
+                    # nor brighter than RISE_CAP above the fit now (EP 260213.832 at D50:
+                    # alpha -5.6 of a cloud-driven "rise" held for a doubling was 4.2 mag)
+                    e_cap = pr[1] - mr - RISE_CAP
+                    mr = float(pr[1] - RISE_CAP)
             # and alpha is not known better than ALPHA_FLOOR a few minutes after a trigger:
             # breaks happen (GRB 250702F steepened after 9 min, unforeseeable before)
-            err = np.hypot(err, 2.5 * ALPHA_FLOOR * (np.log10(age + dt) - x[-1]))
-            r['MAG_%d' % dt] = mr
-            r['MAG_%d_ERR' % dt] = float(err)
+            e_floor = 2.5 * ALPHA_FLOOR * (np.log10(age + dt) - xl)
+            r['MAG_%d' % dt] = float(mr)
+            r['MAG_%d_ERR' % dt] = float(np.sqrt(e_stat**2 + e_diff**2 + e_curv**2 + e_cap**2 + e_floor**2))
+            for k, v in (('STAT', e_stat), ('DIFF', e_diff), ('CURV', e_curv), ('CAP', e_cap), ('FLOOR', e_floor)):
+                r['MAG_%d_E%s' % (dt, k)] = float(v)
     else:
         # no trigger time: a straight line, and not further than the span it was fitted on
         p, cov, _ = _wfit(th, m, s, 1)
         for dt in EXTRAP:
+            for k in ('STAT', 'DIFF', 'CURV', 'CAP', 'FLOOR'):
+                r['MAG_%d_E%s' % (dt, k)] = np.nan
             if dt > span:
                 r['MAG_%d' % dt] = r['MAG_%d_ERR' % dt] = np.nan
                 continue
             a_ = np.array([(t_jd[-1] - t_jd[0]) * 24 + dt / 60, 1.0])
             r['MAG_%d' % dt] = float(a_ @ p)
-            r['MAG_%d_ERR' % dt] = float(np.sqrt(a_ @ cov @ a_))
+            r['MAG_%d_ERR' % dt] = r['MAG_%d_ESTAT' % dt] = float(np.sqrt(a_ @ cov @ a_))
     return r
 
 
@@ -192,6 +230,15 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
     fval = list(frames.values())
     lim_all = np.nanmedian([v[3] for v in fval]) if fval else np.nan
     t0 = trigger['jd0'] if trigger is not None and np.isfinite(trigger.get('jd0', np.nan)) else None
+    # frames much shallower than the rest (clouds, twilight): their calibration and floor come from
+    # a few stars, and a sky error of a faint source is scaled up with the lost transparency
+    # (EP 260213.832 at D50, airmass 3: zeropoint -1.9 mag over the last bins, three faint NEW
+    # objects "rose" 2-3 mag with it)
+    cloudy = np.array([np.isfinite(v[3]) and v[3] < lim_all - CLOUD_DROP for v in fval], dtype=bool)
+    if verbose and np.any(cloudy):
+        print("afterglow: %d of %d frames left out, limit more than %.1f below the median %.2f: %s"
+              % (np.sum(cloudy), len(fval), CLOUD_DROP, lim_all, " ".join("%.2f" % fval[i][3] for i in np.flatnonzero(cloudy))))
+    nframes_ok = max(nframes - int(np.sum(cloudy)), 1)
     rows = []
     for c in cands:
         jd_ = np.asarray(c['JD'], dtype=float)
@@ -202,22 +249,25 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
         catm = np.asarray(c['CATMAG'], dtype=float)
         if np.sum(np.isfinite(catm)) > len(catm) / 2:
             continue                      # a catalogued star: the flare search's
-        if len(c['MAG']) < MIN_FRAC * nframes:
-            continue
         jd, m, e = (np.asarray(c[k], dtype=float) for k in ('JD', 'MAG', 'ERR'))
         cm = np.zeros(len(jd))
         fl = np.zeros(len(jd))
         if len(fjd):
             idx = np.argmin(np.abs(jd[:, None] - fjd[None, :]), axis=1)
+            ok = ~cloudy[idx]
+            jd, m, e, idx = jd[ok], m[ok], e[ok], idx[ok]
             cm = np.array([fval[i][1] for i in idx])
             fl = np.array([fval[i][2] for i in idx])
+        if len(m) < MIN_FRAC * nframes_ok or len(m) < 2:
+            continue
         mc = m + cm                       # E = expect - mag: stars measured c too bright
         s = np.sqrt(np.maximum(e, 0.005)**2 + fl**2)
         r = assess(jd, mc, s, t0)
         o_ = np.argsort(jd)
         spike = passer_by(mc[o_], s[o_], r['Z_VAR'])
         r['RA'], r['DEC'] = float(np.mean(c['RA'])), float(np.mean(c['DEC']))
-        r['FRAC'] = len(m) / nframes
+        r['FRAC'] = len(m) / nframes_ok
+        r['N_CLOUDY'] = int(np.sum(cloudy))
         r['MOTION'] = float(c['MOTION'])
         r['SHIFT'] = float(shift)
         r['MARGIN'] = float(lim_all - r['MAG_MEAN']) if np.isfinite(lim_all) else np.nan
@@ -264,6 +314,8 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
             sc += 2.5 if r['DIST_BOX'] <= 1 else (1.0 if r['DIST_BOX'] <= 2 else 0.0)
         sc += 2 * (r['FRAC'] - MIN_FRAC) / (1 - MIN_FRAC)
         sc += 1.5 if cls in ('FADING', 'RISING', 'TURNING') else (-1.0 if cls in ('ERRATIC', 'SPIKE') else 0.0)
+        if cls == 'NEW' and np.isfinite(r['DIST_BOX']) and r['DIST_BOX'] > FAR_BOX:
+            sc -= 3.0     # steady and far from the trigger: a catalogue gap or a saturated star (230818A at SBT)
         r['S'] = float(sc)
         rows.append(r)
     if not rows:
