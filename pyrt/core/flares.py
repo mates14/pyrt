@@ -65,6 +65,7 @@ from pyrt.utils.grbinfo import errorbox_distance
 
 DWARF_H = 13.0       # reduced proper motion above which a star is (most likely) a dwarf
 RED_X = 0.3          # colour extrapolation [mag] above which a star counts as "red"
+CLOUD_DROP = 1.0     # [mag] frames whose limit is this much below the median are left out
 MIN_FIELD = 10       # stars needed for the field normalisation
 NEIGHBOURS = 40      # stars of similar magnitude for the local normalisation
 PRIOR_INBOX, PRIOR_DWARF, PRIOR_RED = 1.0, 1.0, 0.5
@@ -228,6 +229,18 @@ def flare_search(rec, trigger=None, red_margin=0.05, flare_sig=5.0, window=None,
        the frame limit LIM (column LIM, optional), depth_prior for red stars.
        Returns an astropy Table, one row per star, sorted most interesting first."""
     rec = astropy.table.Table(rec, copy=True)
+    if len(rec) and 'LIM' in rec.colnames:
+        # frames much shallower than the rest (clouds, twilight): left out, as in the afterglow
+        # search (GRB 261113.604 at D50: the first bin under cloud, limit 17.0 against 20.9,
+        # a 15.9 mag field star measured 1.3 mag "brighter" in it made a FLARE)
+        fl = {fr: float(np.nanmedian(rec['LIM'][rec['FRAME'] == fr])) for fr in np.unique(rec['FRAME'])}
+        lim_all = np.nanmedian(list(fl.values()))
+        cloudy = [fr for fr, v in fl.items() if np.isfinite(v) and v < lim_all - CLOUD_DROP]
+        if cloudy:
+            if verbose:
+                print("flares: %d of %d frames left out, limit more than %.1f below the median %.2f"
+                      % (len(cloudy), len(fl), CLOUD_DROP, lim_all))
+            rec = rec[~np.isin(rec['FRAME'], cloudy)]
     nframes = len(np.unique(rec['FRAME'])) if len(rec) else 0
     if len(rec) == 0:
         return None
