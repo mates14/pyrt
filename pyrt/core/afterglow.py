@@ -59,22 +59,52 @@ FAR_BOX = 3.0      # [box radii] a steady NEW source further out is ranked down 
 
 def frame_stats(rec):
     """{frame: (jd, common mode, floor, limit)} from the flare search's field-star records
-    (transients.py flare_rec as a table: FRAME, JD, MAG, ERR, EXPECT, LIM)."""
-    from pyrt.core.flares import _floor
-    out = {}
-    for fr in np.unique(rec['FRAME']):
-        m = rec['FRAME'] == fr
-        e = np.asarray(rec['EXPECT'][m] - rec['MAG'][m], dtype=float)
-        err = np.asarray(rec['ERR'][m], dtype=float)
-        fin = np.isfinite(e) & np.isfinite(err)
-        if not np.any(fin):
+    (transients.py flare_rec as a table: FRAME, JD, MAG, ERR, EXPECT, LIM, CATRA, CATDEC).
+
+    The floor is the frame-to-frame repeatability beyond the errors, what a light curve sees:
+    each star's residual from its own median over the frames (a catalogue or colour error is
+    constant per star and drops out), scaled to unit robust width.  The step's pooled value
+    applies to every frame, a frame with MIN_FIELD stars of its own gets more if they show
+    more; NaN where not even the pool has MIN_FIELD stars.  (It was the scatter about the
+    catalogue prediction, per frame and 0 below MIN_FIELD stars: 0 on most D50 frames of
+    180325A/250702F with 6-9 bright stars, 0.04-0.07 on the few with 10, while the repeatability
+    shows the errors already cover the scatter there.)"""
+    from pyrt.core.flares import _floor, MIN_FIELD
+    fr_all = np.asarray(rec['FRAME'], dtype=int)
+    E = np.asarray(rec['EXPECT'] - rec['MAG'], dtype=float)
+    err = np.asarray(rec['ERR'], dtype=float)
+    fin = np.isfinite(E) & np.isfinite(err)
+    cms, okf, jds, lims = {}, np.zeros(len(E), bool), {}, {}
+    for fr in np.unique(fr_all):
+        m = fr_all == fr
+        if not np.any(fin & m):
             continue
-        cut = max(0.05, float(np.percentile(err[fin], 20)))
-        ok = fin & (err < cut)
-        cm = float(np.median(e[ok])) if np.sum(ok) >= 3 else 0.0
-        s = _floor(e - cm, err, ok)
-        lim = float(np.median(rec['LIM'][m])) if 'LIM' in rec.colnames else np.nan
-        out[int(fr)] = (float(np.median(rec['JD'][m])), cm, s, lim)
+        cut = max(0.05, float(np.percentile(err[fin & m], 20)))
+        ok = fin & m & (err < cut)
+        cms[int(fr)] = float(np.median(E[ok])) if np.sum(ok) >= 3 else 0.0
+        okf |= ok
+        jds[int(fr)] = float(np.median(rec['JD'][m]))
+        lims[int(fr)] = float(np.median(rec['LIM'][m])) if 'LIM' in rec.colnames else np.nan
+    # the same catalogue star in every frame has identical catalogue coordinates
+    key = np.round(np.asarray(rec['CATRA'], dtype=float) * 3.6e5) * 1e9 + np.round(np.asarray(rec['CATDEC'], dtype=float) * 3.6e5)
+    _, star = np.unique(key, return_inverse=True)
+    use = fin & np.isin(fr_all, list(cms))
+    Ec = E - np.array([cms.get(int(f), 0.0) for f in fr_all])
+    D = np.full(len(E), np.nan)
+    for i in np.unique(star[use]):
+        m = use & (star == i)
+        n = np.sum(m)
+        if n >= 4:
+            D[m] = (Ec[m] - np.median(Ec[m])) * np.sqrt(n / (n - 1))
+    good = okf & np.isfinite(D)
+    pooled = _floor(D, err, good) if np.sum(good) >= MIN_FIELD else np.nan
+    out = {}
+    for fr in cms:
+        g = good & (fr_all == fr)
+        s = pooled
+        if np.sum(g) >= MIN_FIELD:
+            s = max(_floor(D, err, g), s) if np.isfinite(s) else _floor(D, err, g)
+        out[fr] = (jds[fr], cms[fr], float(s), lims[fr])
     return out
 
 
@@ -125,15 +155,17 @@ def assess(t_jd, m, s, t0_jd=None):
     r['ALPHA_RECENT'] = r['ALPHA_RECENT_ERR'] = np.nan
     span = (t_jd[-1] - t_jd[0]) * 1440
     for k in ('X_REF', 'WHOLE_M', 'WHOLE_CAA', 'WHOLE_CAM', 'WHOLE_CMM',
-              'RECENT_M', 'RECENT_CAA', 'RECENT_CAM', 'RECENT_CMM'):
+              'RECENT_M', 'RECENT_CAA', 'RECENT_CAM', 'RECENT_CMM', 'WHOLE_CHI2', 'RECENT_CHI2'):
         r[k] = np.nan
+    for k in ('WHOLE_NDF', 'RECENT_NDF'):
+        r[k] = -1
     r['FIT_USED'] = ''
     steady = not r['Z_VAR'] >= Z_VAR
     if t0_jd is not None and np.all(t_jd > t0_jd):
         x = np.log10((t_jd - t0_jd) * 1440)
         xl = x[-1]
         # both fits about the last point: p = (2.5 alpha, magnitude at the last point's time)
-        p, cov, _ = _wfit(x - xl, m, s, 1)
+        p, cov, chi2w = _wfit(x - xl, m, s, 1)
         r['ALPHA'], r['ALPHA_ERR'] = float(p[0] / 2.5), float(np.sqrt(cov[0, 0]) / 2.5)
         if n >= 5 and np.ptp(x) > 0:
             q, qcov, _ = _wfit(x - x.mean(), m, s, 2)
@@ -143,9 +175,11 @@ def assess(t_jd, m, s, t0_jd=None):
         rec = (t_jd - t0_jd) >= (t_jd[-1] - t0_jd) / 2
         if np.sum(rec) < 4:
             rec = np.arange(n) >= n - min(n, 4)
-        pr, covr, _ = _wfit(x[rec] - xl, m[rec], s[rec], 1)
+        pr, covr, chi2r = _wfit(x[rec] - xl, m[rec], s[rec], 1)
         r['ALPHA_RECENT'], r['ALPHA_RECENT_ERR'] = float(pr[0] / 2.5), float(np.sqrt(covr[0, 0]) / 2.5)
         r['X_REF'] = float(xl)
+        r['WHOLE_CHI2'], r['WHOLE_NDF'] = float(chi2w), n - 2
+        r['RECENT_CHI2'], r['RECENT_NDF'] = float(chi2r), int(np.sum(rec)) - 2
         for k, (pp, cc) in (('WHOLE', (p, cov)), ('RECENT', (pr, covr))):
             r[k + '_M'], r[k + '_CAA'] = float(pp[1]), float(cc[0, 0] / 6.25)
             r[k + '_CAM'], r[k + '_CMM'] = float(cc[0, 1] / 2.5), float(cc[1, 1])
@@ -260,7 +294,7 @@ def afterglow_search(cands, frames, nframes, trigger=None, verbose=False):
             ok = ~cloudy[idx]
             jd, m, e, idx = jd[ok], m[ok], e[ok], idx[ok]
             cm = np.array([fval[i][1] for i in idx])
-            fl = np.array([fval[i][2] for i in idx])
+            fl = np.nan_to_num(np.array([fval[i][2] for i in idx]))  # floor unknown: the errors alone
         if len(m) < MIN_FRAC * nframes_ok or len(m) < 2:
             continue
         mc = m + cm                       # E = expect - mag: stars measured c too bright
