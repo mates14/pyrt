@@ -42,8 +42,11 @@ CHI2_CONST = 3.0     # chi2/ndf of the frame fluxes above this: VARIABLE
 REF_MAG = (13.0, 17.5)
 SHARP_RATIO = 1.5    # concentration (flux in 1 px / in the aperture) above this times the stars': SHARP
 SHARP_SIG = 2.0      # ... and the core this many sigma above a star's of the same flux
-DIFF_SN = 5.0        # a NEW in the difference image at least at this S/N ...
-DIFF_KEEP = 0.5      # ... and with at least this fraction of its deep flux, else IN_TEMPLATE
+DIFF_SN = 3.0        # a source in the template counts as NEW only if this significant in the difference ...
+DIFF_KEEP = 0.5      # ... and keeping this fraction of its deep flux (brighter than in Pan-STARRS)
+DIFF_WARN = 5.0      # below this S/N in the difference image: a caution
+TEMPLATE_FRAC = 0.5  # the Pan-STARRS master holding this fraction of the deep flux: IN_TEMPLATE
+MASKED = 0.1         # more of the aperture than this masked by hotpants: the difference image not used
 CHIP_Z = 3.0         # sky- minus chip-registered core flux below -CHIP_Z sigma: a DEFECT (stays on the chip)
 CHIP_DRIFT = 2.5     # [px] the frames' drift on the chip needed for that test
 CHIP_REL = 0.6       # frames at least this transparent are used for it
@@ -227,6 +230,42 @@ def chip_or_sky(frames, ra, dec, rel, h=7):
     return z, drift
 
 
+def template_frac(template, ra, dec, mag, ape_arcsec):
+    """The Pan-STARRS master (ps1mosaic: counts/s, AB zero point PS1ZP) measured at each position in
+    the deep image's own aperture: the fraction of the deep flux that is there (from MAG, in the
+    catalogue's PS1-like system) and its S/N against random apertures (the stack's noise is
+    correlated).  The master is much deeper than a coadd, but a faint galaxy is spread: in a 2"
+    aperture it was 'nothing', in the 4.5" one it had the deep magnitude (GRB 261113.604 in g,
+    three such; the afterglow had nothing at any aperture)."""
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    from astropy.wcs.utils import proj_plane_pixel_scales
+    from pyrt.core.aperphot import phot
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        h = fits.getheader(template)
+        w = WCS(h)
+        x, y = w.all_world2pix(np.c_[ra, dec], 1).T
+        T = fits.getdata(template).astype(float)
+    ape = ape_arcsec / (float(np.mean(proj_plane_pixel_scales(w.celestial))) * 3600)
+    m = 4 * ape
+    inside = (x > m) & (y > m) & (x < T.shape[1] - m) & (y < T.shape[0] - m)
+    frac, sn = np.full(len(ra), np.nan), np.full(len(ra), np.nan)
+    if not np.any(inside):
+        return frac, sn
+    f = np.asarray(phot(T, x[inside], y[inside], ape, 3 * ape, 2 * ape, epadu=1e9)['FLUX'], float)
+    rng = np.random.default_rng(1)
+    lo_x, hi_x = max(m, np.min(x[inside]) - 200), min(T.shape[1] - m, np.max(x[inside]) + 200)
+    lo_y, hi_y = max(m, np.min(y[inside]) - 200), min(T.shape[0] - m, np.max(y[inside]) + 200)
+    q = np.asarray(phot(T, rng.uniform(lo_x, hi_x, NRAND), rng.uniform(lo_y, hi_y, NRAND), ape, 3 * ape, 2 * ape,
+                        epadu=1e9)['FLUX'], float)
+    q = q[np.isfinite(q)]
+    noise = 1.4826 * np.median(np.abs(q - np.median(q))) if len(q) > 20 else np.nan
+    expect = 10**(-0.4 * (np.asarray(mag, float)[inside] - h.get('PS1ZP', 25.0)))
+    frac[inside], sn[inside] = f / expect, f / noise
+    return frac, sn
+
+
 def image_checks(image, ra, dec, ref_ra, ref_dec, ape, diff=None):
     """On the deep image: the concentration C = flux(r = 1 px) / flux(aperture) of each position
     and of the reference stars (a hot pixel left by the dark or a cosmic ray is much sharper than
@@ -258,14 +297,17 @@ def image_checks(image, ra, dec, ref_ra, ref_dec, ape, diff=None):
             warnings.simplefilter('ignore')
             S = fits.getdata(diff).astype(float)
         fs = np.asarray(phot(S, x[n:], y[n:], ape, 3 * ape, 2 * ape, epadu=1e9)['FLUX'], float)
+        # hotpants fills what it masks with ~1e-30: the fraction of each aperture in the mask
+        mk = (np.abs(S) < 1e-20).astype(float)
+        fm = np.asarray(phot(mk, x[n:], y[n:], ape, 3 * ape, 2 * ape, epadu=1e9)['SUM'], float) / (np.pi * ape**2)
         es = _aperture_noise(S, ape)
         with np.errstate(invalid='ignore', divide='ignore'):
-            out['DIFF_SN'] = fs / es
-            out['DIFF_KEEP'] = fs / fb[n:]
+            out['DIFF_SN'] = np.where(fm > MASKED, np.nan, fs / es)
+            out['DIFF_KEEP'] = np.where(fm > MASKED, np.nan, fs / fb[n:])
     return out, c0
 
 
-def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None, verbose=False):
+def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None, template=None, verbose=False):
     """deep: the coadd's calibrated catalogue (phcat + cat2det + dophot ECSV); frames: the FITS
     frames it was made of (their own WCS); trigger: grbinfo record or None; known: known_sources()
     output or None (then no match: everything is a candidate); image: the deep FITS (the
@@ -302,8 +344,19 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
         out[k] = np.full(len(cand), np.nan)
     out['N_3SIG'] = np.zeros(len(cand), int)
     out['N_FRAMES'] = np.zeros(len(cand), int)
-    for k in ('CONC', 'CORE_SIG', 'DIFF_SN', 'DIFF_KEEP', 'CHIP_Z'):
+    for k in ('CONC', 'CORE_SIG', 'DIFF_SN', 'DIFF_KEEP', 'CHIP_Z', 'TEMPLATE_FRAC', 'TEMPLATE_SN'):
         out[k] = np.full(len(cand), np.nan)
+    if template is not None and len(cand):
+        sc = deep.meta.get('PIXEL') or deep.meta.get('PIXSCALE')
+        if not sc:
+            from astropy.wcs import WCS
+            from astropy.wcs.utils import proj_plane_pixel_scales
+            try:
+                sc = float(np.mean(proj_plane_pixel_scales(WCS(deep.meta).celestial))) * 3600
+            except Exception:
+                sc = 1.0
+        tf, ts = template_frac(template, ra[cand], de[cand], mag[cand], float(deep.meta.get('APERTURE', 2 * fwhm0)) * float(sc))
+        out['TEMPLATE_FRAC'], out['TEMPLATE_SN'] = tf, ts
     chip_drift = 0.0
     ref = np.flatnonzero(isknown & (mag > REF_MAG[0]) & (mag < REF_MAG[1]) & ~extended & (np.asarray(deep['FLAGS']) == 0
                          if 'FLAGS' in deep.colnames else True))
@@ -353,7 +406,7 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
             cls.append('FAINT')
         elif r['SN_WO_MAX'] < SN_FRAMES:
             cls.append('ONEFRAME')
-        elif np.isfinite(r['DIFF_SN']) and not (r['DIFF_SN'] >= DIFF_SN and r['DIFF_KEEP'] >= DIFF_KEEP):
+        elif _in_template(r):
             cls.append('IN_TEMPLATE')
         elif r['CHI2_FRAMES'] > CHI2_CONST:
             cls.append('VARIABLE')
@@ -381,11 +434,24 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
 
 NEAR_BOX = 2.0       # [box radii] a NEW this close to the trigger position is an afterglow candidate
 
-REJECT = {'IN_TEMPLATE': 'in the Pan-STARRS template', 'FAINT': 'too faint in the frames',
+REJECT = {'IN_TEMPLATE': 'in the Pan-STARRS image', 'FAINT': 'too faint in the frames',
           'ONEFRAME': 'from one frame only (satellite, aircraft, cosmic ray)',
           'SHARP': 'sharper than a star (pixel defect, cosmic ray)',
           'DEFECT': 'staying on the chip, not on the sky (coadded bad pixels)', 'EXTENDED': 'extended (galaxies)',
           'VARIABLE': 'variable in the frames', 'UNCHECKED': 'not checked in the frames'}
+
+
+def _in_template(r):
+    """In the template and not (significantly) brighter now.  With the master measured, that
+    decides; otherwise the difference image alone: a source removed (keeps < DIFF_KEEP) while
+    measurably so."""
+    brighter = np.isfinite(r['DIFF_SN']) and r['DIFF_SN'] >= DIFF_SN and r['DIFF_KEEP'] >= DIFF_KEEP
+    if np.isfinite(r['TEMPLATE_FRAC']):
+        return r['TEMPLATE_FRAC'] >= TEMPLATE_FRAC and not brighter
+    if np.isfinite(r['DIFF_SN']) and np.isfinite(r['DIFF_KEEP']) and r['DIFF_KEEP'] < DIFF_KEEP:
+        err = r['DIFF_KEEP'] / r['DIFF_SN'] if r['DIFF_SN'] != 0 else np.inf
+        return r['DIFF_KEEP'] + 2 * abs(err) < 1
+    return False
 
 
 def _why(r, conc0, drift=0.0):
@@ -395,8 +461,12 @@ def _why(r, conc0, drift=0.0):
         words.append(f"follows the sky, not the chip ({r['CHIP_Z']:+.1f} sigma over a {drift:.1f} px drift)")
     if np.isfinite(r['SN_FRAMES']):
         words.append(f"in the frames throughout (S/N {r['SN_FRAMES']:.1f}, at most {100*r['MAX_SHARE']:.0f}% from one)")
+    if np.isfinite(r['TEMPLATE_FRAC']):
+        words.append(f"Pan-STARRS image has {100*max(r['TEMPLATE_FRAC'], 0):.0f}% of its flux (S/N {r['TEMPLATE_SN']:.1f})"
+                     if r['TEMPLATE_FRAC'] < TEMPLATE_FRAC else
+                     f"brighter than in Pan-STARRS (which has {100*r['TEMPLATE_FRAC']:.0f}% of it)")
     if np.isfinite(r['DIFF_KEEP']):
-        words.append(f"kept {100*r['DIFF_KEEP']:.0f}% after subtracting Pan-STARRS (S/N {r['DIFF_SN']:.1f})")
+        words.append(f"kept {100*r['DIFF_KEEP']:.0f}% after subtracting it (S/N {r['DIFF_SN']:.1f})")
     elif np.isfinite(r['KNOWN_DIST']):
         words.append(f"no Pan-STARRS/Gaia object within {r['KNOWN_DIST']:.0f}\"")
     warn = []
@@ -406,8 +476,8 @@ def _why(r, conc0, drift=0.0):
         warn.append(f"undecided whether on the sky or on the chip ({r['CHIP_Z']:+.1f} sigma)")
     if np.isfinite(conc0) and np.isfinite(r['CONC']) and r['CONC'] > 0.8 * SHARP_RATIO * conc0:
         warn.append(f"nearly as sharp as a pixel defect (C {r['CONC']:.2f}, stars {conc0:.2f}, cut {SHARP_RATIO*conc0:.2f})")
-    if np.isfinite(r['DIFF_SN']) and r['DIFF_SN'] < DIFF_SN + 1.5:
-        warn.append(f"only S/N {r['DIFF_SN']:.1f} in the difference image (cut {DIFF_SN:.0f})")
+    if np.isfinite(r['DIFF_SN']) and r['DIFF_SN'] < DIFF_WARN:
+        warn.append(f"only S/N {r['DIFF_SN']:.1f} in the difference image")
     if np.isfinite(r['SN_FRAMES']) and r['SN_FRAMES'] < SN_FRAMES + 2:
         warn.append(f"faint in the frames (S/N {r['SN_FRAMES']:.1f})")
     return "; ".join(words), warn

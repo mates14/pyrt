@@ -23,6 +23,8 @@ def main(argv=None):
     ap.add_argument('--frames', nargs='+', default=[], help="the frames the deep image was combined from")
     ap.add_argument('--image', help="the deep FITS image (default: the catalogue's name with .fits)")
     ap.add_argument('--diff', help="its difference against a template (FITS, the deep image's grid)")
+    ap.add_argument('--template', help="the Pan-STARRS master for the 'is anything there' test (default: "
+                    "~/ps1-templates/{target}-{band}.fits when it exists)")
     ap.add_argument('--subtract', action='store_true',
                     help="make the difference against the Pan-STARRS template (pyrt-galaxy-phcat's subtraction) -> *-diff.fits")
     ap.add_argument('--no-online', action='store_true', help="no Pan-STARRS/Gaia query: every object is a candidate")
@@ -64,8 +66,16 @@ def main(argv=None):
         if not prepare_and_subtract(image, diff):
             print("deepfield: WARNING the subtraction failed, no difference-image test")
             diff = None
+    template = o.template
+    if template is None:
+        band = str(deep.meta.get('FILTER', '')).replace('Sloan_', '').replace('Sloan-', '').strip()
+        tgt = deep.meta.get('TARGET')
+        cand_t = os.path.expanduser(f"~/ps1-templates/{int(tgt):05d}-{band}.fits") if tgt is not None and band else None
+        template = cand_t if cand_t and os.path.exists(cand_t) else None
+    if o.verbose:
+        print(f"deepfield: Pan-STARRS master {template}" if template else "deepfield: no Pan-STARRS master")
     res = deepfield.deep_search(deep, frames=o.frames, trigger=trig, known=known, image=image, diff=diff,
-                                verbose=o.verbose)
+                                template=template, verbose=o.verbose)
     res.write(o.output, format='ascii.ecsv', overwrite=True)
     colour = {'NEW': 'green', 'VARIABLE': 'yellow', 'ONEFRAME': 'red', 'FAINT': 'white', 'EXTENDED': 'cyan',
               'UNCHECKED': 'magenta', 'SHARP': 'red', 'IN_TEMPLATE': 'blue', 'DEFECT': 'red'}
