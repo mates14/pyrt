@@ -25,7 +25,8 @@ and the rest is checked in the frames the coadd was made of:
 Classes, best first: NEW (in the frames throughout, consistent with constant, kept in the
 difference image), VARIABLE (in the frames, but not constant), IN_TEMPLATE (removed by the
 subtraction, or too faint there), FAINT (below S/N 3 in the frames together), ONEFRAME
-(artefact of one frame), SHARP (pixel defect, cosmic ray), EXTENDED; candidates within the
+(artefact of one frame), SHARP (pixel defect, cosmic ray), EXTENDED, MOVING (centroid shifts
+between the first and second half of the frames), MINOR_PLANET (on a SkyBoT track); candidates within the
 error box first, then by distance in box radii and S/N."""
 
 import os
@@ -35,7 +36,12 @@ import numpy as np
 import astropy.table
 
 MIN_DET = 3          # Pan-STARRS objects with fewer detections are mostly single-epoch junk
-MATCH = 2.0          # [arcsec] a deep source this close to a known object is that object
+MATCH = 2.0          # [arcsec] a deep source this close to a known object is that object ...
+SSO_MATCH = 10.0     # [arcsec] a candidate this close to a known minor planet's track (SkyBoT) is it
+MOVE_PX = 1.0        # [px] centroid shift between the first and the second half of the frames ...
+MOVE_SIG = 4.0       # ... at this significance, and not the chip's drift: a moving object (an unknown minor planet)
+MOVE_FLOOR = 0.3     # [px] registration error of the half stacks
+MATCH_FWHM = 0.5     # ... or within this many stars' FWHM, if more (centroids scatter with the seeing)
 EXT_FWHM = 1.8       # FWHM above this times the stars' median: extended
 SN_FRAMES = 3.0      # S/N of the frames together (and without the best one) to be "in the frames"
 CHI2_CONST = 3.0     # chi2/ndf of the frame fluxes above this: VARIABLE
@@ -56,6 +62,58 @@ NRAND = 400          # random apertures for the empirical noise of an image (cor
 def _sep(ra1, de1, ra2, de2):
     """[arcsec], small angles"""
     return np.hypot((ra1 - ra2) * np.cos(np.radians(de1)), de1 - de2) * 3600
+
+
+def minor_planets(ra, dec, radius, jd, cache=None, location='500', verbose=False):
+    """The known minor planets and comets in the field at the time jd (IMCCE SkyBoT; location: the
+    MPC observatory code, D50 557): table NAME, RA, DEC, RATE_RA, RATE_DEC ["/h, RA*cos(dec)], V.
+    cache: an ECSV file reused for the same field and time."""
+    if cache and os.path.exists(cache):
+        t = astropy.table.Table.read(cache, format='ascii.ecsv')
+        m = t.meta
+        if (abs(m.get('JD', 0) - jd) < 1e-3 and _sep(m.get('RA', np.nan), m.get('DEC', np.nan), ra, dec) / 3600 + radius
+                <= m.get('RADIUS', -1)):
+            return t
+    try:
+        from astroquery.imcce import Skybot
+        from astropy.coordinates import SkyCoord
+        from astropy.time import Time
+        import astropy.units as u
+        r = Skybot.cone_search(SkyCoord(ra, dec, unit='deg'), radius * u.deg, Time(jd, format='jd'), location=location)
+        val = lambda c, unit=None: np.array([float(getattr(v, 'value', v)) for v in (r[c].to(unit) if unit else r[c])])
+        t = astropy.table.Table([np.asarray(r['Name']).astype(str), val('RA'), val('DEC'),
+                                 val('RA_rate', u.arcsec / u.h), val('DEC_rate', u.arcsec / u.h), val('V')],
+                                names=('NAME', 'RA', 'DEC', 'RATE_RA', 'RATE_DEC', 'V'))
+    except Exception as e:
+        if 'No solar system object' in str(e) or 'empty' in str(e).lower():
+            t = astropy.table.Table(names=('NAME', 'RA', 'DEC', 'RATE_RA', 'RATE_DEC', 'V'), dtype=(str, float, float, float, float, float))
+        else:
+            print(f"deepfield: WARNING SkyBoT query failed: {e}")
+            return None
+    t.meta.update(RA=float(ra), DEC=float(dec), RADIUS=float(radius), JD=float(jd))
+    if verbose:
+        print(f"deepfield: SkyBoT: {len(t)} known minor planets/comets in the field" +
+              (", " + ", ".join(f"{n} V={v:.1f}" for n, v in zip(t['NAME'], t['V']) if v < 21) if len(t) else ""))
+    if cache:
+        t.write(cache, format='ascii.ecsv', overwrite=True)
+    return t
+
+
+def _sso_match(sso, ra, dec, hours):
+    """Name of the known minor planet whose track over the stack (hours long, centred at the
+    query time) passes within SSO_MATCH of each (ra, dec), or ''."""
+    out = np.full(len(ra), '', dtype=object)
+    if sso is None or not len(sso):
+        return out
+    c = np.cos(np.radians(np.asarray(dec, float)))
+    for s in sso:
+        tt = np.linspace(-hours / 2, hours / 2, 21)
+        tr = s['RA'] + tt * s['RATE_RA'] / 3600 / np.cos(np.radians(s['DEC']))
+        td = s['DEC'] + tt * s['RATE_DEC'] / 3600
+        d = np.min(np.hypot((np.asarray(ra, float)[:, None] - tr[None]) * c[:, None],
+                            np.asarray(dec, float)[:, None] - td[None]), axis=1) * 3600
+        out[(d < SSO_MATCH) & (out == '')] = s['NAME']
+    return out
 
 
 def known_sources(ra, dec, radius, cache=None, verbose=False):
@@ -195,8 +253,9 @@ def chip_or_sky(frames, ra, dec, rel, h=7):
     from scipy.ndimage import shift as nshift
     use = [f for f, r in zip(frames, rel) if np.isfinite(r) and r >= CHIP_REL]
     z = np.full(len(ra), np.nan)
+    mv, mvs = np.full(len(ra), np.nan), np.full(len(ra), np.nan)
     if len(use) < 4 or not len(ra):
-        return z, 0.0
+        return z, 0.0, mv, mvs
     P, imgs = [], []
     for f in use:
         with warnings.catch_warnings():
@@ -210,7 +269,7 @@ def chip_or_sky(frames, ra, dec, rel, h=7):
     core, ring = rr <= 1.5, (rr > 4) & (rr <= h)
     for k in range(len(ra)):
         q = np.round(np.median(P[:, k], axis=0)).astype(int)
-        S, C = [], []
+        S, C, used = [], [], []
         for i, img in enumerate(imgs):
             x, y = P[i, k]
             ix, iy = int(np.floor(x)), int(np.floor(y))
@@ -219,15 +278,45 @@ def chip_or_sky(frames, ra, dec, rel, h=7):
             if b.shape != (2 * h + 3, 2 * h + 3) or cb.shape != (2 * h + 1, 2 * h + 1) or min(iy - h - 1, ix - h - 1, q[0] - h, q[1] - h) < 0:
                 continue
             sb = nshift(b, (-(y - iy), -(x - ix)), order=1)[1:-1, 1:-1]
+            used.append(i)
             S.append(sb - np.median(sb[ring]))
             C.append(cb - np.median(cb[ring]))
         if len(S) < 4:
             continue
+        v, e = _halves_shift(S, core | (rr <= 3), ring)
+        Pk = P[used, k]
+        n2 = len(Pk) // 2
+        chip = -(Pk[n2:].mean(axis=0) - Pk[:n2].mean(axis=0))   # a pixel fixed on the chip shifts so
+        mv[k] = float(np.hypot(*v))
+        # significant, and not the chip drift (a coadded bad pixel moves like that in sky stacks)
+        mvs[k] = min(mv[k], float(np.hypot(*(v - chip)))) / e if e > 0 else np.nan
         S, C = np.mean(S, axis=0), np.mean(C, axis=0)
         bg = np.r_[S[ring], C[ring]]
         e = np.sqrt(core.sum()) * 1.4826 * np.median(np.abs(bg - np.median(bg)))
         z[k] = (S[core].sum() - C[core].sum()) / e if e > 0 else np.nan
-    return z, drift
+    return z, drift, mv, mvs
+
+
+def _halves_shift(S, cen, ring):
+    """Centroid shift (dx, dy) [px] between the sky-registered stacks of the first and the second
+    half of the frames (in time order) and its error (with MOVE_FLOOR for the registration): a
+    minor planet moves, a star does not."""
+    n = len(S) // 2
+    yy, xx = np.mgrid[:S[0].shape[0], :S[0].shape[1]]
+    c, sig = [], []
+    for part in (S[:n], S[n:]):
+        a = np.mean(part, axis=0)
+        bg = a[ring]
+        noise = 1.4826 * np.median(np.abs(bg - np.median(bg)))
+        w = np.clip(a, 0, None) * cen
+        f = w.sum()
+        if f <= 0 or noise <= 0:
+            return np.array([np.nan, np.nan]), np.nan
+        x, y = (w * xx).sum() / f, (w * yy).sum() / f
+        m2 = np.sqrt(max((w * ((xx - x) ** 2 + (yy - y) ** 2)).sum() / f / 2, 0.25))
+        sig.append(m2 * noise * np.sqrt(cen.sum()) / f)      # centroid error ~ size / (S/N)
+        c.append((x, y))
+    return np.array([c[1][0] - c[0][0], c[1][1] - c[0][1]]), float(np.hypot(np.hypot(*sig), MOVE_FLOOR))
 
 
 def template_frac(template, ra, dec, mag, ape_arcsec):
@@ -307,12 +396,27 @@ def image_checks(image, ra, dec, ref_ra, ref_dec, ape, diff=None):
     return out, c0
 
 
-def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None, template=None, verbose=False):
+def _pixscale(deep):
+    """The deep image's pixel scale [arcsec]: its PIXEL/PIXSCALE keyword, or from its WCS"""
+    sc = deep.meta.get('PIXEL') or deep.meta.get('PIXSCALE')
+    if sc:
+        return float(sc)
+    from astropy.wcs import WCS
+    from astropy.wcs.utils import proj_plane_pixel_scales
+    try:
+        return float(np.mean(proj_plane_pixel_scales(WCS(deep.meta).celestial))) * 3600
+    except Exception:
+        return 1.0
+
+
+def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None, template=None, sso=None,
+                verbose=False):
     """deep: the coadd's calibrated catalogue (phcat + cat2det + dophot ECSV); frames: the FITS
     frames it was made of (their own WCS); trigger: grbinfo record or None; known: known_sources()
     output or None (then no match: everything is a candidate); image: the deep FITS (the
     sharpness test); diff: its difference against a template (galaxy_phcat.prepare_and_subtract).
-    Returns an astropy Table of the candidates, best first."""
+    sso: minor_planets() output or None.  Returns an astropy Table of the candidates, best first."""
+    frames = sorted(frames, key=os.path.basename)    # time order (the names start with it)
     ra = np.asarray(deep['ALPHA_J2000'], float)
     de = np.asarray(deep['DELTA_J2000'], float)
     mag = np.asarray(deep['MAG_CALIB'], float)
@@ -325,15 +429,17 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
         tree = cKDTree(np.c_[np.asarray(known['RA'], float) * c0, np.asarray(known['DEC'], float)])
         dkn, _ = tree.query(np.c_[ra * c0, de])
         dkn = dkn * 3600
-    isknown = dkn < MATCH
-    stars = isknown & np.isfinite(fwhm) & (fwhm > 0)
+    sc = _pixscale(deep)
+    stars = (dkn < MATCH) & np.isfinite(fwhm) & (fwhm > 0)
     fwhm0 = float(np.median(fwhm[stars])) if np.sum(stars) >= 5 else float(deep.meta.get('FWHM', np.nan))
+    match = max(MATCH, MATCH_FWHM * fwhm0 * sc) if np.isfinite(fwhm0) else MATCH
+    isknown = dkn < match
     extended = np.isfinite(fwhm) & (fwhm > EXT_FWHM * fwhm0)
     # phcat's forced measurement at the RTS2 target position (NUMBER 0) is not a detection
     forced = np.asarray(deep['NUMBER']) == 0 if 'NUMBER' in deep.colnames else np.zeros(len(deep), bool)
     cand = np.flatnonzero(~isknown & ~forced)
     if verbose:
-        print(f"deepfield: {len(deep)} objects, {np.sum(isknown)} known (within {MATCH}\"), {len(cand)} candidates"
+        print(f"deepfield: {len(deep)} objects, {np.sum(isknown)} known (within {match:.1f}\"), {len(cand)} candidates"
               f" ({np.sum(extended[cand])} extended)")
     out = astropy.table.Table()
     out['RA'], out['DEC'] = ra[cand], de[cand]
@@ -344,18 +450,12 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
         out[k] = np.full(len(cand), np.nan)
     out['N_3SIG'] = np.zeros(len(cand), int)
     out['N_FRAMES'] = np.zeros(len(cand), int)
-    for k in ('CONC', 'CORE_SIG', 'DIFF_SN', 'DIFF_KEEP', 'CHIP_Z', 'TEMPLATE_FRAC', 'TEMPLATE_SN'):
+    for k in ('CONC', 'CORE_SIG', 'DIFF_SN', 'DIFF_KEEP', 'CHIP_Z', 'MOVE', 'MOVE_SIG', 'TEMPLATE_FRAC', 'TEMPLATE_SN'):
         out[k] = np.full(len(cand), np.nan)
+    hours = (float(deep.meta.get('EXPEND', 0)) - float(deep.meta.get('EXPSTART', 0))) * 24
+    out['SSO'] = _sso_match(sso, ra[cand], de[cand], hours if 0 < hours < 48 else 0.0).astype(str)
     if template is not None and len(cand):
-        sc = deep.meta.get('PIXEL') or deep.meta.get('PIXSCALE')
-        if not sc:
-            from astropy.wcs import WCS
-            from astropy.wcs.utils import proj_plane_pixel_scales
-            try:
-                sc = float(np.mean(proj_plane_pixel_scales(WCS(deep.meta).celestial))) * 3600
-            except Exception:
-                sc = 1.0
-        tf, ts = template_frac(template, ra[cand], de[cand], mag[cand], float(deep.meta.get('APERTURE', 2 * fwhm0)) * float(sc))
+        tf, ts = template_frac(template, ra[cand], de[cand], mag[cand], float(deep.meta.get('APERTURE', 2 * fwhm0)) * sc)
         out['TEMPLATE_FRAC'], out['TEMPLATE_SN'] = tf, ts
     chip_drift = 0.0
     ref = np.flatnonzero(isknown & (mag > REF_MAG[0]) & (mag < REF_MAG[1]) & ~extended & (np.asarray(deep['FLAGS']) == 0
@@ -369,15 +469,7 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
         if verbose:
             print(f"deepfield: stars' concentration {conc0:.3f}" + (f", difference image {diff}" if diff else ""))
     if len(frames) and len(cand):
-        scale = deep.meta.get('PIXEL') or deep.meta.get('PIXSCALE')
-        if not scale:
-            from astropy.wcs import WCS
-            from astropy.wcs.utils import proj_plane_pixel_scales
-            try:
-                scale = float(np.mean(proj_plane_pixel_scales(WCS(deep.meta).celestial))) * 3600
-            except Exception:
-                scale = 1.0
-        ape_arcsec = float(deep.meta.get('APERTURE', 2 * fwhm0)) * float(scale)
+        ape_arcsec = float(deep.meta.get('APERTURE', 2 * fwhm0)) * sc
         F, E, rel = frame_check(frames, ra[cand], de[cand], ra[ref], de[ref], ape_arcsec)
         if verbose:
             print(f"deepfield: {len(frames)} frames, {len(ref)} reference stars, transparency "
@@ -386,15 +478,18 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
             for key, v in frame_stats(F[:, k], E[:, k]).items():
                 out[key][k] = v
         notext = ~extended[cand]
-        z, drift = chip_or_sky(frames, ra[cand][notext], de[cand][notext], rel)
-        out['CHIP_Z'][notext] = z
+        z, drift, mv, mvs = chip_or_sky(frames, ra[cand], de[cand], rel)
+        out['CHIP_Z'][notext] = z[notext]          # a galaxy is no coadded bad pixel
+        out['MOVE'], out['MOVE_SIG'] = mv, mvs
         chip_drift = drift
         if verbose:
             print(f"deepfield: chip-or-sky test: the field drifted {drift:.1f} px on the chip over the clear frames"
                   + ("" if drift >= CHIP_DRIFT else f" (< {CHIP_DRIFT} px: not usable)"))
     cls = []
     for r, ext in zip(out, extended[cand]):
-        if ext:
+        if r['SSO']:
+            cls.append('MINOR_PLANET')
+        elif ext:
             cls.append('EXTENDED')
         elif chip_drift >= CHIP_DRIFT and r['CHIP_Z'] < -CHIP_Z:
             cls.append('DEFECT')
@@ -408,6 +503,9 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
             cls.append('ONEFRAME')
         elif _in_template(r):
             cls.append('IN_TEMPLATE')
+        elif r['MOVE'] > MOVE_PX and r['MOVE_SIG'] > MOVE_SIG:
+            # last: galaxies and the coadded bad pixels shift between the half stacks too
+            cls.append('MOVING')
         elif r['CHI2_FRAMES'] > CHI2_CONST:
             cls.append('VARIABLE')
         else:
@@ -419,7 +517,8 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
         out['DIST'], out['DIST_BOX'] = d[:, 0] * 60, d[:, 1]
     else:
         out['DIST'] = out['DIST_BOX'] = np.full(len(out), np.nan)
-    rank = {'NEW': 0, 'VARIABLE': 1, 'UNCHECKED': 2, 'IN_TEMPLATE': 3, 'FAINT': 4, 'ONEFRAME': 5, 'SHARP': 6, 'DEFECT': 7, 'EXTENDED': 8}
+    rank = {'NEW': 0, 'VARIABLE': 1, 'UNCHECKED': 2, 'IN_TEMPLATE': 3, 'FAINT': 4, 'ONEFRAME': 5, 'SHARP': 6, 'DEFECT': 7, 'EXTENDED': 8,
+            'MOVING': 9, 'MINOR_PLANET': 10}
     inbox = np.where(np.isfinite(out['DIST_BOX']), out['DIST_BOX'] <= 1, False)
     key = np.lexsort((-np.nan_to_num(out['SN_FRAMES'], nan=0), np.nan_to_num(out['DIST_BOX'], nan=1e9),
                       [rank[c] for c in out['CLASS']], ~inbox))
@@ -438,7 +537,9 @@ REJECT = {'IN_TEMPLATE': 'in the Pan-STARRS image', 'FAINT': 'too faint in the f
           'ONEFRAME': 'from one frame only (satellite, aircraft, cosmic ray)',
           'SHARP': 'sharper than a star (pixel defect, cosmic ray)',
           'DEFECT': 'staying on the chip, not on the sky (coadded bad pixels)', 'EXTENDED': 'extended (galaxies)',
-          'VARIABLE': 'variable in the frames', 'UNCHECKED': 'not checked in the frames'}
+          'VARIABLE': 'variable in the frames', 'UNCHECKED': 'not checked in the frames',
+          'MOVING': 'moving between the first and second half of the frames (minor planets)',
+          'MINOR_PLANET': 'known minor planets (SkyBoT)'}
 
 
 def _in_template(r):
@@ -525,11 +626,12 @@ def report(res, deep, trigger=None, top=10, verbose=False):
     lines.append("rejected: " + ", ".join(rej))
     if verbose:
         lines.append("all candidates (class, position, mag, frames S/N chi2 max-share S/N-without-max, concentration, "
-                     "difference S/N and flux kept, distance):")
+                     "difference S/N and flux kept, half-to-half shift, distance):")
         for r in res:
-            lines.append("  %-11s %.5f %+.5f %5.2f±%.2f  fr %4.1f %5.2f %3.0f%% %4.1f  C %.2f  diff %4.1f %4.2f  %5.2f' %5.2f box"
+            lines.append("  %-12s %.5f %+.5f %5.2f±%.2f  fr %4.1f %5.2f %3.0f%% %4.1f  C %.2f  diff %4.1f %4.2f  mv %4.1fpx %4.1fσ  %5.2f' %5.2f box%s"
                          % (r['CLASS'], r['RA'], r['DEC'], r['MAG'], r['MAGERR'], r['SN_FRAMES'], r['CHI2_FRAMES'],
                             100 * r['MAX_SHARE'] if np.isfinite(r['MAX_SHARE']) else np.nan, r['SN_WO_MAX'],
-                            r['CONC'], r['DIFF_SN'], r['DIFF_KEEP'], r['DIST'], r['DIST_BOX']))
+                            r['CONC'], r['DIFF_SN'], r['DIFF_KEEP'], r['MOVE'], r['MOVE_SIG'], r['DIST'], r['DIST_BOX'],
+                            f"  {r['SSO']}" if r['SSO'] else ""))
     lines.append("*** DEEPFIELD END ***")
     return "\n".join(lines)

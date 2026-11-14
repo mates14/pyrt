@@ -28,6 +28,7 @@ def main(argv=None):
     ap.add_argument('--subtract', action='store_true',
                     help="make the difference against the Pan-STARRS template (pyrt-galaxy-phcat's subtraction) -> *-diff.fits")
     ap.add_argument('--no-online', action='store_true', help="no Pan-STARRS/Gaia query: every object is a candidate")
+    ap.add_argument('--mpc', help="MPC observatory code for the minor-planet check (default 557 for Ondrejov, else 500)")
     ap.add_argument('--known', help="known-objects cache (default deepfield-known.ecsv next to the catalogue)")
     ap.add_argument('-o', '--output', default='deepfield.ecsv')
     ap.add_argument('-n', '--top', type=int, default=10, help="candidates printed")
@@ -45,7 +46,7 @@ def main(argv=None):
         trig = None
     if trig is not None and trig.get('t0') is None:
         trig = None
-    known = None
+    known = sso = None
     if not o.no_online:
         ra, de = np.asarray(deep['ALPHA_J2000'], float), np.asarray(deep['DELTA_J2000'], float)
         ra0 = float(np.degrees(np.arctan2(np.mean(np.sin(np.radians(ra))), np.mean(np.cos(np.radians(ra)))))) % 360
@@ -55,6 +56,11 @@ def main(argv=None):
         known = deepfield.known_sources(ra0, de0, rad, cache=cache, verbose=o.verbose)
         if known is None:
             print("deepfield: WARNING no known-object catalogue: every object is a candidate")
+        jd0, jd1 = float(deep.meta.get('EXPSTART', np.nan)), float(deep.meta.get('EXPEND', np.nan))
+        if np.isfinite(jd0) and np.isfinite(jd1):
+            loc = o.mpc or ('557' if 'ondrejov' in str(deep.meta.get('ORIGIN', '')).lower() else '500')
+            sso = deepfield.minor_planets(ra0, de0, rad, (jd0 + jd1) / 2, location=loc, verbose=o.verbose,
+                                          cache=os.path.join(os.path.dirname(os.path.abspath(o.deep)), 'deepfield-sso.ecsv'))
     image = o.image or os.path.splitext(o.deep)[0] + '.fits'
     if not os.path.exists(image):
         print(f"deepfield: WARNING {image} not found: no sharpness test, no subtraction")
@@ -75,10 +81,11 @@ def main(argv=None):
     if o.verbose:
         print(f"deepfield: Pan-STARRS master {template}" if template else "deepfield: no Pan-STARRS master")
     res = deepfield.deep_search(deep, frames=o.frames, trigger=trig, known=known, image=image, diff=diff,
-                                template=template, verbose=o.verbose)
+                                template=template, sso=sso, verbose=o.verbose)
     res.write(o.output, format='ascii.ecsv', overwrite=True)
     colour = {'NEW': 'green', 'VARIABLE': 'yellow', 'ONEFRAME': 'red', 'FAINT': 'white', 'EXTENDED': 'cyan',
-              'UNCHECKED': 'magenta', 'SHARP': 'red', 'IN_TEMPLATE': 'blue', 'DEFECT': 'red'}
+              'UNCHECKED': 'magenta', 'SHARP': 'red', 'IN_TEMPLATE': 'blue', 'DEFECT': 'red',
+              'MOVING': 'orange', 'MINOR_PLANET': 'orange'}
     with open(os.path.splitext(o.output)[0] + '.reg', 'w') as f:
         f.write("# Region file format: DS9 version 4.1\nfk5\n")
         if trig is not None and np.isfinite(trig.get('ra', np.nan)):
@@ -86,7 +93,7 @@ def main(argv=None):
                     % (trig['ra'], trig['dec'], trig['errorbox'] * 3600, trig.get('name', '')))
         for r in res:
             f.write('circle(%.6f,%.6f,4") # color=%s text={%s %.2f}\n' % (r['RA'], r['DEC'], colour[r['CLASS']],
-                                                                       r['CLASS'], r['MAG']))
+                                                                       r['CLASS'] if not r['SSO'] else r['SSO'], r['MAG']))
     print(deepfield.report(res, deep, trig, top=o.top, verbose=o.verbose))
     return 0
 
