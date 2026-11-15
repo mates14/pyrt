@@ -9,7 +9,10 @@ frames come as Montage writes them, each cut to its own overlap with the output 
 frames: list of dicts {'image': projected (w*S*D), 'weight': projected (w*S) or None,
 'w': scalar weight, 'zp': MAGZERO of the raw frame (None: no flux scaling for the test),
 'gain': e-/ADU}.  The output keeps mAdd's meaning, the weighted mean of the unscaled
-frames sum(W M D) / sum(W M) with W = area * w * S, now over the pixels M that pass:
+frames with W = area * w * S, now over the pixels M that pass:
+  sum(W M (D - sky)) / sum(W M) + sum(W sky) / sum(W)
+(the sky term over all frames: a rejection must not step the level by that frame's sky offset;
+with nothing rejected this is exactly mAdd's sum(W D) / sum(W)).  The test:
 
   - each frame's sky (a coarse mesh median) is subtracted and its flux put on a common
     zeropoint FOR THE TEST ONLY: x_i = k_i (D_i - sky_i), k_i = 10^(0.4 (zp_ref - zp_i))
@@ -122,6 +125,7 @@ def clipped_stack(frames, skel, output, weight_output=None, reject_output=None, 
         h = yb - ya
         X = np.full((n, h, nx), np.nan, np.float32)
         Dc = np.full((n, h, nx), np.nan, np.float32)
+        Sk = np.zeros((n, h, nx), np.float32)
         Wc = np.zeros((n, h, nx), np.float32)
         S = np.full((n, h, nx), np.inf, np.float32)
         for i, f in enumerate(info):
@@ -137,6 +141,7 @@ def clipped_stack(frames, skel, output, weight_output=None, reject_output=None, 
             s = f['sky'][sy0:sy1, fx0:fx1]
             sl = (i, slice(ty0, ty0 + (sy1 - sy0)), slice(tx0, tx0 + (fx1 - fx0)))
             Dc[sl] = d
+            Sk[sl] = s
             Wc[sl] = f['W'][sy0:sy1, fx0:fx1]
             X[sl] = f['k'] * (d - s)
             S[sl] = f['k'] * np.sqrt(f['rms'] ** 2 + np.clip(d - s, 0, None) / f['gain'])
@@ -173,12 +178,23 @@ def clipped_stack(frames, skel, output, weight_output=None, reject_output=None, 
                         print(f"   frame {i:2d} x {X[i, r, px]:8.1f} s {S[i, r, px]:6.1f} D {Dc[i, r, px]:8.1f} "
                               f"W {Wc[i, r, px]:.3g} k {info[i]['k']:.3f} {'REJ' if not keep[i, r, px] else ''}")
         c0, c1 = y0 - ya, y0 - ya + (y1 - y0)
-        wk = np.where(keep, Wc, 0)[:, c0:c1]
+        okc, keepc = ok[:, c0:c1], keep[:, c0:c1]
+        # every frame rejected (a saturated core): keep them all there rather than leave a hole
+        allrej = (okc.sum(axis=0) > 0) & (keepc.sum(axis=0) == 0)
+        keepc = np.where(allrej[None], okc, keepc)
+        Wcc, Dcc, Skc = Wc[:, c0:c1], Dc[:, c0:c1], Sk[:, c0:c1]
+        wk = np.where(keepc, Wcc, 0)
         ws = wk.sum(axis=0)
-        num = np.nansum(np.where(keep[:, c0:c1], Dc[:, c0:c1], 0) * wk, axis=0)
-        out[y0:y1] = np.where(ws > 0, num / np.maximum(ws, 1e-30), np.nan)
+        wa = np.where(okc, Wcc, 0)
+        wsa = wa.sum(axis=0)
+        # the mean of the sky-subtracted frames over what passed, plus the mean sky of ALL the
+        # frames: dropping a frame must not step the level by its sky's offset (frames differ
+        # in sky by hundreds of counts; a step over a grown 3x3 patch is noise in an aperture)
+        num = np.nansum(np.where(keepc, Dcc - Skc, 0) * wk, axis=0)
+        skym = np.nansum(np.where(okc, Skc, 0) * wa, axis=0) / np.maximum(wsa, 1e-30)
+        out[y0:y1] = np.where(ws > 0, num / np.maximum(ws, 1e-30) + skym, np.nan)
         wsum[y0:y1] = ws
-        rej = (ok & ~keep)[:, c0:c1]
+        rej = (okc & ~keepc)
         nrej[y0:y1] = rej.sum(axis=0)
         total_rej += rej.reshape(n, -1).sum(axis=1)
 
