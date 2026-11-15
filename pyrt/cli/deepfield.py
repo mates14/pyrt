@@ -85,7 +85,7 @@ def main(argv=None):
     res.write(o.output, format='ascii.ecsv', overwrite=True)
     colour = {'NEW': 'green', 'VARIABLE': 'yellow', 'ONEFRAME': 'red', 'FAINT': 'white', 'EXTENDED': 'cyan',
               'UNCHECKED': 'magenta', 'SHARP': 'red', 'IN_TEMPLATE': 'blue', 'DEFECT': 'red',
-              'MOVING': 'orange', 'MINOR_PLANET': 'orange'}
+              'MOVING': 'orange', 'MINOR_PLANET': 'orange', 'MARGINAL': 'white'}
     with open(os.path.splitext(o.output)[0] + '.reg', 'w') as f:
         f.write("# Region file format: DS9 version 4.1\nfk5\n")
         if trig is not None and np.isfinite(trig.get('ra', np.nan)):

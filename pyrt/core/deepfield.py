@@ -23,7 +23,7 @@ and the rest is checked in the frames the coadd was made of:
     object present in the template is removed there
 
 Classes, best first: NEW (in the frames throughout, consistent with constant, kept in the
-difference image), VARIABLE (in the frames, but not constant), IN_TEMPLATE (removed by the
+difference image), MARGINAL (the same, but below S/N 5 in the deep image), VARIABLE (in the frames, but not constant), IN_TEMPLATE (removed by the
 subtraction, or too faint there), FAINT (below S/N 3 in the frames together), ONEFRAME
 (artefact of one frame), SHARP (pixel defect, cosmic ray), EXTENDED, MOVING (centroid shifts
 between the first and second half of the frames), MINOR_PLANET (on a SkyBoT track); candidates within the
@@ -41,6 +41,9 @@ SSO_MATCH = 10.0     # [arcsec] a candidate this close to a known minor planet's
 MOVE_PX = 1.0        # [px] centroid shift between the first and the second half of the frames ...
 MOVE_SIG = 4.0       # ... at this significance, and not the chip's drift: a moving object (an unknown minor planet)
 MOVE_FLOOR = 0.3     # [px] registration error of the half stacks
+DEEP_SN = 5.0        # a NEW below this S/N in the deep image is MARGINAL: the frames are no independent check
+                     # of a noise peak picked from their own sum
+LS_MAG = 23.0        # Legacy Survey DR10 (south of PS1) to this r (or z) magnitude
 MATCH_FWHM = 0.5     # ... or within this many stars' FWHM, if more (centroids scatter with the seeing)
 EXT_FWHM = 1.8       # FWHM above this times the stars' median: extended
 SN_FRAMES = 3.0      # S/N of the frames together (and without the best one) to be "in the frames"
@@ -85,7 +88,7 @@ def minor_planets(ra, dec, radius, jd, cache=None, location='500', verbose=False
                                  val('RA_rate', u.arcsec / u.h), val('DEC_rate', u.arcsec / u.h), val('V')],
                                 names=('NAME', 'RA', 'DEC', 'RATE_RA', 'RATE_DEC', 'V'))
     except Exception as e:
-        if 'No solar system object' in str(e) or 'empty' in str(e).lower():
+        if 'No solar system object' in str(e) or 'empty' in str(e).lower() or str(e) == "'Name'":
             t = astropy.table.Table(names=('NAME', 'RA', 'DEC', 'RATE_RA', 'RATE_DEC', 'V'), dtype=(str, float, float, float, float, float))
         else:
             print(f"deepfield: WARNING SkyBoT query failed: {e}")
@@ -118,7 +121,8 @@ def _sso_match(sso, ra, dec, hours):
 
 def known_sources(ra, dec, radius, cache=None, verbose=False):
     """(ra, dec, source) of the objects known around (ra, dec) within radius [deg]: Pan-STARRS DR2
-    mean objects with >= MIN_DET detections and Gaia DR3; cache: an ECSV file reused when it
+    mean objects with >= MIN_DET detections, Gaia DR3 and the local ATLAS-RefCat2 (pyrt.catalog);
+    cache: an ECSV file reused when it
     covers the cone."""
     if cache and os.path.exists(cache):
         t = astropy.table.Table.read(cache, format='ascii.ecsv')
@@ -128,6 +132,20 @@ def known_sources(ra, dec, radius, cache=None, verbose=False):
                 print(f"deepfield: {len(t)} known objects from {cache}")
             return t
     parts, failed = [], False
+    try:                          # the local ATLAS-RefCat2 (to ~19.5, all sky): offline, always
+        from pyrt.catalog.catalog import Catalog
+        w = 2 * radius / max(np.cos(np.radians(dec)), 0.1)
+        r = Catalog(ra=ra, dec=dec, width=w, height=2 * radius, mlim=21.0, catalog=Catalog.ATLAS)
+        if r is not None and len(r):
+            a = astropy.table.Table([np.asarray(r['radeg'], float), np.asarray(r['decdeg'], float)], names=('RA', 'DEC'))
+            a['MAG'] = np.asarray(r['Sloan_r'], float)
+            a['SRC'] = 'ATLAS'
+            parts.append(a)
+            if verbose:
+                print(f"deepfield: ATLAS-RefCat2 (local): {len(a)} objects")
+    except Exception as e:
+        if verbose:
+            print(f"deepfield: no local ATLAS-RefCat2 ({e})")
     if dec > -30:
         try:
             from astroquery.mast import Catalogs
@@ -143,6 +161,29 @@ def known_sources(ra, dec, radius, cache=None, verbose=False):
                 print(f"deepfield: Pan-STARRS DR2: {len(p)} objects (>= {MIN_DET} detections) within {radius*60:.1f}'")
         except Exception as e:
             print(f"deepfield: WARNING Pan-STARRS query failed: {e}")
+            failed = True
+    if dec <= -30:                # Legacy Survey DR10 (DES/DECaLS, to r ~ 23.5, galaxies too): NOIRLab Data Lab
+        try:
+            import requests
+            from astropy.io import ascii as _ascii
+            w = radius / max(np.cos(np.radians(dec)), 0.1)
+            q = (f"SELECT ra, dec, mag_r FROM ls_dr10.tractor WHERE ra BETWEEN {ra - w} AND {ra + w} AND "
+                 f"dec BETWEEN {dec - radius} AND {dec + radius} AND (mag_r < {LS_MAG} OR mag_z < {LS_MAG})")
+            rr = requests.get("https://datalab.noirlab.edu/tap/sync", timeout=180,
+                              params=dict(REQUEST='doQuery', LANG='ADQL', FORMAT='csv', QUERY=q))
+            rr.raise_for_status()
+            if not rr.text.startswith('ra,'):
+                raise RuntimeError(rr.text[:200])
+            r = _ascii.read(rr.text, format='csv')
+            l = astropy.table.Table([np.asarray(r['ra'], float), np.asarray(r['dec'], float)], names=('RA', 'DEC'))
+            l['MAG'] = np.asarray(r['mag_r'], float)
+            l['SRC'] = 'LS-DR10'
+            if len(l):
+                parts.append(l)
+            if verbose:
+                print(f"deepfield: Legacy Survey DR10: {len(l)} objects (r or z < {LS_MAG})")
+        except Exception as e:
+            print(f"deepfield: WARNING Legacy Survey query failed: {e}")
             failed = True
     try:
         from astroquery.gaia import Gaia
@@ -508,6 +549,8 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
             cls.append('MOVING')
         elif r['CHI2_FRAMES'] > CHI2_CONST:
             cls.append('VARIABLE')
+        elif r['MAGERR'] > 1.0857 / DEEP_SN:
+            cls.append('MARGINAL')
         else:
             cls.append('NEW')
     out['CLASS'] = cls
@@ -517,7 +560,7 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
         out['DIST'], out['DIST_BOX'] = d[:, 0] * 60, d[:, 1]
     else:
         out['DIST'] = out['DIST_BOX'] = np.full(len(out), np.nan)
-    rank = {'NEW': 0, 'VARIABLE': 1, 'UNCHECKED': 2, 'IN_TEMPLATE': 3, 'FAINT': 4, 'ONEFRAME': 5, 'SHARP': 6, 'DEFECT': 7, 'EXTENDED': 8,
+    rank = {'NEW': 0, 'MARGINAL': 0.5, 'VARIABLE': 1, 'UNCHECKED': 2, 'IN_TEMPLATE': 3, 'FAINT': 4, 'ONEFRAME': 5, 'SHARP': 6, 'DEFECT': 7, 'EXTENDED': 8,
             'MOVING': 9, 'MINOR_PLANET': 10}
     inbox = np.where(np.isfinite(out['DIST_BOX']), out['DIST_BOX'] <= 1, False)
     key = np.lexsort((-np.nan_to_num(out['SN_FRAMES'], nan=0), np.nan_to_num(out['DIST_BOX'], nan=1e9),
@@ -527,6 +570,7 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
     out.meta['CONC_STARS'] = conc0
     out.meta['CHIP_DRIFT'] = chip_drift
     out.meta['N_KNOWN'] = int(np.sum(isknown))
+    out.meta['KNOWN_SRC'] = list(known.meta.get('SOURCES', sorted(set(known['SRC'])))) if known is not None and len(known) else []
     out.meta['N_OBJECTS'] = len(deep)
     return out
 
@@ -569,7 +613,7 @@ def _why(r, conc0, drift=0.0):
     if np.isfinite(r['DIFF_KEEP']):
         words.append(f"kept {100*r['DIFF_KEEP']:.0f}% after subtracting it (S/N {r['DIFF_SN']:.1f})")
     elif np.isfinite(r['KNOWN_DIST']):
-        words.append(f"no Pan-STARRS/Gaia object within {r['KNOWN_DIST']:.0f}\"")
+        words.append(f"no catalogued object within {r['KNOWN_DIST']:.0f}\"")
     warn = []
     if drift < CHIP_DRIFT:
         warn.append(f"the field drifted only {drift:.1f} px on the chip: a coadded bad pixel cannot be excluded")
@@ -621,7 +665,15 @@ def report(res, deep, trigger=None, top=10, verbose=False):
             lines.append(f"  {r['RA']:.5f} {r['DEC']:+.5f}  {band} = {r['MAG']:.2f}"
                          + (f"  {r['DIST']:.1f}' ({r['DIST_BOX']:.1f} box radii)" if hasbox else "")
                          + ("  [" + "; ".join(warn) + "]" if warn else ""))
-    rej = [f"{res.meta['N_KNOWN']} known (Pan-STARRS/Gaia)"]
+    marg = res[res['CLASS'] == 'MARGINAL']
+    if len(marg):
+        mnear = marg[np.nan_to_num(marg['DIST_BOX'], nan=1e9) <= NEAR_BOX] if hasbox else marg
+        lines.append(f"marginal (S/N < {DEEP_SN:.0f} in the deep image, mostly noise peaks at this level): {len(marg)}"
+                     + (f", {len(mnear)} within {NEAR_BOX:.0f} box radii" if hasbox else ""))
+        for r in mnear[:min(top, 5)]:
+            lines.append(f"  {r['RA']:.5f} {r['DEC']:+.5f}  {band} = {r['MAG']:.2f} ± {r['MAGERR']:.2f}"
+                         + (f"  {r['DIST']:.1f}' ({r['DIST_BOX']:.1f} box radii)" if hasbox else ""))
+    rej = [f"{res.meta['N_KNOWN']} known ({'/'.join(res.meta.get('KNOWN_SRC', [])) or 'none'})"]
     rej += [f"{int(np.sum(res['CLASS'] == c))} {w}" for c, w in REJECT.items() if np.sum(res['CLASS'] == c)]
     lines.append("rejected: " + ", ".join(rej))
     if verbose:
