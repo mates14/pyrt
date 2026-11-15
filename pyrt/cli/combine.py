@@ -1391,6 +1391,28 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
                 f"Check that the skeleton header covers the same sky area as your inputs."
             )
 
+        if getattr(args, 'clip', False):
+            # robust coadd instead of mAdd: per-pixel rejection (pyrt.core.stack)
+            from pyrt.core.stack import clipped_stack
+            frames = []
+            for proc_input, proc_result in zip(process_inputs, results):
+                if proc_result is None:
+                    continue
+                h = fits.getheader(proc_input[0])
+                frames.append(dict(image=proc_result['image'], weight=proc_result['weight_map'],
+                                   w=proc_input[1], zp=h.get('MAGZERO'), gain=h.get('GAIN', 1.0)))
+            skel = fits.Header.fromtextfile(str(tmpdir / "skel.hdr"))
+            reject_out = getattr(args, 'clip_map', None)
+            clipped_stack(frames, skel, output, weight_output=args.keep_weightmap or None,
+                          reject_output=reject_out, verbose=not quiet)
+            if args.keep_weightmap:
+                print(f"Output weight map saved to {args.keep_weightmap}")
+            update_output_header(output, inputs, weights, args)
+            if args.keep_weightmap:
+                subprocess.run(["fitsheader", "-w", f"WGHTFILE={args.keep_weightmap}", output],
+                               capture_output=True, text=True)
+            return
+
         # Separate image and weight map files
         image_files = [p['image'] for p in processed_files]
         weight_map_files = [p['weight_map'] for p in processed_files if p['weight_map'] is not None]
@@ -1707,6 +1729,11 @@ Examples:
                        help="Calculate optimal WCS, write skeleton to FILE, and exit (no combining). Default: skeleton.hdr")
 
     # Selection control
+    parser.add_argument("--clip", action="store_true",
+                       help="Robust stack instead of mAdd: per-pixel rejection of cosmic rays, satellites "
+                            "and hot pixels (pyrt.core.stack; weighted mean of what passes)")
+    parser.add_argument("--clip-map", metavar="FILE",
+                       help="With --clip: write the number of rejected frame pixels per output pixel")
     parser.add_argument("--no-selection", action="store_true",
                        help="Skip outlier rejection, use all input files")
 

@@ -44,6 +44,7 @@ MOVE_FLOOR = 0.3     # [px] registration error of the half stacks
 DEEP_SN = 5.0        # a NEW below this S/N in the deep image is MARGINAL: the frames are no independent check
                      # of a noise peak picked from their own sum
 LS_MAG = 23.0        # Legacy Survey DR10 (south of PS1) to this r (or z) magnitude
+KNOWN_DMAG = 2.5    # [mag] a known object this much fainter than a detection does not explain it
 MATCH_FWHM = 0.5     # ... or within this many stars' FWHM, if more (centroids scatter with the seeing)
 EXT_FWHM = 1.8       # FWHM above this times the stars' median: extended
 SN_FRAMES = 3.0      # S/N of the frames together (and without the best one) to be "in the frames"
@@ -468,8 +469,17 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
         from scipy.spatial import cKDTree
         c0 = np.cos(np.radians(np.median(de)))
         tree = cKDTree(np.c_[np.asarray(known['RA'], float) * c0, np.asarray(known['DEC'], float)])
-        dkn, _ = tree.query(np.c_[ra * c0, de])
-        dkn = dkn * 3600
+        kmag = np.asarray(known['MAG'], float) if 'MAG' in known.colnames else np.full(len(known), np.nan)
+        # the nearest known object that could be this detection: not much fainter than it (a deep
+        # survey has an r = 23 galaxy within 2.6" of one random position in five)
+        dd, ii = tree.query(np.c_[ra * c0, de], k=min(16, len(known)))
+        dd, ii = np.atleast_2d(dd.T).T * 3600, np.atleast_2d(ii.T).T
+        if dd.ndim == 1:
+            dd, ii = dd[:, None], ii[:, None]
+        valid = ii < len(known)
+        km = np.where(valid, kmag[np.where(valid, ii, 0)], np.nan)
+        could = valid & (~np.isfinite(km) | ~np.isfinite(mag)[:, None] | (km <= mag[:, None] + KNOWN_DMAG))
+        dkn = np.min(np.where(could, dd, np.inf), axis=1)
     sc = _pixscale(deep)
     stars = (dkn < MATCH) & np.isfinite(fwhm) & (fwhm > 0)
     fwhm0 = float(np.median(fwhm[stars])) if np.sum(stars) >= 5 else float(deep.meta.get('FWHM', np.nan))
