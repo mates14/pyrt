@@ -67,12 +67,16 @@ Photometric weighting (default):
   - Expected source brightness (from MAGZERO and exposure time)
   - Background noise (measured from image statistics)
   - Signal-to-noise contribution to final combination
+  The weight is w = c/sigma^2 (target counts over the target's noise variance
+  in the raw frame), which maximises S/N of the weighted mean of unscaled frames.
 
   Files without MAGZERO are skipped and reported. If all files lack MAGZERO,
   the tool suggests using --uniform mode.
 
   For time-variable sources (GRB mode), adjusts expected brightness using
-  power-law decay model: mag(t) = mag0 + decay * log10(t/t0)
+  power-law decay model: mag(t) = mag0 + 2.5*decay*log10((t-T0)/1 day), and
+  CHARTIME is the time at which this light curve equals the target flux
+  measured in the coadd (frames weighted by w*10^(0.4*MAGZERO)).
 
   For measured photometry (--photfile mode), uses actual magnitudes from a
   dophot-style output file. This is useful for combining images to maximize
@@ -584,69 +588,64 @@ def resolve_skeleton(skeleton_arg):
 # Weighting and Combination Functions (from combine2w)
 # ============================================================================
 
-def calculate_chartime(times, weights, t0, rate):
+def _mean_powerlaw_flux(t, exp, alpha):
+    """Mean of t**-alpha over [t-exp/2, t+exp/2] (t, exp in days, t-exp/2 > 0)."""
+    t1, t2 = t - exp/2, t + exp/2
+    if abs(alpha - 1.0) < 1e-9:
+        return np.log(t2/t1) / exp
+    return (np.power(t2, 1.0 - alpha) - np.power(t1, 1.0 - alpha)) / ((1.0 - alpha) * exp)
+
+def calculate_chartime(times, t0, rate):
     """Calculate characteristic time of the combined image.
 
-    For time-variable sources, computes the effective time that represents
-    the combined observation. Uses sophisticated integral calculation when
-    rate information is available, otherwise falls back to weighted average.
+    The coadd is sum(w_i*D_i)/sum(w_i) of unscaled frames, and it is calibrated
+    against field stars that went through the same sum. The calibrated target
+    flux is therefore the average of the frame-mean fluxes weighted by
+    w_i*k_i, where k_i = 10**(0.4*MAGZERO_i) is the frame's flux scale.
+
+    For a power-law source F ~ t**-alpha the characteristic time is the time
+    at which the light curve equals that average flux:
+        F(t_c) = sum(w k <F>_i) / sum(w k)  ->  t_c = <F>**(-1/alpha)
+    Without a decay model (or for alpha=0) it is the w*k weighted mean of the
+    mid-exposure times.
 
     Args:
-        times: List of dicts with 'time', 'abs_time', 'exptime' keys
-        weights: List of image weights
-        t0: Reference time (JD) for power-law calculation
-        rate: Magnitude change rate (mags/day) for power-law
+        times: list of dicts with 'abs_time' (JD), 'exptime' (days), 'weight',
+               'fluxscale' and, when T0 is known, 'time' (days since T0)
+        t0: Reference time (JD) for the power law
+        rate: decay index alpha (F ~ t**-alpha, i.e. 2.5*alpha mag/decade)
 
     Returns:
         float: Characteristic time in JD, or None if calculation fails
     """
-    # If we have t0 and rate, try the sophisticated method first
-    if t0 is not None and rate is not None:
+    W = np.array([x['weight'] * x.get('fluxscale', 1.0) for x in times], dtype=float)
+    if not np.any(W > 0):
+        return None
+
+    if t0 is not None and rate is not None and abs(rate) > 1e-9:
         try:
-            A2 = rate  # Magnitude change rate
-            total_up = 0
-            total_down = 0
-
-            for time, weight in zip(times, weights):
-                exp = time['exptime']  # in days
-                t = time['time']  # in days since T0
-
-                # Skip invalid times
-                if t <= 0:
+            alpha = float(rate)
+            F = []
+            Wv = []
+            for x, w in zip(times, W):
+                if w <= 0 or x['time'] - x['exptime']/2 <= 0:
                     continue
-
-                # Calculate components for characteristic time
-                up = (np.power(t + exp/2, -A2 + 2) - np.power(t - exp/2, -A2 + 2)) * \
-                     np.power(np.power(t + exp/2, -A2 + 1) - np.power(t - exp/2, -A2 + 1), 2) * weight
-
-                down = np.power(np.power(t + exp/2, -A2 + 1) - np.power(t - exp/2, -A2 + 1), 3) * weight
-
-                total_up += up
-                total_down += down
-
-            if total_down != 0:
-                chartime = (-A2 + 1)/(-A2 + 2) * total_up / total_down
-                return chartime + t0
+                F.append(_mean_powerlaw_flux(x['time'], x['exptime'], alpha))
+                Wv.append(w)
+            F, Wv = np.array(F), np.array(Wv)
+            if len(F) and np.sum(Wv) > 0:
+                fmean = np.sum(Wv * F) / np.sum(Wv)
+                chartime = np.power(fmean, -1.0/alpha) + t0
+                print(f"Power-law chartime = {chartime} (alpha={alpha})")
+                return chartime
         except Exception as e:
-            print(f"Warning: Complex characteristic time calculation failed: {str(e)}")
+            print(f"Warning: power-law characteristic time calculation failed: {e}")
 
-    # Fallback to simple weighted average of mid-exposure times
-    try:
-        total_weight = 0
-        weighted_time = 0
-
-        for time, weight in zip(times, weights):
-            abs_time = time['abs_time']  # Actual JD
-            weighted_time += abs_time * weight
-            total_weight += weight
-
-        if total_weight > 0:
-            print(f"Simple chartime = {weighted_time / total_weight}")
-            return weighted_time / total_weight
-    except Exception as e:
-        print(f"Warning: Simple characteristic time calculation failed: {str(e)}")
-
-    return None
+    # Fallback: flux-scale weighted mean of mid-exposure times
+    tabs = np.array([x['abs_time'] for x in times], dtype=float)
+    chartime = np.sum(W * tabs) / np.sum(W)
+    print(f"Simple chartime = {chartime}")
+    return chartime
 
 def update_output_header(output_file, inputs, weights, args):
     """Update output FITS file header with combined metadata.
@@ -702,20 +701,19 @@ def update_output_header(output_file, inputs, weights, args):
                         'exptime_sec': exptime_sec
                     })
 
-                    # Mid-exposure time for CHARTIME calculation
+                    # Mid-exposure time for CHARTIME calculation; keep the weight
+                    # and the flux scale of the (unscaled) frame with it
                     mid_time = start_time_jd + exptime_days/2.0
+                    entry = {
+                        'abs_time': mid_time,
+                        'exptime': exptime_days,
+                        'weight': weights[f],
+                        'fluxscale': (np.power(10, 0.4 * float(header['MAGZERO']))
+                                      if 'MAGZERO' in header else 1.0),
+                    }
                     if args.t0:
-                        time_since_t0 = mid_time - args.t0
-                        times.append({
-                            'time': time_since_t0,
-                            'abs_time': mid_time,
-                            'exptime': exptime_days,
-                        })
-                    else:
-                        times.append({
-                            'abs_time': mid_time,
-                            'exptime': exptime_days,
-                        })
+                        entry['time'] = mid_time - args.t0
+                    times.append(entry)
                 except (KeyError, ValueError) as e:
                     print(f"Warning: Error processing times for {f}: {e}")
                     continue
@@ -744,8 +742,7 @@ def update_output_header(output_file, inputs, weights, args):
 
         # Calculate and add CHARTIME if applicable
         if times:
-            chartime = calculate_chartime(times, [weights[f] for f in inputs if weights[f] > 0],
-                                       args.t0, args.rate)
+            chartime = calculate_chartime(times, args.t0, args.rate)
             if chartime is not None:
                 header['CHARTIME'] = (chartime, 'Characteristic time of combined image')
         else:
@@ -1080,7 +1077,11 @@ def compute_weights(files, gain, t0, mag0, rate, uniform=False, photometry=None,
                 if denominator <= 0:
                     raise ValueError(f"Invalid weight calculation in {f}")
 
-                weight = np.power(counts/total_counts, 2) / denominator
+                # The coadd is sum(w_i*D_i)/sum(w_i) of the raw (unscaled) frames,
+                # so S/N = sum(w c)/sqrt(sum(w^2 sigma^2)) is maximal for
+                # w_i = c_i/sigma_i^2 (c_i = target counts in frame i, which
+                # already carries the frame's zeropoint and the source variability).
+                weight = counts / denominator
                 weights[f] = weight
                 if not quiet:
                     print(f"Weight for {f}: {weight:.6e}")
