@@ -676,9 +676,18 @@ def xy2wcs(x, y, fitsh):
 #    raise Exception('unsuported axis combination {0} {1}'.format(wcs1.wcs_axis,wcs2.wcs_axis))
 
 class AstrometryScript:
-    def __init__(self, odir=None, scale_relative_error=0.25, astrometry_bin='/usr/bin', zoom=1.0, poly=2, time=30):
+    def __init__(self, odir=None, scale_relative_error=0.25, astrometry_bin=None, zoom=1.0, poly=2, time=30):
         """initialize the registration pipeline"""
         self.scale_relative_error = scale_relative_error
+        if astrometry_bin is None:
+            # solve-field from PATH, else the usual install locations (FRAM has
+            # astrometry.net in /usr/local/astrometry, outside any default PATH)
+            found = shutil.which('solve-field')
+            if found:
+                astrometry_bin = os.path.dirname(found)
+            else:
+                astrometry_bin = next((d for d in ('/usr/local/astrometry/bin', '/usr/local/bin', '/usr/bin')
+                                       if os.access(os.path.join(d, 'solve-field'), os.X_OK)), '/usr/bin')
         self.astrometry_bin = astrometry_bin
         self.zoom = zoom
         self.poly = poly
