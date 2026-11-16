@@ -162,15 +162,21 @@ def try_target(file):
 def run_iraf(cmdfile: str) -> bool:
     """Run IRAF command on the given base filename."""
 
+    cmd = None
     for cmd_possible in ['cl', 'irafcl']:
         path = shutil.which(cmd_possible)
         if path:
             cmd = cmd_possible
 
-    print("IRAF cmd="+cmd)
-
     if not cmd:
         raise RuntimeError("Neither 'cl' nor 'irafcl' found in system PATH")
+
+    print("IRAF cmd="+cmd)
+
+    # The CL dies without TERM ("Environment variable 'TERM' not found"),
+    # and cron, systemd and detached watchers start without one.
+    env = dict(os.environ)
+    env.setdefault('TERM', 'dumb')
 
     try:
         result = subprocess.run(
@@ -178,7 +184,8 @@ def run_iraf(cmdfile: str) -> bool:
             input=cmdfile+"\n",  # Sending input file through stdin
             text=True,
             capture_output=True,
-            check=True
+            check=True,
+            env=env,
         )
         print(f"IRAF stdout: {result.stdout}")
         print(f"IRAF stderr: {result.stderr}")
