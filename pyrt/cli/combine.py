@@ -94,7 +94,9 @@ Spatial weighting:
 
 Technical Details:
 ------------------
-- Uses Montage toolkit (mProjectPP/mProjectPX) for accurate reprojection
+- Uses Montage toolkit (mProjectPP/mProjectPX) for accurate reprojection; the projected
+  frames are stacked with outlier rejection (pyrt.core.stack: cosmic rays, satellites, hot
+  pixels), or with Montage's mAdd (--madd).  Pre-projected mode (-P) always uses mAdd.
 - Handles complex projections via mProjectPX (ZPN → TAN+SIP conversion)
 - Parallel processing for large image sets
 - Proper error propagation (GAIN, RNOISE)
@@ -1730,10 +1732,12 @@ Examples:
 
     # Selection control
     parser.add_argument("--clip", action="store_true",
-                       help="Robust stack instead of mAdd: per-pixel rejection of cosmic rays, satellites "
-                            "and hot pixels (pyrt.core.stack; weighted mean of what passes)")
+                       help="Robust stack (the default; kept for old scripts): per-pixel rejection of cosmic "
+                            "rays, satellites and hot pixels (pyrt.core.stack; weighted mean of what passes)")
+    parser.add_argument("--madd", action="store_true",
+                       help="Stack with Montage's mAdd instead (no outlier rejection), the pre-2026-11 behaviour")
     parser.add_argument("--clip-map", metavar="FILE",
-                       help="With --clip: write the number of rejected frame pixels per output pixel")
+                       help="Write the number of rejected frame pixels per output pixel (not with --madd)")
     parser.add_argument("--no-selection", action="store_true",
                        help="Skip outlier rejection, use all input files")
 
@@ -1803,6 +1807,7 @@ Examples:
         parser.error("Gain must be positive")
 
     # Resolve auto weight map filename
+    args.clip = not args.madd      # the robust stack is the default
     if args.keep_weightmap == '__auto__':
         stem = os.path.splitext(args.output)[0]
         args.keep_weightmap = stem + 'w.fits'
