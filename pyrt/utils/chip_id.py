@@ -176,12 +176,19 @@ COMPOUND_PATTERNS = [
     ({"CCD_SER": "G2KF1600-00206", "PRODUCT_ID": "2065"}, "mi2065"),
     ({"CCD_SER": "G2KF1600-00206", "PRODUCT_ID": "2066"}, "mi2066"),
     # Without PRODUCT_ID (older headers) it stays ambiguous: mi0206 fallback.
+
+    # G4-16000 truncated to "G4KF16000-0620": at FRAM both NF4 and WF8 read
+    # that, so CCD_SER alone would merge their calibrations. PRODUCT_ID (the
+    # gxccd camera ID) tells them apart: NF4 = 6205, WF8 = 6069 (checked on
+    # /images at FRAM, 2026-11). Others (BART C0) keep the mi620x fallback.
+    ({"CCD_SER": "G4KF16000-0620", "PRODUCT_ID": "6205"}, "mi6205"),
+    ({"CCD_SER": "G4KF16000-0620", "PRODUCT_ID": "6069"}, "mi6069"),
 ]
 
 # Fallback for truncated/ambiguous serials that can't be resolved
 TRUNCATED_FALLBACKS = {
     "G4KF16000-0616": "mi616x",   # ambiguous G4-16000 (C1 or C2?)
-    "G4KF16000-0620": "mi620x",   # G4-16000 serial 0620x (FRAM NF4, BART C0)
+    "G4KF16000-0620": "mi620x",   # G4-16000 0620x without PRODUCT_ID (BART C0)
     "G2KF1600-00206": "mi0206",   # ambiguous G2-1600 (mi2065 or mi2066?)
     "CCD47-10": "fli47x",         # ambiguous FLI with CCD47-10 (fli534 or fli785?)
 }
@@ -224,7 +231,9 @@ CAMERA_DESCRIPTIONS = {
     "fli": "FLI (family; specific serial not recorded)",
     # Ambiguous (couldn't resolve)
     "mi616x": "Moravian G4-16000 (SBT, truncated serial - C1 or C2?)",
-    "mi620x": "Moravian G4-16000 (FRAM NF4, also BART C0; truncated serial 0620x)",
+    "mi6205": "Moravian G4-16000, PRODUCT_ID 6205 (FRAM NF4)",
+    "mi6069": "Moravian G4-16000, PRODUCT_ID 6069 (FRAM WF8)",
+    "mi620x": "Moravian G4-16000 (truncated serial 0620x, no PRODUCT_ID; BART C0)",
     "mi0206": "Moravian G2-1600 (truncated serial - mi2065 or mi2066?)",
     "fli47x": "FLI with CCD47-10 (ambiguous - fli534 or fli785?)",
     # Historical FLI cameras (no longer in use)
