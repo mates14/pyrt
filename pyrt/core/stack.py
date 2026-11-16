@@ -21,7 +21,8 @@ with nothing rejected this is exactly mAdd's sum(W D) / sum(W)).  The test:
     own measured rms, so the reprojection's smoothing is in it)
   - reject x_i > centre + HI * s_i + AMPFRAC * |centre|  (cosmic rays, satellites, hot pixels)
     or     x_i < centre - LO * s_i - AMPFRAC * |centre|  (bad columns, dead pixels)
-    AMPFRAC (SWarp's CLIP_AMPFRAC) keeps the cores of bright stars, which differ between
+    AMPFRAC (SWarp's CLIP_AMPFRAC, here 1.0: at 0.3 SBT bright stars lost 1-3% to core
+    clipping) keeps the cores of bright stars, which differ between
     frames with the seeing, out of the rejection;
   - a rejected pixel's neighbours go with it (GROW: the reprojection spreads a hit);
   - two passes, the second centred on the weighted mean of what survived the first.
@@ -35,7 +36,7 @@ import numpy as np
 from astropy.io import fits
 
 HI, LO = 4.0, 6.0
-AMPFRAC = 0.3
+AMPFRAC = 1.0       # SWarp uses 0.3; SBT's undersampled stars (3" px) vary more than that in their cores
 GROW = 1
 MIN_FRAMES = 5
 MESH = 64          # [px] sky mesh
@@ -47,29 +48,54 @@ def _area_name(image):
 
 
 def _sky(data, mesh=MESH):
-    """Coarse sky: median per mesh cell (NaN-aware), bilinear back to full size; and the
-    robust rms of what is left."""
-    from scipy.ndimage import zoom
+    """Coarse sky: the median per mesh cell (NaN-aware) as a small grid, and the robust rms of
+    the frame around it.  _sky_at() interpolates the grid where needed (no full-size sky kept:
+    an SBT frame is 4k x 4k)."""
+    import warnings
     ny, nx = data.shape
     my, mx = max(1, ny // mesh), max(1, nx // mesh)
-    cut = data[:my * mesh, :mx * mesh] if ny >= mesh and nx >= mesh else data
     if ny >= mesh and nx >= mesh:
-        cells = cut.reshape(my, mesh, mx, mesh).swapaxes(1, 2).reshape(my, mx, -1)
-        with np.errstate(all='ignore'):
-            import warnings
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
-                med = np.nanmedian(cells, axis=2)
+        cells = data[:my * mesh, :mx * mesh].reshape(my, mesh, mx, mesh).swapaxes(1, 2).reshape(my, mx, -1)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            med = np.nanmedian(cells, axis=2)
         fill = np.nanmedian(med) if np.any(np.isfinite(med)) else 0.0
         med = np.where(np.isfinite(med), med, fill)
-        sky = zoom(med, (ny / my, nx / mx), order=1, mode='nearest')[:ny, :nx]
-        if sky.shape != data.shape:
-            sky = np.pad(sky, ((0, ny - sky.shape[0]), (0, nx - sky.shape[1])), mode='edge')
     else:
-        sky = np.full(data.shape, np.nanmedian(data))
+        med = np.full((1, 1), np.nanmedian(data))
+    sky = _sky_at(med, mesh, 0, ny, 0, nx)
     r = (data - sky)[np.isfinite(data)]
     rms = 1.4826 * np.median(np.abs(r - np.median(r))) if r.size else np.nan
-    return sky.astype(np.float32), float(rms)
+    return med.astype(np.float32), float(rms)
+
+
+def _sky_at(med, mesh, y0, y1, x0, x1):
+    """The sky grid interpolated (bilinear, cell centres, flat beyond the edge) on rows y0:y1,
+    columns x0:x1 of the frame; separable, so cheap for a 4k-wide strip."""
+    def axis(i0, i1, n):
+        g = np.clip((np.arange(i0, i1) + 0.5) / mesh - 0.5, 0, n - 1)
+        lo = np.floor(g).astype(int)
+        hi = np.minimum(lo + 1, n - 1)
+        return lo, hi, (g - lo).astype(np.float32)
+    ylo, yhi, fy = axis(y0, y1, med.shape[0])
+    xlo, xhi, fx = axis(x0, x1, med.shape[1])
+    rows = med[ylo] * (1 - fy)[:, None] + med[yhi] * fy[:, None]
+    return (rows[:, xlo] * (1 - fx)[None] + rows[:, xhi] * fx[None]).astype(np.float32)
+
+
+def _frame_rows(f, r0, r1):
+    """Rows r0:r1 of a projected frame: the unweighted data D (NaN where not covered) and its
+    weight W = area * w * S (0 there)."""
+    img = np.asarray(f['hi'][0].section[r0:r1, :], dtype=np.float32)
+    w_all = (np.asarray(f['hw'][0].section[r0:r1, :], dtype=np.float32) if f['hw'] is not None else
+             np.where(np.isfinite(img), np.float32(f['w']), np.float32(0)))
+    area = (np.asarray(f['ha'][0].section[r0:r1, :], dtype=np.float32) if f['ha'] is not None else
+            np.isfinite(img).astype(np.float32))
+    with np.errstate(all='ignore'):
+        D = np.where((w_all > 0) & np.isfinite(img), img / w_all, np.nan).astype(np.float32)
+    W = np.nan_to_num(area * w_all, nan=0.0).astype(np.float32)
+    W[~np.isfinite(D)] = 0
+    return D, W
 
 
 def _placement(hdr, skel):
@@ -94,24 +120,26 @@ def clipped_stack(frames, skel, output, weight_output=None, reject_output=None, 
     for f in frames:
         h = fits.getheader(f['image'])
         ox, oy = _placement(h, skel)
-        img = fits.getdata(f['image']).astype(np.float32)
-        w_all = (fits.getdata(f['weight']).astype(np.float32) if f.get('weight') else
-                 np.where(np.isfinite(img), np.float32(f['w']), np.float32(0)))
+        # rows are read with .section (seeks, no mapping: 25 SBT frames would otherwise sit in the
+        # process as mapped pages)
+        hi = fits.open(f['image'], memmap=False, lazy_load_hdus=True)
+        hw = fits.open(f['weight'], memmap=False, lazy_load_hdus=True) if f.get('weight') else None
         try:
-            area = fits.getdata(_area_name(f['image'])).astype(np.float32)
+            ha = fits.open(_area_name(f['image']), memmap=False, lazy_load_hdus=True)
         except (OSError, FileNotFoundError):
-            area = np.isfinite(img).astype(np.float32)
-        with np.errstate(all='ignore'):
-            D = np.where((w_all > 0) & np.isfinite(img), img / w_all, np.nan).astype(np.float32)
-        sky, rms = _sky(D)
-        k = 10 ** (0.4 * (zp_ref - f['zp'])) if zp_ref is not None and f.get('zp') is not None else 1.0
-        W = np.nan_to_num(area * w_all, nan=0.0).astype(np.float32)
-        W[~np.isfinite(D)] = 0
-        info.append(dict(D=D, sky=sky, rms=rms, k=float(k), W=W, ox=ox, oy=oy,
-                         gain=float(f.get('gain') or 1.0)))
+            ha = None
+        fr = dict(hi=hi, hw=hw, ha=ha, w=float(f['w']), ox=ox, oy=oy,
+                  shape=(int(hi[0].header['NAXIS2']), int(hi[0].header['NAXIS1'])),
+                  gain=float(f.get('gain') or 1.0))
+        D, _ = _frame_rows(fr, 0, fr['shape'][0])
+        fr['med'], fr['rms'] = _sky(D)
+        fr['npix'] = int(np.isfinite(D).sum())
+        del D
+        fr['k'] = float(10 ** (0.4 * (zp_ref - f['zp']))) if zp_ref is not None and f.get('zp') is not None else 1.0
+        info.append(fr)
         if verbose:
-            print(f"stack: {f['image'].split('/')[-1]}: offset ({ox},{oy}) size {D.shape[1]}x{D.shape[0]}, "
-                  f"sky rms {rms:.2f}, scale {k:.3f}")
+            print(f"stack: {f['image'].split('/')[-1]}: offset ({ox},{oy}) size {fr['shape'][1]}x{fr['shape'][0]}, "
+                  f"sky rms {fr['rms']:.2f}, scale {fr['k']:.3f}")
 
     out = np.full((ny, nx), np.nan, np.float32)
     wsum = np.zeros((ny, nx), np.float32)
@@ -130,19 +158,20 @@ def clipped_stack(frames, skel, output, weight_output=None, reject_output=None, 
         S = np.full((n, h, nx), np.inf, np.float32)
         for i, f in enumerate(info):
             fy0, fy1 = ya - f['oy'], yb - f['oy']
-            sy0, sy1 = max(0, fy0), min(f['D'].shape[0], fy1)
+            sy0, sy1 = max(0, fy0), min(f['shape'][0], fy1)
             if sy1 <= sy0:
                 continue
-            fx0, fx1 = max(0, -f['ox']), min(f['D'].shape[1], nx - f['ox'])
+            fx0, fx1 = max(0, -f['ox']), min(f['shape'][1], nx - f['ox'])
             if fx1 <= fx0:
                 continue
             ty0, tx0 = sy0 - fy0, fx0 + f['ox']
-            d = f['D'][sy0:sy1, fx0:fx1]
-            s = f['sky'][sy0:sy1, fx0:fx1]
+            d, wf = _frame_rows(f, sy0, sy1)
+            d, wf = d[:, fx0:fx1], wf[:, fx0:fx1]
+            s = _sky_at(f['med'], MESH, sy0, sy1, fx0, fx1)
             sl = (i, slice(ty0, ty0 + (sy1 - sy0)), slice(tx0, tx0 + (fx1 - fx0)))
             Dc[sl] = d
             Sk[sl] = s
-            Wc[sl] = f['W'][sy0:sy1, fx0:fx1]
+            Wc[sl] = wf
             X[sl] = f['k'] * (d - s)
             S[sl] = f['k'] * np.sqrt(f['rms'] ** 2 + np.clip(d - s, 0, None) / f['gain'])
         ok = np.isfinite(X) & (Wc > 0)
@@ -209,7 +238,11 @@ def clipped_stack(frames, skel, output, weight_output=None, reject_output=None, 
         fits.writeto(weight_output, wsum, hdr, overwrite=True)
     if reject_output:
         fits.writeto(reject_output, nrej, hdr, overwrite=True)
-    npix = np.array([np.isfinite(f['D']).sum() for f in info])
+    npix = np.array([f['npix'] for f in info])
+    for f in info:
+        for k in ('hi', 'hw', 'ha'):
+            if f[k] is not None:
+                f[k].close()
     frac = total_rej / np.maximum(npix, 1)
     if verbose:
         print(f"stack: {n} frames, {int(total_rej.sum())} pixels rejected "
