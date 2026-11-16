@@ -198,7 +198,7 @@ class Catalog(astropy.table.Table):
             'epoch': 2016.0,
             'local': True,
             'service': 'local',
-            'filepath': '/home/mates/gaia_bright_stars.fits'
+            'filepath': '/home/mates/cat/gaia_bright_stars.fits'
         },
         USNOB: {
             'description': 'USNO-B1.0 Catalog',
