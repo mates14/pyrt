@@ -30,6 +30,7 @@ between the first and second half of the frames), MINOR_PLANET (on a SkyBoT trac
 error box first, then by distance in box radii and S/N."""
 
 import os
+import time
 import warnings
 
 import numpy as np
@@ -128,7 +129,9 @@ def known_sources(ra, dec, radius, cache=None, verbose=False):
     if cache and os.path.exists(cache):
         t = astropy.table.Table.read(cache, format='ascii.ecsv')
         m = t.meta
-        if _sep(m.get('RA', np.nan), m.get('DEC', np.nan), ra, dec) / 3600 + radius <= m.get('RADIUS', -1):
+        # an incomplete cache (a service did not answer) is retried after an hour
+        stale = bool(m.get('INCOMPLETE')) and time.time() - os.path.getmtime(cache) > 3600
+        if not stale and _sep(m.get('RA', np.nan), m.get('DEC', np.nan), ra, dec) / 3600 + radius <= m.get('RADIUS', -1):
             if verbose:
                 print(f"deepfield: {len(t)} known objects from {cache}")
             return t
@@ -213,6 +216,7 @@ def known_sources(ra, dec, radius, cache=None, verbose=False):
     t = astropy.table.vstack(parts)
     t.meta.update(RA=float(ra), DEC=float(dec), RADIUS=float(radius), SOURCES=sorted(str(s) for s in set(t['SRC'])))
     if failed:
+        t.meta['INCOMPLETE'] = True
         print(f"deepfield: the known objects are from {', '.join(t.meta['SOURCES'])} only")
     if cache:                     # what was had; delete the file to query again
         t.write(cache, format='ascii.ecsv', overwrite=True)
