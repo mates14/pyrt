@@ -204,7 +204,7 @@ def known_sources(ra, dec, radius, cache=None, verbose=False):
     if not parts:
         return None
     t = astropy.table.vstack(parts)
-    t.meta.update(RA=float(ra), DEC=float(dec), RADIUS=float(radius), SOURCES=sorted(set(t['SRC'])))
+    t.meta.update(RA=float(ra), DEC=float(dec), RADIUS=float(radius), SOURCES=sorted(str(s) for s in set(t['SRC'])))
     if failed:
         print(f"deepfield: the known objects are from {', '.join(t.meta['SOURCES'])} only")
     if cache:                     # what was had; delete the file to query again
@@ -580,7 +580,7 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
     out.meta['CONC_STARS'] = conc0
     out.meta['CHIP_DRIFT'] = chip_drift
     out.meta['N_KNOWN'] = int(np.sum(isknown))
-    out.meta['KNOWN_SRC'] = list(known.meta.get('SOURCES', sorted(set(known['SRC'])))) if known is not None and len(known) else []
+    out.meta['KNOWN_SRC'] = [str(s) for s in known.meta.get('SOURCES', sorted(set(known['SRC'])))] if known is not None and len(known) else []
     out.meta['N_OBJECTS'] = len(deep)
     return out
 
