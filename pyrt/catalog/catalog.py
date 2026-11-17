@@ -350,6 +350,12 @@ class Catalog(astropy.table.Table):
                 continue
 
             directory = os.path.join(self._query_params.atlas_dir, dirname)
+            if not os.path.isdir(directory):
+                # a partial copy (FRAM: only 00_m_16, the full catalogue is 160 GB)
+                # is a shallower catalogue, not an error
+                logging.warning(f"ATLAS {dirname} not installed ({directory}), "
+                                f"catalogue limited to r < {magspl}")
+                break
             new_data = self._get_atlas_split(directory)
             if new_data is None:
                 continue
