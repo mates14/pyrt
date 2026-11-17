@@ -149,10 +149,17 @@ def known_sources(ra, dec, radius, cache=None, verbose=False):
             print(f"deepfield: no local ATLAS-RefCat2 ({e})")
     if dec > -30:
         try:
-            from astroquery.mast import Catalogs
-            r = Catalogs.query_region(f"{ra} {dec}", radius=radius, catalog='Panstarrs', data_release='dr2',
-                                      table='mean', columns=['raMean', 'decMean', 'nDetections', 'rMeanPSFMag'],
-                                      nDetections=[('gte', MIN_DET)])
+            # the MAST catalog API directly: older astroquery (0.4.6, Debian 12) builds
+            # requests the current API rejects (422 Unprocessable Content)
+            import requests
+            from astropy.io import ascii as _ascii
+            rr = requests.get("https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/dr2/mean.csv", timeout=180,
+                              params={'ra': ra, 'dec': dec, 'radius': radius, 'nDetections.gte': MIN_DET,
+                                      'columns': '[raMean,decMean,rMeanPSFMag]', 'pagesize': 500000})
+            rr.raise_for_status()
+            if not rr.text.startswith('raMean'):
+                raise RuntimeError(rr.text[:200])
+            r = _ascii.read(rr.text, format='csv')
             p = astropy.table.Table([np.asarray(r['raMean'], float), np.asarray(r['decMean'], float)],
                                     names=('RA', 'DEC'))
             p['MAG'] = np.where(np.asarray(r['rMeanPSFMag'], float) > 0, np.asarray(r['rMeanPSFMag'], float), np.nan)
