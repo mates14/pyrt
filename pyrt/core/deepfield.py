@@ -687,7 +687,10 @@ def report(res, deep, trigger=None, top=10, verbose=False):
     lines.append("; ".join(head))
     new = res[res['CLASS'] == 'NEW']
     hasbox = len(res) and np.any(np.isfinite(res['DIST_BOX']))
-    near = new[np.nan_to_num(new['DIST_BOX'], nan=1e9) <= NEAR_BOX] if hasbox else new[:0]
+    # in the error box an unknown object VARIABLE in the frames (a fading afterglow is just that)
+    # is a candidate as much as a NEW one
+    nv = res[(res['CLASS'] == 'NEW') | (res['CLASS'] == 'VARIABLE')]
+    near = nv[np.nan_to_num(nv['DIST_BOX'], nan=1e9) <= NEAR_BOX] if hasbox else new[:0]
     far = new[~(np.nan_to_num(new['DIST_BOX'], nan=1e9) <= NEAR_BOX)] if hasbox else new
     if not hasbox:
         lines.append(f"VERDICT: {len(new)} new object(s), no trigger position to compare with")
@@ -708,7 +711,8 @@ def report(res, deep, trigger=None, top=10, verbose=False):
     for r in near:
         why, warn = _why(r, conc0, res.meta.get('CHIP_DRIFT', 0.0))
         lines.append(f"  CANDIDATE {r['RA']:.5f} {r['DEC']:+.5f}  {band} = {r['MAG']:.2f} ± {r['MAGERR']:.2f}"
-                     f"  {r['DIST']:.2f}' from the trigger position ({r['DIST_BOX']:.1f} box radii)")
+                     f"  {r['DIST']:.2f}' from the trigger position ({r['DIST_BOX']:.1f} box radii)"
+                     + (f"  VARIABLE in the frames (chi2/ndf {r['CHI2_FRAMES']:.1f})" if r['CLASS'] == 'VARIABLE' else ''))
         lines.append(f"            {why}")
         for w in warn:
             lines.append(f"            caution: {w}")
