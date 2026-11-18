@@ -47,6 +47,7 @@ DEEP_SN = 5.0        # a NEW below this S/N in the deep image is MARGINAL: the f
 LS_MAG = 23.0        # Legacy Survey DR10 (south of PS1) to this r (or z) magnitude
 KNOWN_DMAG = 2.5    # [mag] a known object this much fainter than a detection does not explain it
 MATCH_FWHM = 0.5     # ... or within this many stars' FWHM, if more (centroids scatter with the seeing)
+MIN_BOX_ARCSEC = 5.0  # error-box floor [arcsec] when the stars' FWHM is unknown
 EXT_FWHM = 1.8       # FWHM above this times the stars' median: extended
 SN_FRAMES = 3.0      # S/N of the frames together (and without the best one) to be "in the frames"
 CHI2_CONST = 3.0     # chi2/ndf of the frame fluxes above this: VARIABLE
@@ -498,7 +499,12 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
     isknown = dkn < match
     extended = np.isfinite(fwhm) & (fwhm > EXT_FWHM * fwhm0)
     # phcat's forced measurement at the RTS2 target position (NUMBER 0) is not a detection
-    forced = np.asarray(deep['NUMBER']) == 0 if 'NUMBER' in deep.colnames else np.zeros(len(deep), bool)
+    num0 = np.asarray(deep['NUMBER']) == 0 if 'NUMBER' in deep.colnames else np.zeros(len(deep), bool)
+    forced = num0.copy()
+    # ... nor is a copy of it under another NUMBER (the coadd's catalogue carries it twice):
+    # it would come out as a "detection" with the forced aperture's FWHM (EXTENDED, usually)
+    for k in np.flatnonzero(num0):
+        forced |= (np.abs(ra - ra[k]) < 1e-6) & (np.abs(de - de[k]) < 1e-6)
     cand = np.flatnonzero(~isknown & ~forced)
     if verbose:
         print(f"deepfield: {len(deep)} objects, {np.sum(isknown)} known (within {match:.1f}\"), {len(cand)} candidates"
@@ -576,6 +582,11 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
             cls.append('NEW')
     out['CLASS'] = cls
     if trigger is not None and np.isfinite(trigger.get('ra', np.nan)):
+        # an error box below the image's own resolution (an arcsecond XRT/optical position on
+        # 2-6" pixels) is compared at one stellar FWHM: a real detection's centroid scatters that much
+        floor = (fwhm0 * sc if np.isfinite(fwhm0) and np.isfinite(sc) else MIN_BOX_ARCSEC) / 3600
+        if not trigger.get('errorbox', 0) >= floor:
+            trigger = dict(trigger, errorbox=floor, errorbox_floor=True)
         from pyrt.utils.grbinfo import errorbox_distance
         d = np.array([errorbox_distance(trigger, float(a), float(b)) for a, b in zip(out['RA'], out['DEC'])]).reshape(-1, 2)
         out['DIST'], out['DIST_BOX'] = d[:, 0] * 60, d[:, 1]
@@ -593,6 +604,18 @@ def deep_search(deep, frames=(), trigger=None, known=None, image=None, diff=None
     out.meta['N_KNOWN'] = int(np.sum(isknown))
     out.meta['KNOWN_SRC'] = [str(s) for s in known.meta.get('SOURCES', sorted(set(known['SRC'])))] if known is not None and len(known) else []
     out.meta['N_OBJECTS'] = len(deep)
+    # the forced measurement at the RTS2 target position: for a precise localisation (the target
+    # position is the trigger's) the direct test, an afterglow near the limit may be found only so
+    fm = []
+    for k in np.flatnonzero(num0):
+        rec = dict(RA=float(ra[k]), DEC=float(de[k]), MAG=float(mag[k]), MAGERR=float(err[k]),
+                   KNOWN_DIST=float(dkn[k]) if np.isfinite(dkn[k]) else None)
+        if trigger is not None and trigger.get('ra') is not None:
+            from pyrt.utils.grbinfo import errorbox_distance
+            dist, box = errorbox_distance(trigger, rec['RA'], rec['DEC'])
+            rec['DIST'], rec['DIST_BOX'] = float(dist) * 60, float(box)
+        fm.append(rec)
+    out.meta['FORCED'] = fm
     return out
 
 
@@ -672,6 +695,16 @@ def report(res, deep, trigger=None, top=10, verbose=False):
         lines.append(f"VERDICT: {len(near)} AFTERGLOW CANDIDATE(S) within {NEAR_BOX:.0f} error-box radii")
     else:
         lines.append(f"VERDICT: nothing new within {NEAR_BOX:.0f} error-box radii down to {band} = {lim:.2f}")
+    for fm in res.meta.get('FORCED', []):
+        if not np.isfinite(fm.get('MAG', np.nan)) or not np.isfinite(fm.get('MAGERR', np.nan)) or fm['MAGERR'] <= 0:
+            continue
+        if fm.get('DIST_BOX') is None or fm['DIST_BOX'] > NEAR_BOX:
+            continue
+        sn = 1.0857 / fm['MAGERR']
+        kd = fm.get('KNOWN_DIST')
+        lines.append(f"  AT THE TRIGGER POSITION (forced aperture): {band} = {fm['MAG']:.2f} ± {fm['MAGERR']:.2f}"
+                     f" (S/N {sn:.1f}{'' if sn >= 3 else ', not significant'})"
+                     + (f", a known object {kd:.1f}\" away" if kd is not None and kd < 5 else ", no known object there"))
     for r in near:
         why, warn = _why(r, conc0, res.meta.get('CHIP_DRIFT', 0.0))
         lines.append(f"  CANDIDATE {r['RA']:.5f} {r['DEC']:+.5f}  {band} = {r['MAG']:.2f} ± {r['MAGERR']:.2f}"
