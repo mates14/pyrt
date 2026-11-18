@@ -183,6 +183,9 @@ COMPOUND_PATTERNS = [
     # /images at FRAM, 2026-11). Others (BART C0) keep the mi620x fallback.
     ({"CCD_SER": "G4KF16000-0620", "PRODUCT_ID": "6205"}, "mi6205"),
     ({"CCD_SER": "G4KF16000-0620", "PRODUCT_ID": "6069"}, "mi6069"),
+    # NF4 was another G4-16000 body from 2021-12 to 2024-11: PRODUCT_ID 40032, the same
+    # truncated serial (6205 sat in WF8 then).  Own darks and flats (Karpov's masters on g).
+    ({"CCD_SER": "G4KF16000-0620", "PRODUCT_ID": "40032"}, "mi40032"),
 ]
 
 # Fallback for truncated/ambiguous serials that can't be resolved
@@ -232,6 +235,7 @@ CAMERA_DESCRIPTIONS = {
     # Ambiguous (couldn't resolve)
     "mi616x": "Moravian G4-16000 (SBT, truncated serial - C1 or C2?)",
     "mi6205": "Moravian G4-16000, PRODUCT_ID 6205 (FRAM NF4)",
+    "mi40032": "Moravian G4-16000, PRODUCT_ID 40032 (FRAM NF4 2021-12..2024-11)",
     "mi6069": "Moravian G4-16000, PRODUCT_ID 6069 (FRAM WF8)",
     "mi620x": "Moravian G4-16000 (truncated serial 0620x, no PRODUCT_ID; BART C0)",
     "mi0206": "Moravian G2-1600 (truncated serial - mi2065 or mi2066?)",
