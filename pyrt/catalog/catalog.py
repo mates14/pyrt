@@ -19,7 +19,48 @@ TableType = TypeVar("TableType", bound=astropy.table.Table)
 CatalogConfig = Dict[str, Any]
 FilterDict = Dict[str, "CatalogFilter"]
 
+
+def _gc_offsets(ra0, dec0, ra, dec):
+    """[deg] Arc distances of (ra, dec) from the N-S and E-W great circles through (ra0, dec0)
+    (atlas -rect's coordinates), and whether the point is on the near hemisphere."""
+    a0, d0 = np.radians(ra0), np.radians(dec0)
+    a, d = np.radians(np.asarray(ra, float)), np.radians(np.asarray(dec, float))
+    v = np.array([np.cos(d) * np.cos(a), np.cos(d) * np.sin(a), np.sin(d)])
+    east = np.array([-np.sin(a0), np.cos(a0), 0.0])            # pole of the N-S circle
+    north = np.array([-np.sin(d0) * np.cos(a0), -np.sin(d0) * np.sin(a0), np.cos(d0)])
+    front = np.array([np.cos(d0) * np.cos(a0), np.cos(d0) * np.sin(a0), np.sin(d0)])
+    return (np.degrees(np.arcsin(np.clip(east @ v, -1, 1))),
+            np.degrees(np.arcsin(np.clip(north @ v, -1, 1))), front @ v > 0)
+
+
+def _atlas_cover_rect(ra0, dec0, width, height, margin=0.01):
+    """[deg] atlas -rect half-extents of a rectangle around the field (half-extents width,
+    height) that holds every corner of every sqdeg file the field touches, so that refcat
+    reads them all."""
+    a0, d0 = np.radians(ra0), np.radians(dec0)
+    east = np.array([-np.sin(a0), np.cos(a0), 0.0])
+    north = np.array([-np.sin(d0) * np.cos(a0), -np.sin(d0) * np.sin(a0), np.cos(d0)])
+    front = np.array([np.cos(d0) * np.cos(a0), np.cos(d0) * np.sin(a0), np.sin(d0)])
+    # the field's outline -> its RA/Dec extent
+    t = np.linspace(-1, 1, 41)
+    sa = np.sin(np.radians(np.concatenate([t * width, t * width, np.full_like(t, -width), np.full_like(t, width)])))
+    sb = np.sin(np.radians(np.concatenate([np.full_like(t, -height), np.full_like(t, height), t * height, t * height])))
+    v = sa[:, None] * east + sb[:, None] * north + np.sqrt(np.clip(1 - sa**2 - sb**2, 0, 1))[:, None] * front
+    dec = np.degrees(np.arcsin(np.clip(v[:, 2], -1, 1)))
+    dra = (np.degrees(np.arctan2(v[:, 1], v[:, 0])) - ra0 + 180) % 360 - 180
+    d1, d2 = int(np.floor(dec.min())), int(np.ceil(dec.max()))
+    if d1 <= -90 or d2 >= 90 or np.ptp(dra) > 180:      # a pole in the field: every RA
+        ras = np.arange(0, 361)
+    else:
+        ras = np.arange(np.floor(ra0 + dra.min()), np.ceil(ra0 + dra.max()) + 1)
+    # every file corner in that extent, in the field's own coordinates
+    gr, gd = np.meshgrid(ras, np.arange(max(d1, -90), min(d2, 90) + 1))
+    dr, dd, _ = _gc_offsets(ra0, dec0, gr.ravel(), np.clip(gd.ravel(), -89.999, 89.999))
+    return max(width, np.abs(dr).max()) + margin, max(height, np.abs(dd).max()) + margin
+
+
 @dataclass
+
 class QueryParams:
     """Parameters used for catalog queries"""
     ra: Optional[float] = None
@@ -372,16 +413,16 @@ class Catalog(astropy.table.Table):
         with tempfile.NamedTemporaryFile(suffix=".ecsv", delete=False) as tmp:
             try:
                 # atlas -rect takes angular arc half-extents (+/-dR, +/-dD deg from the
-                # N-S, E-W great circles).  But refcat reads only the sqdeg files holding
-                # the rectangle's corners: once the rectangle spans more than two of them in
-                # RA within one Dec row (|Dec| > ~70 for a 0.7 deg field) the middle files
-                # are skipped and the chip's centre gets no stars (FRAM LL 52292, Dec -77:
-                # files 169 and 172 read, 170 and 171 not -> ASTCOVER 0.5, frame rejected).
-                # -rad reads every file it touches, so ask for the circumscribed circle and
-                # cut the rectangle here, by the same great-circle definition.
+                # N-S, E-W great circles).  But refcat reads only the sqdeg files that hold a
+                # corner of the area or have a corner of their own inside it; a file the area
+                # merely crosses is skipped (-rad alike).  FRAM LL 52292, Dec -77: files 170
+                # and 171 skipped between 169 and 172 -> ASTCOVER 0.5, every frame rejected;
+                # 52257, Dec -13 with -rad: 307-14 skipped, an r=9.7 star reported NEW.  So ask
+                # for a rectangle large enough to hold every corner of every file the field
+                # touches, and cut the field here, by the same great-circle definition.
                 p = self._query_params
-                rad = np.hypot(p.width, p.height)
-                cmd =   f'atlas {p.ra} {p.dec} -rad {rad:.6f} '\
+                w_q, h_q = _atlas_cover_rect(p.ra, p.dec, p.width, p.height)
+                cmd =   f'atlas {p.ra} {p.dec} -rect {w_q:.6f},{h_q:.6f} '\
                         f'-dir {directory} -mlim {p.mlim:.2f} -ecsv '
                 logging.info(f"CAT: {cmd}")
                 result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -391,15 +432,9 @@ class Catalog(astropy.table.Table):
 
                 cat = astropy.table.Table.read(tmp.name, format="ascii.ecsv")
                 if len(cat):
-                    a0, d0 = np.radians(p.ra), np.radians(p.dec)
-                    a, d = np.radians(np.asarray(cat['radeg'], float)), np.radians(np.asarray(cat['decdeg'], float))
-                    v = np.array([np.cos(d) * np.cos(a), np.cos(d) * np.sin(a), np.sin(d)])
-                    east = np.array([-np.sin(a0), np.cos(a0), 0.0])            # pole of the N-S circle
-                    north = np.array([-np.sin(d0) * np.cos(a0), -np.sin(d0) * np.sin(a0), np.cos(d0)])
-                    front = np.array([np.cos(d0) * np.cos(a0), np.cos(d0) * np.sin(a0), np.sin(d0)])
-                    dr = np.degrees(np.arcsin(np.clip(east @ v, -1, 1)))
-                    dd = np.degrees(np.arcsin(np.clip(north @ v, -1, 1)))
-                    cat = cat[(np.abs(dr) <= p.width) & (np.abs(dd) <= p.height) & (front @ v > 0)]
+                    dr, dd, front = _gc_offsets(p.ra, p.dec, np.asarray(cat['radeg'], float),
+                                                np.asarray(cat['decdeg'], float))
+                    cat = cat[(np.abs(dr) <= p.width) & (np.abs(dd) <= p.height) & front]
                 return cat
 
             finally:

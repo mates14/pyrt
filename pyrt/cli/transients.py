@@ -1123,6 +1123,27 @@ def main():
                 match, bestmag, k, nblend, resid, galaxy = best
                 bestcat = expect_cat[k]
                 mdiff = np.abs(resid)
+            # Nothing within the identification radius, but catalogued stars within one frame
+            # FWHM whose summed light explains the detection: a merged image of them, its
+            # centroid between the stars (the object-specific radius of a bright, precisely
+            # centred blend is well under the distance to either).  FRAM LL 52257, FWHM 8-13 px:
+            # r 14.54 at 3.0" and 15.13 at 5.7" on opposite sides, 13.85 measured, NEW at 13.9
+            # for an hour.  Only when not significantly brighter than the stars: a new source
+            # next to a star stays a candidate.
+            elif len(i) == 0 and len(expect):
+                close = expect_dist <= max(idlimit, det.meta['FWHM'])
+                if np.any(close & np.isfinite(expect)):
+                    blend = compare_to_catalog(magdet, error_for_comparison, expect, expect_dist,
+                        close, extended[expect_cat], blend_r, options.blend_margin, options.galaxy_margin)
+                    if blend is not None and blend[0] <= options.devsig:
+                        match, bestmag, k, nblend, resid, galaxy = blend
+                        bestcat = expect_cat[k]
+                        mdiff = np.abs(resid)
+                        i = [bestcat]
+                        if options.verbose:
+                            print("blend: %.5f %+.5f mag %.2f = %d catalogued star(s) within %.1f px (%.2f), not new"
+                                  % (d['ALPHA_J2000'], d['DELTA_J2000'], magdet, nblend,
+                                     np.max(expect_dist[close]), bestmag))
             # (catalogued but without a magnitude in PHFILTER: neither a new object nor comparable)
 
             # pet moznosti:
