@@ -372,17 +372,35 @@ class Catalog(astropy.table.Table):
         with tempfile.NamedTemporaryFile(suffix=".ecsv", delete=False) as tmp:
             try:
                 # atlas -rect takes angular arc half-extents (+/-dR, +/-dD deg from the
-                # N-S, E-W great circles), so width/height are passed directly.
-                cmd =   f'atlas {self._query_params.ra} {self._query_params.dec} '\
-                        f'-rect {self._query_params.width},{self._query_params.height} '\
-                        f'-dir {directory} -mlim {self._query_params.mlim:.2f} -ecsv '
+                # N-S, E-W great circles).  But refcat reads only the sqdeg files holding
+                # the rectangle's corners: once the rectangle spans more than two of them in
+                # RA within one Dec row (|Dec| > ~70 for a 0.7 deg field) the middle files
+                # are skipped and the chip's centre gets no stars (FRAM LL 52292, Dec -77:
+                # files 169 and 172 read, 170 and 171 not -> ASTCOVER 0.5, frame rejected).
+                # -rad reads every file it touches, so ask for the circumscribed circle and
+                # cut the rectangle here, by the same great-circle definition.
+                p = self._query_params
+                rad = np.hypot(p.width, p.height)
+                cmd =   f'atlas {p.ra} {p.dec} -rad {rad:.6f} '\
+                        f'-dir {directory} -mlim {p.mlim:.2f} -ecsv '
                 logging.info(f"CAT: {cmd}")
                 result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
                 with open(tmp.name, "w") as f:
                     f.write(result.stdout)
 
-                return astropy.table.Table.read(tmp.name, format="ascii.ecsv")
+                cat = astropy.table.Table.read(tmp.name, format="ascii.ecsv")
+                if len(cat):
+                    a0, d0 = np.radians(p.ra), np.radians(p.dec)
+                    a, d = np.radians(np.asarray(cat['radeg'], float)), np.radians(np.asarray(cat['decdeg'], float))
+                    v = np.array([np.cos(d) * np.cos(a), np.cos(d) * np.sin(a), np.sin(d)])
+                    east = np.array([-np.sin(a0), np.cos(a0), 0.0])            # pole of the N-S circle
+                    north = np.array([-np.sin(d0) * np.cos(a0), -np.sin(d0) * np.sin(a0), np.cos(d0)])
+                    front = np.array([np.cos(d0) * np.cos(a0), np.cos(d0) * np.sin(a0), np.sin(d0)])
+                    dr = np.degrees(np.arcsin(np.clip(east @ v, -1, 1)))
+                    dd = np.degrees(np.arcsin(np.clip(north @ v, -1, 1)))
+                    cat = cat[(np.abs(dr) <= p.width) & (np.abs(dd) <= p.height) & (front @ v > 0)]
+                return cat
 
             finally:
                 os.unlink(tmp.name)
