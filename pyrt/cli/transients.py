@@ -318,6 +318,23 @@ def model_magnitude(ffit, meta, rows, colors):
             rows['X_IMAGE'], rows['Y_IMAGE'],    # pixel structure
             meta['AIRMASS']))                    # absolute airmass
 
+def drop_forced(t):
+    """phcat's forced measurement at the RTS2 target position (NUMBER 0) and its copies under
+    another NUMBER (a coadd's catalogue carries it twice) are no detections: on empty sky next to a
+    star the aperture takes the star's wing (FRAM LL 52292, SVOM 261108.994: NEW 16.7 exactly at
+    the trigger position, an R 16.0 star 6" away).  pyrt.core.deepfield drops them the same way."""
+    if t is None or 'NUMBER' not in t.colnames or not len(t):
+        return t
+    num0 = np.asarray(t['NUMBER']) == 0
+    if not num0.any():
+        return t
+    ra, de = np.asarray(t['ALPHA_J2000'], float), np.asarray(t['DELTA_J2000'], float)
+    forced = num0.copy()
+    for k in np.flatnonzero(num0):
+        forced |= (np.abs(ra - ra[k]) < 1e-6) & (np.abs(de - de[k]) < 1e-6)
+    return t[~forced]
+
+
 def open_ecsv_file(arg, verbose=True):
     """Opens a file if possible, given .ecsv or .fits"""
     det = None
@@ -325,7 +342,7 @@ def open_ecsv_file(arg, verbose=True):
     fn = os.path.splitext(arg)[0] + ".ecsv"
 
     try:
-        det = astropy.table.Table.read(fn, format="ascii.ecsv")
+        det = drop_forced(astropy.table.Table.read(fn, format="ascii.ecsv"))
         det.meta['filename'] = fn;
         return det
     except:
@@ -493,7 +510,7 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
     fr = []
     for arg in options.files:
         try:
-            t = astropy.table.Table.read(arg, format='ascii.ecsv')
+            t = drop_forced(astropy.table.Table.read(arg, format='ascii.ecsv'))
         except Exception:
             continue
         if 'JD' not in t.meta or len(t) == 0:
@@ -526,7 +543,7 @@ def afterglow_report(trans, mags, flare_rec, nframes, meta, options, cat=None):
         cands.append(dict(RA=np.array([ra]), DEC=np.array([dec]), MOTION=float(oo['DPOS']), MOVE=move,
                           JD=jd, MAG=m, ERR=e, CATMAG=catmag))
     if options.deep and fr:
-        deep = astropy.table.Table.read(options.deep, format='ascii.ecsv')
+        deep = drop_forced(astropy.table.Table.read(options.deep, format='ascii.ecsv'))
         rnew = max(2.0, 1.5*float(deep.meta.get('FWHM', 2.0))*float(deep.meta.get('PIXEL', 1.0)))
         cra = np.asarray(cat['radeg'], float) if cat is not None else np.array([])
         cdec = np.asarray(cat['decdeg'], float) if cat is not None else np.array([])
@@ -641,7 +658,7 @@ def deep_check(res, options):
     if not options.deep or res is None or not len(res):
         return
     try:
-        deep = astropy.table.Table.read(options.deep, format='ascii.ecsv')
+        deep = drop_forced(astropy.table.Table.read(options.deep, format='ascii.ecsv'))
     except Exception:
         return
     rnew = max(2.0, 1.5*float(deep.meta.get('FWHM', 2.0))*float(deep.meta.get('PIXEL', 1.0)))
