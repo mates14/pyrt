@@ -136,7 +136,7 @@ def known_sources(ra, dec, radius, cache=None, verbose=False):
             if verbose:
                 print(f"deepfield: {len(t)} known objects from {cache}")
             return t
-    parts, failed = [], False
+    parts, failed, parts_meta = [], False, {}
     try:                          # the local ATLAS-RefCat2 (to ~19.5, all sky): offline, always
         from pyrt.catalog.catalog import Catalog
         w = 2 * radius / max(np.cos(np.radians(dec)), 0.1)
@@ -200,13 +200,22 @@ def known_sources(ra, dec, radius, cache=None, verbose=False):
     try:
         from astroquery.gaia import Gaia
         Gaia.ROW_LIMIT = -1
+        # brightest first: the archive cuts a large result short without a word (50000 rows of
+        # a 2.5 deg SBT field, in no order: 13 mag Gaia stars ATLAS-RefCat2 leaves out - close
+        # pairs with 2-parameter solutions - were missing and came up as bright NEWs); cut so,
+        # only the faint end goes, and ATLAS has that
         q = ("SELECT ra, dec, phot_g_mean_mag FROM gaiadr3.gaia_source WHERE "
-             f"1 = CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', {ra}, {dec}, {radius}))")
+             f"1 = CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', {ra}, {dec}, {radius})) "
+             "ORDER BY phot_g_mean_mag")
         r = Gaia.launch_job_async(q, verbose=False).get_results()
         g = astropy.table.Table([np.asarray(r['ra'], float), np.asarray(r['dec'], float)], names=('RA', 'DEC'))
         g['MAG'] = np.asarray(r['phot_g_mean_mag'], float)
         g['SRC'] = 'Gaia'
         parts.append(g)
+        if len(g) and len(g) % 1000 == 0:      # a round count: most likely the archive's cut
+            gmax = float(np.nanmax(g['MAG']))
+            parts_meta['GAIA_MAX'] = gmax
+            print(f"deepfield: Gaia DR3 cut at {len(g)} rows, complete to G {gmax:.1f}")
         if verbose:
             print(f"deepfield: Gaia DR3: {len(g)} objects")
     except Exception as e:
@@ -216,6 +225,7 @@ def known_sources(ra, dec, radius, cache=None, verbose=False):
         return None
     t = astropy.table.vstack(parts)
     t.meta.update(RA=float(ra), DEC=float(dec), RADIUS=float(radius), SOURCES=sorted(str(s) for s in set(t['SRC'])))
+    t.meta.update(parts_meta)
     if failed:
         t.meta['INCOMPLETE'] = True
         print(f"deepfield: the known objects are from {', '.join(t.meta['SOURCES'])} only")
