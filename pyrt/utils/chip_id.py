@@ -102,7 +102,8 @@ CAMERA_PATTERNS = [
     ("CCD_TYPE", "FLI CCD47-10 rev.259.785", "fli785"),
     ("CCD_TYPE", "FLI KAF1600 or similar array rev.259.785", "fli785"),
 
-    # Moravian G2-1000BI (CNF0)
+    # Moravian G2-1000BI (CNF0; FRAM-ORM C0 in 2026, there the serial is truncated:
+    # see COMPOUND_PATTERNS)
     ("CCD_SER", "G2EV01000-02596", "mi2596"),
     ("CCD_SER", "2596", "mi2596"),                 # gxccd numeric camera ID
 
@@ -186,6 +187,10 @@ COMPOUND_PATTERNS = [
     # NF4 was another G4-16000 body from 2021-12 to 2024-11: PRODUCT_ID 40032, the same
     # truncated serial (6205 sat in WF8 then).  Own darks and flats (Karpov's masters on g).
     ({"CCD_SER": "G4KF16000-0620", "PRODUCT_ID": "40032"}, "mi40032"),
+
+    # G2-1000BI truncated to "G2EV01000-0259" (FRAM-ORM C0, all of 2026): PRODUCT_ID 2596,
+    # the camera of the untruncated G2EV01000-02596 above.
+    ({"CCD_SER": "G2EV01000-0259", "PRODUCT_ID": "2596"}, "mi2596"),
 ]
 
 # Fallback for truncated/ambiguous serials that can't be resolved
@@ -193,6 +198,7 @@ TRUNCATED_FALLBACKS = {
     "G4KF16000-0616": "mi616x",   # ambiguous G4-16000 (C1 or C2?)
     "G4KF16000-0620": "mi620x",   # G4-16000 0620x without PRODUCT_ID (BART C0)
     "G2KF1600-00206": "mi0206",   # ambiguous G2-1600 (mi2065 or mi2066?)
+    "G2EV01000-0259": "mi259x",   # G2-1000BI 0259x without PRODUCT_ID
     "CCD47-10": "fli47x",         # ambiguous FLI with CCD47-10 (fli534 or fli785?)
 }
 
