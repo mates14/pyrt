@@ -13,7 +13,7 @@ import astropy.io.fits
 
 from typing import Optional, Tuple
 from pyrt.utils.file_utils import get_sextractor_binary, write_ecsv
-from pyrt.utils.camera_config import CameraParams
+from pyrt.utils.camera_config import CameraParams, readouts, KINETIC_MODES
 
 def read_options(args=sys.argv[1:]):
     parser = argparse.ArgumentParser(description="Compute photometric calibration for a FITS image.")
@@ -40,33 +40,11 @@ def gauss(r, sigma):
     '''gauss exponential'''
     return 1./sigma/np.sqrt(2*np.pi) * np.exp( -np.power(r,2)/2/sigma/sigma )
 
-KINETIC_MODES = ('kinetics', 'kinetic series', '3')
 
 def get_accnum(file):
-    '''Number of readouts summed (Andor Accumulate/Kinetic mode), 1 otherwise.
-    Summing keeps the gain, but bias, saturation and read noise scale with it.
-      - Accumulate (also kinstep's bins): ACCNUM readouts,
-      - an asarina kinetic sub-frame (KINBIN set): KINBIN x ACCNUM,
-      - COADDS (the D50 driver, since 2026-11 the frame of a kinetic series is the sum of
-        its KINNUM sub-frames, no longer their mean: sky ~135k ADU in 96 x 1.25 s, and with
-        a single readout's saturation every star was "saturated", 0 detections),
-      - other kinetic frames (the older means): ACCNUM.
-    The sub-frames and bins carry the series header (COADDS too), so their own keys first.'''
-    hdr = astropy.io.fits.getheader(file)
-    mode = str(hdr.get('ACQMODE', '')).strip().lower()
-    try:
-        acc = max(int(hdr.get('ACCNUM') or 1), 1)
-        if mode == 'accumulate':
-            return acc
-        if hdr.get('KINBIN'):
-            return acc * max(int(hdr['KINBIN']), 1)
-        if hdr.get('COADDS'):
-            return max(int(hdr['COADDS']), 1)
-        if mode in KINETIC_MODES:
-            return acc
-    except (KeyError, ValueError, TypeError):
-        pass
-    return 1
+    '''Number of readouts summed into the frame: COADDS, else the older keywords
+    (pyrt.utils.camera_config.readouts).'''
+    return readouts(astropy.io.fits.getheader(file))
 
 def get_saturation(file):
     '''Saturation level in ADU: SATURATE keyword if present, else the camera's

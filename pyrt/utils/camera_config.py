@@ -42,6 +42,39 @@ USER_FILE = '~/.config/pyrt/cameras.ini'
 _SECTION_RE = re.compile(r'^(?P<cams>[^@/]+)(?:@(?P<tel>[^@/]+))?(?:/(?P<date>\d{4}-\d{2}-\d{2}))?$')
 
 
+KINETIC_MODES = ('kinetics', 'kinetic series', '3')
+
+
+def readouts(hdr):
+    """Readouts summed into the frame of this header (gain is unchanged by summing, bias,
+    saturation and read noise scale with it).
+
+    COADDS is the authority: the rts2ng Andor driver writes it since 2026-11-03 for every
+    frame (ACCNUM in Accumulate, KINNUM x ACCNUM in a kinetic series, which became a sum
+    then; 1 otherwise), and whatever sums frames afterwards (asarina kinphot sub-frames,
+    kinstep and framestep bins) must write its own total there.  Without COADDS (older
+    frames, other cameras):
+      - Accumulate: ACCNUM,
+      - an asarina kinetic sub-frame (KINBIN): KINBIN x ACCNUM,
+      - a kinetic series frame (then a 16-bit mean of its scans): ACCNUM,
+      - 1 otherwise."""
+    try:
+        n = int(hdr.get('COADDS') or 0)
+        if n >= 1:
+            return n
+        acc = max(int(hdr.get('ACCNUM') or 1), 1)
+        mode = str(hdr.get('ACQMODE', '')).strip().lower()
+        if mode == 'accumulate':
+            return acc
+        if hdr.get('KINBIN'):
+            return acc * max(int(hdr['KINBIN']), 1)
+        if mode in KINETIC_MODES:
+            return acc
+    except (KeyError, ValueError, TypeError):
+        pass
+    return 1
+
+
 @lru_cache(maxsize=None)
 def _load(files):
     """[(file, ConfigParser)] for the files that exist"""
