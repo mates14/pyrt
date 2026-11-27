@@ -108,6 +108,7 @@ import os
 import sys
 import numpy as np
 from astropy.io import fits
+from pyrt.utils import badpix
 from astropy.wcs import WCS
 import argparse
 from pathlib import Path
@@ -1217,6 +1218,18 @@ def process_single_image(input_data):
         # Apply flat field correction to image data if available
         img_data = hdul[0].data / flat_data if flat_data is not None else hdul[0].data
 
+        # Pixels the frame's BADPIX lists (pyrt.utils.badpix) are blank in the copy that is
+        # projected: Montage skips NaN, the projected area loses their footprint, and mAdd /
+        # the clipped stack weight by area - in the coadd they are simply not there.
+        bad_y, bad_x = badpix.from_header(fits.getheader(input_file))
+        if len(bad_y) and img_data.ndim == 2:
+            ok = (bad_y < img_data.shape[0]) & (bad_x < img_data.shape[1])
+            bad_y, bad_x = bad_y[ok], bad_x[ok]
+            img_data = np.array(img_data, dtype=np.float32, copy=True)
+            img_data[bad_y, bad_x] = np.nan
+            if not quiet:
+                print(f"{Path(input_file).name}: {len(bad_y)} BADPIX pixels left out")
+
         # Process weight map if present
         if has_weight_map:
             try:
@@ -1227,6 +1240,9 @@ def process_single_image(input_data):
                 # mAdd's division produces sum(w_i*spatial_i*img_i)/sum(w_i*spatial_i)
                 with fits.open(weight_map_file) as whdul:
                     weighted_wmap = whdul[0].data / np.max(whdul[0].data) * scalar_weight
+                    if len(bad_y) and weighted_wmap.shape == img_data.shape:
+                        weighted_wmap = weighted_wmap.astype(np.float32)
+                        weighted_wmap[bad_y, bad_x] = np.nan
                     new_whdu = fits.PrimaryHDU(weighted_wmap, header=whdul[0].header)
                     new_whdul = fits.HDUList([new_whdu])
                     new_whdul.writeto(weight_map_weighted)

@@ -94,6 +94,7 @@ pyrt-ps1mosaic = "pyrt.cli.ps1mosaic:main"
 
 # Camera identification from FITS headers (registry shared with asarina)
 pyrt-chip-id = "pyrt.utils.chip_id:main"
+pyrt-badpix = "pyrt.utils.badpix:main"
 
 [tool.setuptools]
 packages = [
