@@ -1385,7 +1385,7 @@ def combine_images_montage(output, inputs, weights, skeleton_file, args):
         ]
 
         # Process images and weight maps in parallel
-        max_workers = min(mp.cpu_count(), len(process_inputs))
+        max_workers = max(1, min(getattr(args, 'num_processes', None) or mp.cpu_count(), len(process_inputs)))
         if not quiet:
             print(f"Processing images using {max_workers} processes...")
 
